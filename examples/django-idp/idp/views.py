@@ -71,7 +71,7 @@ def error(request):
 def sso(request):
     try:
         saml_text, relay_state = sl.decode_authn_request(
-            request.method, request.META.get("QUERY_STRING", ""), request.POST.dict()
+            request.method, request.META.get("QUERY_STRING", ""), request.POST
         )
         authn = sl.parse_authn(saml_text)
     except Exception as exc:  # noqa: BLE001

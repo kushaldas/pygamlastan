@@ -404,6 +404,22 @@ def test_redirect_roundtrip():
     assert dec.saml_text.startswith("<samlp:AuthnRequest")
 
 
+def test_redirect_encode_sha1_rejection_is_binding_error(rsa_keypair):
+    """Binding-level SHA-1 rejection should not wrap a crypto exception string."""
+    priv, _cert, _cert_b64 = rsa_keypair
+    signer = crypto.SamlSigner.from_pem(priv)
+    sha1_uri = "http://www.w3.org/2000/09/xmldsig#rsa-sha1"
+    msg = b'<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ID="_r1" Version="2.0" IssueInstant="2026-06-24T10:00:00Z"/>'
+
+    with pytest.raises(pygamlastan.SamlBindingError,
+                       match="SHA-1 signature algorithms") as excinfo:
+        bindings.redirect_encode(
+            msg, True, "https://idp.example.org/sso",
+            signer=signer, sig_alg=sha1_uri,
+        )
+    assert "SamlCryptoError" not in str(excinfo.value)
+
+
 def test_post_roundtrip():
     """HTTP-POST encode emits a self-submitting form; decode reverses it.
 

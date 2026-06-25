@@ -16,7 +16,7 @@ use gamlastan::bindings as gb;
 use gb::HttpRequest;
 
 use crate::convert::new_submodule;
-use crate::crypto::{reject_weak_signature_algorithm, SamlSigner};
+use crate::crypto::SamlSigner;
 use crate::errors::binding_err;
 
 /// Adapter implementing gamlastan's `HttpRequest` from plain Python data.
@@ -75,6 +75,21 @@ impl HttpRequest for PyHttpRequest {
     fn remote_addr(&self) -> Option<&str> {
         None
     }
+}
+
+fn reject_weak_binding_signature_algorithm(
+    algorithm_uri: &str,
+    unsafe_allow_weak_sha1: bool,
+) -> PyResult<()> {
+    let normalized = algorithm_uri.to_ascii_lowercase();
+    if unsafe_allow_weak_sha1 || (!normalized.contains("sha1") && !normalized.contains("sha-1")) {
+        return Ok(());
+    }
+
+    Err(binding_err(
+        "SHA-1 signature algorithms are rejected by default; set \
+         unsafe_allow_weak_sha1=True only for legacy interoperability",
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +189,7 @@ fn redirect_encode(
     };
     let signer_pair = match (signer, sig_alg) {
         (Some(s), Some(a)) => {
-            reject_weak_signature_algorithm(a, unsafe_allow_weak_sha1).map_err(binding_err)?;
+            reject_weak_binding_signature_algorithm(a, unsafe_allow_weak_sha1)?;
             Some((&s.inner, a))
         }
         (Some(_), None) => {
