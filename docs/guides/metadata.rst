@@ -23,6 +23,14 @@ Parse an aggregate (``<md:EntitiesDescriptor>``) into a list of entities:
    for ed in metadata.parse_entities(federation_xml):
        print(ed.entity_id)
 
+Two distribution shapes exist in the wild: a single **aggregate** file holding
+the whole federation (parse it with :func:`~pygamlastan.metadata.parse_entities`,
+as above) and **MDQ**, the Metadata Query Protocol, which serves one entity at a
+time from ``{base}/entities/{url-encoded entityID}``. MDQ responses must be
+signature-verified against the federation signing cert before trust. See
+:doc:`idp_integration` and :doc:`sp_integration` for resolving SP/IdP metadata
+from either source, including the SWAMID MDQ base-URL and signer-cert pitfalls.
+
 Endpoints
 ---------
 
