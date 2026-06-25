@@ -1,0 +1,24 @@
+{% extends "idp/base.html" %}
+{% block content %}
+<h1>Identity Provider</h1>
+
+<div class="card">
+  <div><strong>Entity ID:</strong> <code>{{ cfg.entity_id }}</code></div>
+  <div><strong>Metadata:</strong> <a href="{% url 'idp:metadata' %}">{{ cfg.metadata_url }}</a></div>
+  <div><strong>SSO endpoint:</strong> <code>{{ cfg.sso_url }}</code> (HTTP-Redirect &amp; HTTP-POST)</div>
+</div>
+
+<h2>Service Provider resolution</h2>
+<div class="card">
+  <div><strong>Local metadata files:</strong> {{ file_sp_count }} SP(s) (trusted; keys embedded in the files)</div>
+  <div><strong>MDQ service:</strong> {% if mdq_url %}<code>{{ mdq_url }}</code>{% else %}disabled{% endif %}</div>
+  <div><strong>MDQ signing cert:</strong> {% if metadata_cert %}<code>{{ metadata_cert }}</code> (verification mandatory){% else %}&mdash;{% endif %}</div>
+</div>
+<p>There is no local SP database. An SP is resolved when it sends an
+<code>AuthnRequest</code>: first from local metadata files (self-contained,
+trusted as provided), then from MDQ (signature-verified against the cert).</p>
+
+{% if not user.is_authenticated %}
+  <p><a href="{% url 'idp:login' %}">Log in</a></p>
+{% endif %}
+{% endblock %}

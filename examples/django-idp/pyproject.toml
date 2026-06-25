@@ -1,0 +1,17 @@
+[project]
+name = "django-idp"
+version = "0.1.0"
+description = "A minimal, self-contained SAML 2.0 Identity Provider built on Django and pygamlastan"
+requires-python = ">=3.12"
+dependencies = [
+    "django==6.0.6",
+    "pygamlastan>=0.1",
+    "cryptography>=42",
+    "gunicorn>=22",
+    "whitenoise>=6",
+]
+
+# This project is run, not packaged/installed. uv uses the dependency list above
+# (`uv pip install` / `uv sync`). Until pygamlastan is published to PyPI, build a
+# wheel from the repo root (`maturin build --release`) and drop it in ./wheels;
+# the Dockerfile installs with `--find-links ./wheels` so the local wheel wins.

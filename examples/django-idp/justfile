@@ -1,0 +1,119 @@
+# pygamlastan Django SAML IdP - common tasks.
+# Run `just` to list recipes.
+
+# Load .env so recipes see IDP_DOMAIN (same file docker compose reads).
+set dotenv-load := true
+
+# Common Name baked into the self-signed IdP certificate.
+idp_cn := "pygamlastan-django-idp"
+
+# SWAMID metadata signing certificate (PEM). Used to verify every MDQ response.
+# This default is the SWAMID *QA* signer, matching the QA MDQ in .env
+# (https://mds.swamid.se/qa/). For the production federation use the prod signer
+# instead: `just swamid-cert https://mds.swamid.se/md/md-signer2.crt`.
+swamid_cert_url := "https://mds.swamid.se/qa/md/swamid-qa.crt"
+
+# Default: list available recipes.
+default:
+    @just --list
+
+# Generate the IdP signing key + self-signed certificate in ./data if missing.
+keygen:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p data
+    if [[ -f data/idp_key.pem && -f data/idp_cert.pem ]]; then
+        echo "IdP key/cert already present in ./data"
+    else
+        openssl req -x509 -newkey rsa:2048 -nodes -days 1825 \
+            -keyout data/idp_key.pem -out data/idp_cert.pem \
+            -subj "/CN={{idp_cn}}"
+        echo "Generated ./data/idp_key.pem and ./data/idp_cert.pem"
+    fi
+
+# Create a locally-trusted TLS cert/key for $IDP_DOMAIN with mkcert, for Caddy.
+# Idempotent (delete ./data/caddy to regenerate). `mkcert -install` adds the
+# local CA to your trust store the first time (may prompt for sudo).
+tls:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    domain="${IDP_DOMAIN:-localhost}"
+    mkdir -p data/caddy
+    if [[ -f data/caddy/cert.pem && -f data/caddy/key.pem ]]; then
+        echo "TLS cert already present in ./data/caddy for a domain (delete to regenerate)"
+    else
+        mkcert -install
+        mkcert -cert-file data/caddy/cert.pem -key-file data/caddy/key.pem "$domain"
+        echo "Generated mkcert TLS cert/key for ${domain} in ./data/caddy"
+    fi
+
+# Build a pygamlastan wheel from the repo and stage it in ./wheels.
+# Only needed until pygamlastan is published to PyPI. Requires Rust + maturin.
+wheel:
+    cd ../.. && maturin build --release
+    cp ../../target/wheels/pygamlastan-*.whl wheels/
+    @echo "Staged pygamlastan wheel in ./wheels"
+
+# Build the IdP image.
+build:
+    docker compose build
+
+# Generate IdP keys, the MDQ signing cert, and mkcert TLS certs, then start.
+up: keygen swamid-cert tls
+    docker compose up -d --build
+    @echo "IdP running at https://${IDP_DOMAIN:-localhost}/"
+    @echo "Demo login: angela (or pamela, sandra, ...) / gamlastan   |   Admin: admin / admin at /admin/"
+
+# Stop and remove the containers.
+down:
+    docker compose down
+
+# Follow container logs.
+logs:
+    docker compose logs -f
+
+# Restart the IdP service only.
+restart:
+    docker compose restart idp
+
+# Fetch the SWAMID metadata signing certificate (mandatory for the MDQ path).
+#
+# SWAMID is the Swedish academic identity federation. SPs are resolved on demand
+# from its MDQ service (SAML_IDP_MDQ_URL in .env); every MDQ response is
+# signature-verified against this certificate before the SP is trusted.
+# Idempotent; override the URL for the QA signer if needed:
+#   just swamid-cert url=https://...
+swamid-cert url=swamid_cert_url:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p data
+    if [[ -f data/swamid-signing.pem ]]; then
+        echo "SWAMID signing cert already present (data/swamid-signing.pem)"
+    else
+        curl -fsSL "{{url}}" -o data/swamid-signing.pem
+        echo "Fetched SWAMID signing cert -> data/swamid-signing.pem"
+    fi
+
+# Add a local SP by dropping its (self-contained) metadata XML into the metadata
+# dir. No DB, no MDQ - the file is read at startup and trusted as provided.
+add-sp FILE:
+    mkdir -p data/metadata
+    cp "{{FILE}}" data/metadata/
+    docker compose restart idp
+    @echo "Added {{FILE}} to ./data/metadata; loaded at IdP startup."
+
+# Reload local metadata files after changing ./data/metadata.
+reload-metadata:
+    docker compose restart idp
+
+# Print the IdP metadata (through Caddy; -k accepts the local CA).
+metadata:
+    curl -sk "https://${IDP_DOMAIN:-localhost}/idp/metadata"
+
+# Open a Django shell inside the running container.
+shell:
+    docker compose exec idp python manage.py shell
+
+# Create another Django superuser interactively.
+createsuperuser:
+    docker compose exec idp python manage.py createsuperuser

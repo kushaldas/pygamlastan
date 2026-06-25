@@ -1,0 +1,56 @@
+# Run the IdP behind a Caddy reverse proxy that terminates TLS.
+#
+# Set IDP_DOMAIN to a real hostname for automatic Let's Encrypt certificates;
+# the default "localhost" makes Caddy serve HTTPS with its own local CA.
+services:
+  idp:
+    build: .
+    environment:
+      SAML_IDP_BASE_URL: "https://${IDP_DOMAIN:-localhost}"
+      SAML_IDP_ENTITY_ID: "https://${IDP_DOMAIN:-localhost}/idp/metadata"
+      DJANGO_ALLOWED_HOSTS: "${IDP_DOMAIN:-localhost},localhost,idp"
+      DJANGO_CSRF_TRUSTED: "https://${IDP_DOMAIN:-localhost}"
+      DJANGO_DEBUG: "0"
+      DJANGO_SECRET_KEY: "${DJANGO_SECRET_KEY:-dev-insecure-change-me}"
+      SAML_IDP_DATA_DIR: "/data"
+      # SP metadata sources (no local DB):
+      #  - local files in /data/metadata: trusted as provided (SP keys embedded)
+      #  - MDQ: fetched on demand and signature-verified against the cert (which
+      #    is mandatory whenever MDQ is set; enforced by a Django system check)
+      SAML_IDP_METADATA_DIR: "/data/metadata"
+      SAML_IDP_MDQ_URL: "${SAML_IDP_MDQ_URL:-}"
+      SAML_IDP_METADATA_CERT: "${SAML_IDP_METADATA_CERT:-}"
+      # Support contact shown on the error page (metadata errorURL target):
+      SAML_IDP_SUPPORT_EMAIL: "${SAML_IDP_SUPPORT_EMAIL:-}"
+      # Home-org scope for scoped attributes (eduPersonPrincipalName etc.):
+      SAML_IDP_SCOPE: "${SAML_IDP_SCOPE:-}"
+      # Demo accounts created on first boot (override or remove for real use):
+      DJANGO_ADMIN_USERNAME: "${DJANGO_ADMIN_USERNAME:-admin}"
+      DJANGO_ADMIN_PASSWORD: "${DJANGO_ADMIN_PASSWORD:-admin}"
+      # Shared password for the seeded demo users (angela, pamela, sandra, ...):
+      DEMO_PASSWORD: "${DEMO_PASSWORD:-gamlastan}"
+    volumes:
+      - ./data:/data
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    depends_on:
+      - idp
+    environment:
+      IDP_DOMAIN: "${IDP_DOMAIN:-localhost}"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/caddy:/certs:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

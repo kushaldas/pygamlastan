@@ -1,0 +1,25 @@
+{% extends "idp/base.html" %}
+{% block title %}Sign-in problem &middot; pygamlastan SAML IdP{% endblock %}
+{% block content %}
+<h1>Something went wrong signing you in</h1>
+
+{% if message %}
+  <p class="err">{{ message }}</p>
+{% else %}
+  <p>This authentication request could not be completed.</p>
+{% endif %}
+
+<p>Please return to the service you came from and try again. If the problem
+persists, contact support{% if cfg.support_email %} at
+<a href="mailto:{{ cfg.support_email }}">{{ cfg.support_email }}</a>{% endif %}
+and include the details below.</p>
+
+<div class="card">
+  <div><strong>Identity Provider:</strong> <code>{{ cfg.entity_id }}</code></div>
+  {% for key, value in context.items %}
+    <div><strong>{{ key }}:</strong> <code>{{ value }}</code></div>
+  {% endfor %}
+</div>
+
+<p><a href="{% url 'idp:index' %}">Back to the IdP home page</a></p>
+{% endblock %}

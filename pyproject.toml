@@ -1,0 +1,44 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "pygamlastan"
+version = "0.1.0"
+description = "Python bindings for the gamlastan SAML 2.0 library"
+requires-python = ">=3.10"
+license = "BSD-2-Clause"
+readme = "README.md"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: System :: Systems Administration :: Authentication/Directory",
+]
+
+[project.urls]
+Repository = "https://github.com/kushaldas/pygamlastan"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+docs = [
+    "sphinx==9.1.0",
+    "furo",
+]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+python-source = "python"
+module-name = "pygamlastan._native"
+
+[tool.pytest.ini_options]
+markers = [
+    "pkcs11: tests requiring a SoftHSM2 token (auto-skip if unavailable)",
+]

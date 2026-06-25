@@ -1,0 +1,17 @@
+{% extends "idp/base.html" %}
+{% block title %}Log in &middot; pygamlastan SAML IdP{% endblock %}
+{% block content %}
+<h1>Log in</h1>
+{% if pending %}
+  <p>A Service Provider is requesting authentication. Sign in to continue.</p>
+{% endif %}
+{% if error %}<p class="err">{{ error }}</p>{% endif %}
+<form method="post">
+  {% csrf_token %}
+  <label for="id_username">Username</label>
+  <input id="id_username" name="username" autocomplete="username" autofocus>
+  <label for="id_password">Password</label>
+  <input id="id_password" name="password" type="password" autocomplete="current-password">
+  <button type="submit">Sign in</button>
+</form>
+{% endblock %}
