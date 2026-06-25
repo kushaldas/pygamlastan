@@ -105,7 +105,7 @@ fn extract_name_id(assertion: &GAssertion) -> PyResult<ExtractedNameId> {
     let subject = assertion
         .subject
         .as_ref()
-        .ok_or_else(|| profile_err("assertion subject has no NameID"))?;
+        .ok_or_else(|| profile_err("assertion subject has no Subject"))?;
 
     match &subject.name_id {
         Some(NameIdOrEncryptedId::NameId(nid)) => Ok((
