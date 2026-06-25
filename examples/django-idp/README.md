@@ -66,7 +66,9 @@ it at your host so the browser can reach it:
 echo "127.0.0.1 idp.gamlastan.sverige" | sudo tee -a /etc/hosts
 ```
 
-Demo credentials created on first boot:
+#### Demo credentials
+
+Created on first boot:
 
 | Who   | Username | Password    | Where           |
 |-------|----------|-------------|-----------------|
