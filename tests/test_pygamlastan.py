@@ -22,7 +22,7 @@ self-skips when SoftHSM2 tooling is absent.
 """
 
 import base64
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -534,10 +534,16 @@ def test_inmemory_replay_cache():
 
     True means "newly inserted" (not seen); the second call for the same id
     within its expiry window returns False, i.e. a detected replay.
+
+    The expiry must be in the real future: InMemoryReplayCache treats an entry as
+    a replay only while its stored expiry is greater than the wall-clock
+    ``Utc::now()`` (it ignores any caller-supplied clock), so a fixed past expiry
+    would be seen as already expired and never flagged as a replay.
     """
+    expiry = datetime.now(timezone.utc) + timedelta(seconds=300)
     cache = security.InMemoryReplayCache()
-    assert cache.check_and_insert("id-1", NOW) is True
-    assert cache.check_and_insert("id-1", NOW) is False
+    assert cache.check_and_insert("id-1", expiry) is True
+    assert cache.check_and_insert("id-1", expiry) is False
 
 
 def test_python_replay_cache_protocol():
