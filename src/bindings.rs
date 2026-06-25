@@ -1,21 +1,22 @@
 //! Bindings for `gamlastan::bindings` - HTTP-Redirect / HTTP-POST / Artifact
-//! encode & decode as plain data functions over Python dicts and bytes.
+//! encode & decode as plain data functions over Python values and bytes.
 //!
 //! gamlastan's decode functions are generic over an `HttpRequest` trait used to
 //! wire framework request objects. Python web frameworks each have their own
 //! request type, so we provide a tiny `PyHttpRequest` adapter built from plain
-//! query/form parameter dicts and expose `*_decode(params)` functions.
+//! query strings / duplicate-preserving form parameters and expose
+//! `*_decode(params)` functions.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyModule};
+use pyo3::types::{PyAny, PyBytes, PyDict, PyModule};
 
 use gamlastan::bindings as gb;
 use gb::HttpRequest;
 
 use crate::convert::new_submodule;
-use crate::crypto::SamlSigner;
+use crate::crypto::{reject_weak_signature_algorithm, SamlSigner};
 use crate::errors::binding_err;
 
 /// Adapter implementing gamlastan's `HttpRequest` from plain Python data.
@@ -29,10 +30,22 @@ struct PyHttpRequest {
 
 impl PyHttpRequest {
     fn get(method: &str, url: String, query: HashMap<String, String>) -> Self {
-        PyHttpRequest { method: method.to_string(), url, query, form: HashMap::new(), body: Vec::new() }
+        PyHttpRequest {
+            method: method.to_string(),
+            url,
+            query,
+            form: HashMap::new(),
+            body: Vec::new(),
+        }
     }
-    fn post(url: String, form: HashMap<String, String>) -> Self {
-        PyHttpRequest { method: "POST".to_string(), url, query: HashMap::new(), form, body: Vec::new() }
+    fn post(url: String, form: HashMap<String, String>, body: Vec<u8>) -> Self {
+        PyHttpRequest {
+            method: "POST".to_string(),
+            url,
+            query: HashMap::new(),
+            form,
+            body,
+        }
     }
 }
 
@@ -142,7 +155,10 @@ impl PostDecoded {
 
 /// Build a HTTP-Redirect URL (optionally signed) carrying a SAML message.
 #[pyfunction]
-#[pyo3(signature = (saml_xml, is_request, destination, relay_state=None, signer=None, sig_alg=None))]
+#[pyo3(signature = (
+    saml_xml, is_request, destination, relay_state=None, signer=None, sig_alg=None,
+    unsafe_allow_weak_sha1=false,
+))]
 fn redirect_encode(
     saml_xml: &[u8],
     is_request: bool,
@@ -150,13 +166,17 @@ fn redirect_encode(
     relay_state: Option<&str>,
     signer: Option<&SamlSigner>,
     sig_alg: Option<&str>,
+    unsafe_allow_weak_sha1: bool,
 ) -> PyResult<String> {
     let rs = match relay_state {
         Some(v) => Some(gb::RelayState::new(v).map_err(binding_err)?),
         None => None,
     };
     let signer_pair = match (signer, sig_alg) {
-        (Some(s), Some(a)) => Some((&s.inner, a)),
+        (Some(s), Some(a)) => {
+            reject_weak_signature_algorithm(a, unsafe_allow_weak_sha1).map_err(binding_err)?;
+            Some((&s.inner, a))
+        }
         (Some(_), None) => {
             return Err(binding_err("signer provided without sig_alg"));
         }
@@ -189,8 +209,13 @@ fn redirect_decode(query: &str, base_url: &str) -> PyResult<RedirectDecoded> {
     // Parameter Pollution / signature-wrapping seam: a downstream layer (proxy,
     // framework multidict, or the verifier re-parsing the raw query) could pick
     // a different occurrence than the one decoded here. Fail closed instead.
-    const SIG_PARAMS: [&str; 5] =
-        ["SAMLRequest", "SAMLResponse", "SigAlg", "Signature", "RelayState"];
+    const SIG_PARAMS: [&str; 5] = [
+        "SAMLRequest",
+        "SAMLResponse",
+        "SigAlg",
+        "Signature",
+        "RelayState",
+    ];
     let mut params: HashMap<String, String> = HashMap::new();
     for pair in query.split('&').filter(|p| !p.is_empty()) {
         let (k, v) = match pair.split_once('=') {
@@ -225,14 +250,68 @@ fn post_encode(
         Some(v) => Some(gb::RelayState::new(v).map_err(binding_err)?),
         None => None,
     };
-    Ok(gb::post::post_encode(saml_xml, is_request, destination, rs.as_ref()))
+    Ok(gb::post::post_encode(
+        saml_xml,
+        is_request,
+        destination,
+        rs.as_ref(),
+    ))
 }
 
-/// Decode a HTTP-POST request from its form parameters.
+fn post_form_from_python(
+    form_params: &Bound<'_, PyAny>,
+    unsafe_allow_collapsed_form: bool,
+) -> PyResult<HashMap<String, String>> {
+    if let Ok(dict) = form_params.cast::<PyDict>() {
+        if !unsafe_allow_collapsed_form {
+            return Err(binding_err(
+                "post_decode requires duplicate-preserving form input by default; \
+                 pass a sequence of (name, value) pairs, or explicitly set \
+                 unsafe_allow_collapsed_form=True for legacy mapping input",
+            ));
+        }
+
+        let mut form = HashMap::new();
+        for (key, value) in dict.iter() {
+            form.insert(key.extract::<String>()?, value.extract::<String>()?);
+        }
+        return Ok(form);
+    }
+
+    let pairs = form_params
+        .extract::<Vec<(String, String)>>()
+        .map_err(|_| {
+            binding_err("form_params must be a mapping or sequence of (name, value) pairs")
+        })?;
+
+    const SAML_PARAMS: [&str; 5] = [
+        "SAMLRequest",
+        "SAMLResponse",
+        "SigAlg",
+        "Signature",
+        "RelayState",
+    ];
+    let mut seen = HashSet::new();
+    let mut form = HashMap::new();
+    for (key, value) in pairs {
+        if !seen.insert(key.clone()) && SAML_PARAMS.contains(&key.as_str()) {
+            return Err(binding_err(format!("duplicate form parameter: {key}")));
+        }
+        form.insert(key, value);
+    }
+    Ok(form)
+}
+
+/// Decode a HTTP-POST request from duplicate-preserving form parameters.
 #[pyfunction]
-#[pyo3(signature = (form_params, url=""))]
-fn post_decode(form_params: HashMap<String, String>, url: &str) -> PyResult<PostDecoded> {
-    let req = PyHttpRequest::post(url.to_string(), form_params);
+#[pyo3(signature = (form_params, url="", unsafe_allow_collapsed_form=false))]
+fn post_decode(
+    form_params: &Bound<'_, PyAny>,
+    url: &str,
+    unsafe_allow_collapsed_form: bool,
+) -> PyResult<PostDecoded> {
+    let form = post_form_from_python(form_params, unsafe_allow_collapsed_form)?;
+    let req = PyHttpRequest::post(url.to_string(), form, Vec::new());
     let inner = gb::post::post_decode(&req).map_err(binding_err)?;
     Ok(PostDecoded { inner })
 }
@@ -262,7 +341,9 @@ impl SamlArtifact {
     /// fills the handle for you.
     #[new]
     fn new(endpoint_index: u16, entity_id: &str, random_handle: [u8; 20]) -> Self {
-        SamlArtifact { inner: gb::SamlArtifact::new(endpoint_index, entity_id, random_handle) }
+        SamlArtifact {
+            inner: gb::SamlArtifact::new(endpoint_index, entity_id, random_handle),
+        }
     }
 
     /// Create a type-0x0004 artifact with a cryptographically random 20-byte
@@ -277,7 +358,9 @@ impl SamlArtifact {
         let handle: [u8; 20] = bytes
             .try_into()
             .map_err(|_| binding_err("secrets.token_bytes returned wrong length"))?;
-        Ok(SamlArtifact { inner: gb::SamlArtifact::new(endpoint_index, entity_id, handle) })
+        Ok(SamlArtifact {
+            inner: gb::SamlArtifact::new(endpoint_index, entity_id, handle),
+        })
     }
     /// Decode a base64 artifact string.
     #[staticmethod]
@@ -316,6 +399,9 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(post_encode, &m)?)?;
     m.add_function(wrap_pyfunction!(post_decode, &m)?)?;
     m.add_function(wrap_pyfunction!(validate_relay_state, &m)?)?;
-    m.add("RELAY_STATE_MAX_BYTES", gb::relay_state::RELAY_STATE_MAX_BYTES)?;
+    m.add(
+        "RELAY_STATE_MAX_BYTES",
+        gb::relay_state::RELAY_STATE_MAX_BYTES,
+    )?;
     Ok(())
 }

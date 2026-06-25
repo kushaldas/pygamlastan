@@ -30,7 +30,10 @@ pub struct EndpointInfo {
 #[pymethods]
 impl EndpointInfo {
     fn __repr__(&self) -> String {
-        format!("EndpointInfo(binding={:?}, location={:?})", self.binding, self.location)
+        format!(
+            "EndpointInfo(binding={:?}, location={:?})",
+            self.binding, self.location
+        )
     }
 }
 
@@ -59,10 +62,18 @@ fn indexed_ep(e: &gmt::IndexedEndpoint) -> EndpointInfo {
 /// Per SAML metadata (errata E62) a KeyDescriptor with no `use` attribute is
 /// valid for *both* signing and encryption; `can_sign()` / `can_encrypt()`
 /// already account for that, so a use-less descriptor appears in both lists.
-fn certs_der<'py>(py: Python<'py>, kds: &[KeyDescriptor], signing: bool) -> Vec<Bound<'py, PyBytes>> {
+fn certs_der<'py>(
+    py: Python<'py>,
+    kds: &[KeyDescriptor],
+    signing: bool,
+) -> Vec<Bound<'py, PyBytes>> {
     let mut out = Vec::new();
     for kd in kds {
-        let usable = if signing { kd.can_sign() } else { kd.can_encrypt() };
+        let usable = if signing {
+            kd.can_sign()
+        } else {
+            kd.can_encrypt()
+        };
         if usable {
             for der in kd.x509_certificates_der() {
                 out.push(PyBytes::new(py, &der));
@@ -182,7 +193,11 @@ impl EntityDescriptor {
 
     /// DER X.509 encryption certificates for the given role ("idp" or "sp").
     #[pyo3(signature = (role="sp"))]
-    fn encryption_certificates<'py>(&self, py: Python<'py>, role: &str) -> Vec<Bound<'py, PyBytes>> {
+    fn encryption_certificates<'py>(
+        &self,
+        py: Python<'py>,
+        role: &str,
+    ) -> Vec<Bound<'py, PyBytes>> {
         if role.eq_ignore_ascii_case("idp") {
             self.inner
                 .idp_sso_descriptors()

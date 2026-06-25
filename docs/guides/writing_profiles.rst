@@ -173,6 +173,7 @@ database row with a unique constraint:
        response, cfg,
        received_url=ACS, expected_idp_entity_id=IDP,
        sp_entity_id=SP, acs_url=ACS, expected_request_id="_req1",
+       replay_cache=security.InMemoryReplayCache(),
        persistent_id_store=DbPersistentIdStore(conn),
    )
 
@@ -194,6 +195,7 @@ addressable and you already hold the typed objects:
    result = security.validate_response(
        response, cfg, received_url=ACS, expected_idp_entity_id=IDP,
        sp_entity_id=SP, acs_url=ACS, expected_request_id="_req1",
+       replay_cache=security.InMemoryReplayCache(),
    )
 
    # Pull one built-in outcome out of the run by number or name:

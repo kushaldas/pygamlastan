@@ -47,6 +47,7 @@ inspect every check. (``process_response`` raises
        sp_entity_id="https://sp.example.org/sp",
        acs_url="https://sp.example.org/acs",
        expected_request_id="_req1",
+       replay_cache=security.InMemoryReplayCache(),
    )
 
    if not result.is_valid():

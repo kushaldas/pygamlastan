@@ -28,7 +28,9 @@ impl Eptid {
     /// Create with a server-side secret used to derive opaque, per-SP IDs.
     #[new]
     fn new(secret: String) -> Self {
-        Eptid { inner: gi::Eptid::new(secret) }
+        Eptid {
+            inner: gi::Eptid::new(secret),
+        }
     }
     /// The opaque persistent identifier string for (idp, sp, user).
     fn get(&self, idp_entity_id: &str, sp_entity_id: &str, user_id: &str) -> String {
@@ -81,11 +83,19 @@ pub struct AuthnBroker {
 impl AuthnBroker {
     #[new]
     fn new() -> Self {
-        AuthnBroker { inner: gi::AuthnBroker::new() }
+        AuthnBroker {
+            inner: gi::AuthnBroker::new(),
+        }
     }
     /// Register an authentication method; returns its reference.
     #[pyo3(signature = (class_ref, method, level, authn_authority=None))]
-    fn add(&mut self, class_ref: &str, method: &str, level: u32, authn_authority: Option<&str>) -> String {
+    fn add(
+        &mut self,
+        class_ref: &str,
+        method: &str,
+        level: u32,
+        authn_authority: Option<&str>,
+    ) -> String {
         self.inner.add(class_ref, method, level, authn_authority)
     }
     fn get_by_class_ref(&self, class_ref: &str) -> Option<AuthnMethod> {
@@ -112,7 +122,9 @@ pub struct InMemoryAssertionStore {
 impl InMemoryAssertionStore {
     #[new]
     fn new() -> Self {
-        InMemoryAssertionStore { inner: gi::InMemoryAssertionStore::new() }
+        InMemoryAssertionStore {
+            inner: gi::InMemoryAssertionStore::new(),
+        }
     }
     // The store methods are inherent on the gamlastan type only via the
     // `AssertionStore` trait, so each call brings the trait into scope with a
@@ -128,7 +140,11 @@ impl InMemoryAssertionStore {
     }
     fn assertions_for_subject(&self, name_id_value: &str) -> Vec<Assertion> {
         use gi::AssertionStore;
-        self.inner.assertions_for_subject(name_id_value).into_iter().map(Assertion::wrap).collect()
+        self.inner
+            .assertions_for_subject(name_id_value)
+            .into_iter()
+            .map(Assertion::wrap)
+            .collect()
     }
     fn remove_assertion(&self, assertion_id: &str) {
         use gi::AssertionStore;

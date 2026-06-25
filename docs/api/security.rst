@@ -31,14 +31,19 @@ and the replay cache. See the :doc:`../guides/validation` guide.
       :type: bool
    .. py:attribute:: verify_recipient
       :type: bool
+   .. py:attribute:: enforce_persistent_id_uniqueness
+      :type: bool
 
-.. py:function:: validate_response(response, config, received_url, expected_idp_entity_id, sp_entity_id, acs_url, expected_request_id=None, client_address=None, relay_state=None, response_signature_verified=None, verified_signed_ids=None, current_proxy_depth=0, now=None, replay_cache=None) -> ValidationResult
+.. py:function:: validate_response(response, config, received_url, expected_idp_entity_id, sp_entity_id, acs_url, expected_request_id=None, client_address=None, relay_state=None, response_signature_verified=None, verified_signed_ids=None, current_proxy_depth=0, now=None, replay_cache=None, persistent_id_store=None, unsafe_no_replay_cache=False, unsafe_no_persistent_id_store=False) -> ValidationResult
 
    Run the full validation suite over a parsed
    :class:`pygamlastan.core.Response` and return a structured
    :class:`ValidationResult` (does not raise on a validation failure).
-   ``replay_cache`` may be an :class:`InMemoryReplayCache` or any object
-   implementing the replay-cache protocol.
+   ``replay_cache`` is required by default and may be an
+   :class:`InMemoryReplayCache` or any object implementing the replay-cache
+   protocol. If persistent NameID uniqueness is enabled and the response carries
+   a persistent NameID, ``persistent_id_store`` is also required unless
+   ``unsafe_no_persistent_id_store=True`` is explicit.
 
 .. py:class:: ValidationResult
 

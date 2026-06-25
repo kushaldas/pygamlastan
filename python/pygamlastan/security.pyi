@@ -7,6 +7,9 @@ class ReplayCacheProtocol(Protocol):
     def check_and_insert(self, id: str, expiry: datetime) -> bool: ...
     def cleanup(self) -> None: ...
 
+class PersistentIdStoreProtocol(Protocol):
+    def check_and_record(self, name_id: str, sp_entity_id: str, principal: str) -> bool: ...
+
 class SecurityConfig:
     def __init__(self) -> None: ...
     @staticmethod
@@ -19,6 +22,12 @@ class SecurityConfig:
     max_assertion_age_seconds: int
     verify_destination: bool
     verify_recipient: bool
+    require_encrypted_assertions: bool
+    reject_signatures_with_ds_object: bool
+    enforce_persistent_id_uniqueness: bool
+    sanitize_relay_state: bool
+    require_integrity_with_cbc: bool
+    check_client_address: bool
 
 class ValidationCheck:
     @property
@@ -59,4 +68,7 @@ def validate_response(
     current_proxy_depth: int = ...,
     now: datetime | None = ...,
     replay_cache: Any | None = ...,
+    persistent_id_store: Any | None = ...,
+    unsafe_no_replay_cache: bool = ...,
+    unsafe_no_persistent_id_store: bool = ...,
 ) -> ValidationResult: ...

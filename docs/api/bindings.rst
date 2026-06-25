@@ -15,11 +15,13 @@ See the :doc:`../guides/bindings` guide. Errors raise
 Redirect
 --------
 
-.. py:function:: redirect_encode(saml_xml: bytes, is_request: bool, destination: str, relay_state: str | None = None, signer=None, sig_alg: str | None = None) -> str
+.. py:function:: redirect_encode(saml_xml: bytes, is_request: bool, destination: str, relay_state: str | None = None, signer=None, sig_alg: str | None = None, unsafe_allow_weak_sha1: bool = False) -> str
 
    Build a HTTP-Redirect URL carrying ``saml_xml``. ``is_request`` selects
    ``SAMLRequest`` vs ``SAMLResponse``. Provide ``signer``
    (:class:`pygamlastan.crypto.SamlSigner`) and ``sig_alg`` to sign the query.
+   SHA-1 signature algorithms are rejected unless
+   ``unsafe_allow_weak_sha1=True`` is explicit.
 
 .. py:function:: redirect_decode(query: str, base_url: str = "") -> RedirectDecoded
 
@@ -40,9 +42,13 @@ POST
 
    Build a self-submitting HTML form for the HTTP-POST binding.
 
-.. py:function:: post_decode(form_params: dict[str, str], url: str = "") -> PostDecoded
+.. py:function:: post_decode(form_params: Sequence[tuple[str, str]] | Mapping[str, str], url: str = "", unsafe_allow_collapsed_form: bool = False) -> PostDecoded
 
-   Decode from already form-decoded POST parameters.
+   Decode from already form-decoded POST parameters. Pass duplicate-preserving
+   ``(name, value)`` pairs from your framework's MultiDict. Plain mappings are
+   rejected by default because they may have already collapsed duplicate SAML
+   parameters; pass ``unsafe_allow_collapsed_form=True`` only for legacy unsafe
+   processing.
 
 .. py:class:: PostDecoded
 

@@ -13,11 +13,29 @@ use gx::{KeyUsage, KeysManager as GKeysManager};
 use crate::convert::new_submodule;
 use crate::errors::crypto_err;
 
+pub(crate) fn reject_weak_signature_algorithm(
+    algorithm: &str,
+    unsafe_allow_weak_sha1: bool,
+) -> PyResult<()> {
+    let normalized = algorithm.to_ascii_lowercase();
+    if unsafe_allow_weak_sha1 || (!normalized.contains("sha1") && !normalized.contains("sha-1")) {
+        return Ok(());
+    }
+    Err(crypto_err(
+        "SHA-1 signature algorithms are disabled by default; pass \
+         unsafe_allow_weak_sha1=True only for legacy interoperability",
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // KeysManager
 // ---------------------------------------------------------------------------
 
-#[pyclass(module = "pygamlastan.crypto", name = "KeysManager", skip_from_py_object)]
+#[pyclass(
+    module = "pygamlastan.crypto",
+    name = "KeysManager",
+    skip_from_py_object
+)]
 #[derive(Clone)]
 pub struct KeysManager {
     pub inner: GKeysManager,
@@ -27,7 +45,9 @@ pub struct KeysManager {
 impl KeysManager {
     #[new]
     fn new() -> Self {
-        KeysManager { inner: GKeysManager::new() }
+        KeysManager {
+            inner: GKeysManager::new(),
+        }
     }
 
     /// Build an SP key manager: own signing key (PEM) + trusted IdP cert (PEM).
@@ -100,7 +120,9 @@ impl SamlSigner {
     /// File/PEM-key based signer from a KeysManager.
     #[new]
     fn new(keys: &KeysManager) -> Self {
-        SamlSigner { inner: gx::SamlSigner::new(keys.inner.clone()) }
+        SamlSigner {
+            inner: gx::SamlSigner::new(keys.inner.clone()),
+        }
     }
 
     /// Convenience: build a signer directly from a signing private key PEM.
@@ -108,10 +130,13 @@ impl SamlSigner {
     #[pyo3(signature = (private_key_pem, password=None))]
     fn from_pem(private_key_pem: &[u8], password: Option<&str>) -> PyResult<Self> {
         let mut km = GKeysManager::new();
-        let mut key = gx::keys::loader::load_pem_auto(private_key_pem, password).map_err(crypto_err)?;
+        let mut key =
+            gx::keys::loader::load_pem_auto(private_key_pem, password).map_err(crypto_err)?;
         key.usage = KeyUsage::Sign;
         km.add_key(key);
-        Ok(SamlSigner { inner: gx::SamlSigner::new(km) })
+        Ok(SamlSigner {
+            inner: gx::SamlSigner::new(km),
+        })
     }
 
     /// HSM/PKCS#11-backed signer. `keys` may be an empty KeysManager: with an
@@ -122,23 +147,33 @@ impl SamlSigner {
     #[staticmethod]
     #[pyo3(signature = (signer, keys=None))]
     fn with_pkcs11(signer: &Pkcs11Signer, keys: Option<&KeysManager>) -> Self {
-        let km = keys.map(|k| k.inner.clone()).unwrap_or_else(GKeysManager::new);
-        SamlSigner { inner: gx::SamlSigner::with_hsm_signer(km, signer.inner.clone()) }
+        let km = keys.map(|k| k.inner.clone()).unwrap_or_default();
+        SamlSigner {
+            inner: gx::SamlSigner::with_hsm_signer(km, signer.inner.clone()),
+        }
     }
 
     /// Apply an enveloped XML-DSig signature to a document carrying a template.
     fn sign_enveloped(&self, xml_with_template: &str) -> PyResult<String> {
-        self.inner.sign_enveloped(xml_with_template).map_err(crypto_err)
+        self.inner
+            .sign_enveloped(xml_with_template)
+            .map_err(crypto_err)
     }
 
     /// Sign a HTTP-Redirect query string; returns the raw signature bytes.
+    #[pyo3(signature = (query_string, algorithm_uri, unsafe_allow_weak_sha1=false))]
     fn sign_redirect_query<'py>(
         &self,
         py: Python<'py>,
         query_string: &[u8],
         algorithm_uri: &str,
+        unsafe_allow_weak_sha1: bool,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let sig = self.inner.sign_redirect_query(query_string, algorithm_uri).map_err(crypto_err)?;
+        reject_weak_signature_algorithm(algorithm_uri, unsafe_allow_weak_sha1)?;
+        let sig = self
+            .inner
+            .sign_redirect_query(query_string, algorithm_uri)
+            .map_err(crypto_err)?;
         Ok(PyBytes::new(py, &sig))
     }
 
@@ -155,7 +190,12 @@ impl SamlSigner {
 // Verifier + VerifyResult
 // ---------------------------------------------------------------------------
 
-#[pyclass(module = "pygamlastan.crypto", name = "VerifyResult", frozen, skip_from_py_object)]
+#[pyclass(
+    module = "pygamlastan.crypto",
+    name = "VerifyResult",
+    frozen,
+    skip_from_py_object
+)]
 #[derive(Clone)]
 pub struct VerifyResult {
     inner: gx::VerifyResult,
@@ -192,9 +232,11 @@ impl VerifyResult {
     /// DER X.509 chain (leaf first) of the signing key, when valid.
     fn signing_cert_chain<'py>(&self, py: Python<'py>) -> Vec<Bound<'py, PyBytes>> {
         match &self.inner {
-            gx::VerifyResult::Valid { key_info, .. } => {
-                key_info.x509_chain.iter().map(|c| PyBytes::new(py, c)).collect()
-            }
+            gx::VerifyResult::Valid { key_info, .. } => key_info
+                .x509_chain
+                .iter()
+                .map(|c| PyBytes::new(py, c))
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -209,7 +251,9 @@ pub struct SamlVerifier {
 impl SamlVerifier {
     #[new]
     fn new(keys: &KeysManager) -> Self {
-        SamlVerifier { inner: gx::SamlVerifier::new(keys.inner.clone()) }
+        SamlVerifier {
+            inner: gx::SamlVerifier::new(keys.inner.clone()),
+        }
     }
 
     /// Convenience: verifier trusting a single X.509 certificate (PEM or DER
@@ -233,11 +277,26 @@ impl SamlVerifier {
         let mut km = GKeysManager::new();
         km.add_key(key);
         km.add_trusted_cert(cert);
-        Ok(SamlVerifier { inner: gx::SamlVerifier::new(km) })
+        Ok(SamlVerifier {
+            inner: gx::SamlVerifier::new(km),
+        })
     }
 
-    fn set_skip_time_checks(&mut self, py: Python<'_>, skip: bool) {
+    #[pyo3(signature = (skip, unsafe_allow_skip_time_checks=false))]
+    fn set_skip_time_checks(
+        &mut self,
+        py: Python<'_>,
+        skip: bool,
+        unsafe_allow_skip_time_checks: bool,
+    ) -> PyResult<()> {
         if skip {
+            if !unsafe_allow_skip_time_checks {
+                return Err(crypto_err(
+                    "skipping X.509 time checks is disabled by default; pass \
+                     unsafe_allow_skip_time_checks=True only for legacy testing \
+                     or emergency interoperability",
+                ));
+            }
             crate::convert::warn(
                 py,
                 "SamlVerifier.set_skip_time_checks(True) disables X.509 \
@@ -245,9 +304,23 @@ impl SamlVerifier {
             );
         }
         self.inner.set_skip_time_checks(skip);
+        Ok(())
     }
-    fn set_trusted_keys_only(&mut self, py: Python<'_>, trusted: bool) {
+    #[pyo3(signature = (trusted, unsafe_allow_untrusted_keys=false))]
+    fn set_trusted_keys_only(
+        &mut self,
+        py: Python<'_>,
+        trusted: bool,
+        unsafe_allow_untrusted_keys: bool,
+    ) -> PyResult<()> {
         if !trusted {
+            if !unsafe_allow_untrusted_keys {
+                return Err(crypto_err(
+                    "trusting certificates embedded in signature KeyInfo is \
+                     disabled by default; pass unsafe_allow_untrusted_keys=True \
+                     only for legacy unsafe processing",
+                ));
+            }
             crate::convert::warn(
                 py,
                 "SamlVerifier.set_trusted_keys_only(False) makes the verifier trust \
@@ -255,9 +328,23 @@ impl SamlVerifier {
             );
         }
         self.inner.set_trusted_keys_only(trusted);
+        Ok(())
     }
-    fn set_strict_verification(&mut self, py: Python<'_>, strict: bool) {
+    #[pyo3(signature = (strict, unsafe_allow_non_strict=false))]
+    fn set_strict_verification(
+        &mut self,
+        py: Python<'_>,
+        strict: bool,
+        unsafe_allow_non_strict: bool,
+    ) -> PyResult<()> {
         if !strict {
+            if !unsafe_allow_non_strict {
+                return Err(crypto_err(
+                    "non-strict XML signature verification is disabled by \
+                     default; pass unsafe_allow_non_strict=True only for legacy \
+                     unsafe processing",
+                ));
+            }
             crate::convert::warn(
                 py,
                 "SamlVerifier.set_strict_verification(False) disables XML Signature \
@@ -265,6 +352,7 @@ impl SamlVerifier {
             );
         }
         self.inner.set_strict_verification(strict);
+        Ok(())
     }
     fn set_hmac_min_out_len(&mut self, bits: usize) {
         self.inner.set_hmac_min_out_len(bits);
@@ -272,17 +360,23 @@ impl SamlVerifier {
 
     /// Verify an enveloped XML-DSig signature; returns a VerifyResult.
     fn verify_enveloped(&self, signed_xml: &str) -> PyResult<VerifyResult> {
-        let r = self.inner.verify_enveloped(signed_xml).map_err(crypto_err)?;
+        let r = self
+            .inner
+            .verify_enveloped(signed_xml)
+            .map_err(crypto_err)?;
         Ok(VerifyResult { inner: r })
     }
 
     /// Verify a HTTP-Redirect query signature.
+    #[pyo3(signature = (query_string, signature, algorithm_uri, unsafe_allow_weak_sha1=false))]
     fn verify_redirect_query(
         &self,
         query_string: &[u8],
         signature: &[u8],
         algorithm_uri: &str,
+        unsafe_allow_weak_sha1: bool,
     ) -> PyResult<bool> {
+        reject_weak_signature_algorithm(algorithm_uri, unsafe_allow_weak_sha1)?;
         self.inner
             .verify_redirect_query(query_string, signature, algorithm_uri)
             .map_err(crypto_err)
@@ -298,15 +392,19 @@ impl SamlVerifier {
     /// to real crypto: the IDs it returns are exactly what may be passed as
     /// `verified_signed_ids` to the validator.
     pub(crate) fn verified_signed_ids(&self, signed_xml: &str) -> PyResult<Vec<String>> {
-        match self.inner.verify_enveloped(signed_xml).map_err(crypto_err)? {
+        match self
+            .inner
+            .verify_enveloped(signed_xml)
+            .map_err(crypto_err)?
+        {
             gx::VerifyResult::Valid { references, .. } => Ok(references
                 .iter()
                 .filter(|r| r.digest_verified)
                 .map(|r| r.uri.strip_prefix('#').unwrap_or(&r.uri).to_string())
                 .collect()),
-            gx::VerifyResult::Invalid { reason } => {
-                Err(crypto_err(format!("signature verification failed: {reason}")))
-            }
+            gx::VerifyResult::Invalid { reason } => Err(crypto_err(format!(
+                "signature verification failed: {reason}"
+            ))),
         }
     }
 }
@@ -324,7 +422,9 @@ pub struct SamlEncryptor {
 impl SamlEncryptor {
     #[new]
     fn new(keys: &KeysManager) -> Self {
-        SamlEncryptor { inner: gx::SamlEncryptor::new(keys.inner.clone()) }
+        SamlEncryptor {
+            inner: gx::SamlEncryptor::new(keys.inner.clone()),
+        }
     }
 
     /// Encryptor that encrypts to a recipient certificate (DER) - PEFIM flow.
@@ -335,7 +435,9 @@ impl SamlEncryptor {
     }
 
     fn encrypt(&self, template_xml: &str, plaintext: &[u8]) -> PyResult<String> {
-        self.inner.encrypt(template_xml, plaintext).map_err(crypto_err)
+        self.inner
+            .encrypt(template_xml, plaintext)
+            .map_err(crypto_err)
     }
 }
 
@@ -348,7 +450,9 @@ pub struct SamlDecryptor {
 impl SamlDecryptor {
     #[new]
     fn new(keys: &KeysManager) -> Self {
-        SamlDecryptor { inner: gx::SamlDecryptor::new(keys.inner.clone()) }
+        SamlDecryptor {
+            inner: gx::SamlDecryptor::new(keys.inner.clone()),
+        }
     }
 
     fn decrypt(&self, encrypted_xml: &str) -> PyResult<String> {
@@ -360,7 +464,10 @@ impl SamlDecryptor {
         py: Python<'py>,
         encrypted_xml: &str,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let b = self.inner.decrypt_to_bytes(encrypted_xml).map_err(crypto_err)?;
+        let b = self
+            .inner
+            .decrypt_to_bytes(encrypted_xml)
+            .map_err(crypto_err)?;
         Ok(PyBytes::new(py, &b))
     }
 }
@@ -408,7 +515,9 @@ fn exc_c14n<'py>(
 // PKCS#11 (kryptering)
 // ---------------------------------------------------------------------------
 
-use kryptering::pkcs11::{Pkcs11Provider as KProvider, Pkcs11Session as KSession, Pkcs11Signer as KSigner};
+use kryptering::pkcs11::{
+    Pkcs11Provider as KProvider, Pkcs11Session as KSession, Pkcs11Signer as KSigner,
+};
 use kryptering::{EcCurve, HashAlgorithm, SignatureAlgorithm};
 
 /// Map a short, stable algorithm name to kryptering's `SignatureAlgorithm`.
@@ -417,7 +526,11 @@ use kryptering::{EcCurve, HashAlgorithm, SignatureAlgorithm};
 /// binding the whole `SignatureAlgorithm`/`HashAlgorithm`/`EcCurve` enum tree as
 /// Python classes - the string form is the entire knob a SAML caller needs and
 /// keeps the surface small. Extend this match to support more algorithms.
-fn parse_signature_algorithm(s: &str) -> PyResult<SignatureAlgorithm> {
+fn parse_signature_algorithm(
+    s: &str,
+    unsafe_allow_weak_sha1: bool,
+) -> PyResult<SignatureAlgorithm> {
+    reject_weak_signature_algorithm(s, unsafe_allow_weak_sha1)?;
     use HashAlgorithm::*;
     Ok(match s.to_ascii_lowercase().as_str() {
         "rsa-sha1" => SignatureAlgorithm::RsaPkcs1v15(Sha1),
@@ -468,8 +581,14 @@ pub struct Pkcs11Session {
 impl Pkcs11Session {
     /// Create a signer bound to the private key identified by `key_label`.
     /// `algorithm` is e.g. "rsa-sha256", "ecdsa-p256-sha256", "ed25519".
-    fn signer(&self, key_label: &str, algorithm: &str) -> PyResult<Pkcs11Signer> {
-        let alg = parse_signature_algorithm(algorithm)?;
+    #[pyo3(signature = (key_label, algorithm, unsafe_allow_weak_sha1=false))]
+    fn signer(
+        &self,
+        key_label: &str,
+        algorithm: &str,
+        unsafe_allow_weak_sha1: bool,
+    ) -> PyResult<Pkcs11Signer> {
+        let alg = parse_signature_algorithm(algorithm, unsafe_allow_weak_sha1)?;
         let s = KSigner::new(&self.inner, key_label, alg).map_err(crypto_err)?;
         Ok(Pkcs11Signer { inner: Arc::new(s) })
     }
@@ -484,7 +603,11 @@ impl Pkcs11Session {
 /// construction - the originating `Pkcs11Session` may be dropped. `Clone` is
 /// derived (refcount bump); `skip_from_py_object` because it is only ever taken
 /// by reference, never extracted from Python by value.
-#[pyclass(module = "pygamlastan.crypto", name = "Pkcs11Signer", skip_from_py_object)]
+#[pyclass(
+    module = "pygamlastan.crypto",
+    name = "Pkcs11Signer",
+    skip_from_py_object
+)]
 #[derive(Clone)]
 pub struct Pkcs11Signer {
     inner: Arc<dyn kryptering::Signer>,
@@ -494,8 +617,14 @@ pub struct Pkcs11Signer {
 impl Pkcs11Signer {
     /// Construct directly from a session, key label, and algorithm name.
     #[new]
-    fn new(session: &Pkcs11Session, key_label: &str, algorithm: &str) -> PyResult<Self> {
-        let alg = parse_signature_algorithm(algorithm)?;
+    #[pyo3(signature = (session, key_label, algorithm, unsafe_allow_weak_sha1=false))]
+    fn new(
+        session: &Pkcs11Session,
+        key_label: &str,
+        algorithm: &str,
+        unsafe_allow_weak_sha1: bool,
+    ) -> PyResult<Self> {
+        let alg = parse_signature_algorithm(algorithm, unsafe_allow_weak_sha1)?;
         let s = KSigner::new(&session.inner, key_label, alg).map_err(crypto_err)?;
         Ok(Pkcs11Signer { inner: Arc::new(s) })
     }

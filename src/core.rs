@@ -48,21 +48,41 @@ macro_rules! wrapper {
 wrapper!("Issuer", Issuer, ga::Issuer);
 wrapper!("NameId", NameId, ga::NameId);
 wrapper!("NameIdPolicy", NameIdPolicy, ga::NameIdPolicy);
-wrapper!("SubjectConfirmationData", SubjectConfirmationData, ga::SubjectConfirmationData);
-wrapper!("SubjectConfirmation", SubjectConfirmation, ga::SubjectConfirmation);
+wrapper!(
+    "SubjectConfirmationData",
+    SubjectConfirmationData,
+    ga::SubjectConfirmationData
+);
+wrapper!(
+    "SubjectConfirmation",
+    SubjectConfirmation,
+    ga::SubjectConfirmation
+);
 wrapper!("Subject", Subject, ga::Subject);
-wrapper!("AudienceRestriction", AudienceRestriction, ga::AudienceRestriction);
+wrapper!(
+    "AudienceRestriction",
+    AudienceRestriction,
+    ga::AudienceRestriction
+);
 wrapper!("ProxyRestriction", ProxyRestriction, ga::ProxyRestriction);
 wrapper!("Conditions", Conditions, ga::Conditions);
 wrapper!("SubjectLocality", SubjectLocality, ga::SubjectLocality);
 wrapper!("AuthnContext", AuthnContext, ga::AuthnContext);
 wrapper!("AuthnStatement", AuthnStatement, ga::AuthnStatement);
 wrapper!("Attribute", Attribute, ga::Attribute);
-wrapper!("AttributeStatement", AttributeStatement, ga::AttributeStatement);
+wrapper!(
+    "AttributeStatement",
+    AttributeStatement,
+    ga::AttributeStatement
+);
 wrapper!("Assertion", Assertion, ga::types::Assertion);
 wrapper!("StatusCode", StatusCode, gp::StatusCode);
 wrapper!("Status", Status, gp::Status);
-wrapper!("RequestedAuthnContext", RequestedAuthnContext, gp::RequestedAuthnContext);
+wrapper!(
+    "RequestedAuthnContext",
+    RequestedAuthnContext,
+    gp::RequestedAuthnContext
+);
 wrapper!("Scoping", Scoping, gp::Scoping);
 wrapper!("AuthnRequest", AuthnRequest, gp::AuthnRequest);
 wrapper!("Response", Response, gp::Response);
@@ -83,8 +103,14 @@ fn attr_value_to_py(py: Python<'_>, v: &ga::AttributeValue) -> PyResult<Py<PyAny
         V::Boolean(b) => b.into_pyobject(py)?.to_owned().into_any().unbind(),
         V::DateTime(s) => s.into_pyobject(py)?.into_any().unbind(),
         V::Base64(b) => pyo3::types::PyBytes::new(py, b).into_any().unbind(),
-        V::NameId(n) => NameId::wrap(n.clone()).into_pyobject(py)?.into_any().unbind(),
-        V::Xml(b) => String::from_utf8_lossy(b).into_pyobject(py)?.into_any().unbind(),
+        V::NameId(n) => NameId::wrap(n.clone())
+            .into_pyobject(py)?
+            .into_any()
+            .unbind(),
+        V::Xml(b) => String::from_utf8_lossy(b)
+            .into_pyobject(py)?
+            .into_any()
+            .unbind(),
         V::Null => py.None(),
     })
 }
@@ -114,7 +140,12 @@ impl Issuer {
         name_qualifier: Option<String>,
         sp_name_qualifier: Option<String>,
     ) -> Self {
-        Issuer::wrap(ga::Issuer { value, format, name_qualifier, sp_name_qualifier })
+        Issuer::wrap(ga::Issuer {
+            value,
+            format,
+            name_qualifier,
+            sp_name_qualifier,
+        })
     }
     #[getter]
     fn value(&self) -> &str {
@@ -181,7 +212,10 @@ impl NameId {
         self.inner.sp_provided_id.as_deref()
     }
     fn __repr__(&self) -> String {
-        format!("NameId(value={:?}, format={:?})", self.inner.value, self.inner.format)
+        format!(
+            "NameId(value={:?}, format={:?})",
+            self.inner.value, self.inner.format
+        )
     }
 }
 
@@ -190,7 +224,11 @@ impl NameIdPolicy {
     #[new]
     #[pyo3(signature = (format=None, sp_name_qualifier=None, allow_create=true))]
     fn new(format: Option<String>, sp_name_qualifier: Option<String>, allow_create: bool) -> Self {
-        NameIdPolicy::wrap(ga::NameIdPolicy { format, sp_name_qualifier, allow_create })
+        NameIdPolicy::wrap(ga::NameIdPolicy {
+            format,
+            sp_name_qualifier,
+            allow_create,
+        })
     }
     #[getter]
     fn format(&self) -> Option<&str> {
@@ -246,7 +284,10 @@ impl SubjectConfirmation {
     }
     #[getter]
     fn subject_confirmation_data(&self) -> Option<SubjectConfirmationData> {
-        self.inner.subject_confirmation_data.clone().map(SubjectConfirmationData::wrap)
+        self.inner
+            .subject_confirmation_data
+            .clone()
+            .map(SubjectConfirmationData::wrap)
     }
 }
 
@@ -258,7 +299,12 @@ impl Subject {
     }
     #[getter]
     fn subject_confirmations(&self) -> Vec<SubjectConfirmation> {
-        self.inner.subject_confirmations.iter().cloned().map(SubjectConfirmation::wrap).collect()
+        self.inner
+            .subject_confirmations
+            .iter()
+            .cloned()
+            .map(SubjectConfirmation::wrap)
+            .collect()
     }
 }
 
@@ -305,11 +351,19 @@ impl Conditions {
     }
     #[getter]
     fn audience_restrictions(&self) -> Vec<AudienceRestriction> {
-        self.inner.audience_restrictions.iter().cloned().map(AudienceRestriction::wrap).collect()
+        self.inner
+            .audience_restrictions
+            .iter()
+            .cloned()
+            .map(AudienceRestriction::wrap)
+            .collect()
     }
     #[getter]
     fn proxy_restriction(&self) -> Option<ProxyRestriction> {
-        self.inner.proxy_restriction.clone().map(ProxyRestriction::wrap)
+        self.inner
+            .proxy_restriction
+            .clone()
+            .map(ProxyRestriction::wrap)
     }
 }
 
@@ -361,7 +415,10 @@ impl AuthnStatement {
     }
     #[getter]
     fn subject_locality(&self) -> Option<SubjectLocality> {
-        self.inner.subject_locality.clone().map(SubjectLocality::wrap)
+        self.inner
+            .subject_locality
+            .clone()
+            .map(SubjectLocality::wrap)
     }
     #[getter]
     fn authn_context(&self) -> AuthnContext {
@@ -388,7 +445,12 @@ impl Attribute {
             .into_iter()
             .map(ga::AttributeValue::String)
             .collect();
-        Attribute::wrap(ga::Attribute { name, name_format, friendly_name, values })
+        Attribute::wrap(ga::Attribute {
+            name,
+            name_format,
+            friendly_name,
+            values,
+        })
     }
     #[getter]
     fn name(&self) -> &str {
@@ -421,7 +483,11 @@ impl Attribute {
             .collect()
     }
     fn __repr__(&self) -> String {
-        format!("Attribute(name={:?}, values={})", self.inner.name, self.inner.values.len())
+        format!(
+            "Attribute(name={:?}, values={})",
+            self.inner.name,
+            self.inner.values.len()
+        )
     }
 }
 
@@ -429,7 +495,12 @@ impl Attribute {
 impl AttributeStatement {
     #[getter]
     fn attributes(&self) -> Vec<Attribute> {
-        self.inner.attributes.iter().cloned().map(Attribute::wrap).collect()
+        self.inner
+            .attributes
+            .iter()
+            .cloned()
+            .map(Attribute::wrap)
+            .collect()
     }
 }
 
@@ -445,7 +516,10 @@ impl StatusCode {
     }
     #[getter]
     fn sub_status(&self) -> Option<StatusCode> {
-        self.inner.sub_status.as_ref().map(|b| StatusCode::wrap((**b).clone()))
+        self.inner
+            .sub_status
+            .as_ref()
+            .map(|b| StatusCode::wrap((**b).clone()))
     }
     fn is_success(&self) -> bool {
         self.inner.is_success()
@@ -503,11 +577,21 @@ impl Assertion {
     }
     #[getter]
     fn authn_statements(&self) -> Vec<AuthnStatement> {
-        self.inner.authn_statements.iter().cloned().map(AuthnStatement::wrap).collect()
+        self.inner
+            .authn_statements
+            .iter()
+            .cloned()
+            .map(AuthnStatement::wrap)
+            .collect()
     }
     #[getter]
     fn attribute_statements(&self) -> Vec<AttributeStatement> {
-        self.inner.attribute_statements.iter().cloned().map(AttributeStatement::wrap).collect()
+        self.inner
+            .attribute_statements
+            .iter()
+            .cloned()
+            .map(AttributeStatement::wrap)
+            .collect()
     }
     fn __repr__(&self) -> String {
         format!("Assertion(id={:?})", self.inner.id)
@@ -574,7 +658,10 @@ impl AuthnRequest {
     }
     #[getter]
     fn requested_authn_context(&self) -> Option<RequestedAuthnContext> {
-        self.inner.requested_authn_context.clone().map(RequestedAuthnContext::wrap)
+        self.inner
+            .requested_authn_context
+            .clone()
+            .map(RequestedAuthnContext::wrap)
     }
     #[getter]
     fn scoping(&self) -> Option<Scoping> {
@@ -645,7 +732,12 @@ impl Response {
     }
     #[getter]
     fn assertions(&self) -> Vec<Assertion> {
-        self.inner.assertions.iter().cloned().map(Assertion::wrap).collect()
+        self.inner
+            .assertions
+            .iter()
+            .cloned()
+            .map(Assertion::wrap)
+            .collect()
     }
     #[getter]
     fn encrypted_assertion_count(&self) -> usize {
@@ -828,12 +920,20 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
         "AUTHN_CONTEXT_PASSWORD_PROTECTED_TRANSPORT",
         gc::AUTHN_CONTEXT_PASSWORD_PROTECTED_TRANSPORT
     );
-    add_const!(m, "AUTHN_CONTEXT_UNSPECIFIED", gc::AUTHN_CONTEXT_UNSPECIFIED);
+    add_const!(
+        m,
+        "AUTHN_CONTEXT_UNSPECIFIED",
+        gc::AUTHN_CONTEXT_UNSPECIFIED
+    );
     add_const!(m, "AUTHN_CONTEXT_X509", gc::AUTHN_CONTEXT_X509);
     add_const!(m, "AUTHN_CONTEXT_KERBEROS", gc::AUTHN_CONTEXT_KERBEROS);
 
     // Attribute name formats
-    add_const!(m, "ATTRNAME_FORMAT_UNSPECIFIED", gc::ATTRNAME_FORMAT_UNSPECIFIED);
+    add_const!(
+        m,
+        "ATTRNAME_FORMAT_UNSPECIFIED",
+        gc::ATTRNAME_FORMAT_UNSPECIFIED
+    );
     add_const!(m, "ATTRNAME_FORMAT_URI", gc::ATTRNAME_FORMAT_URI);
     add_const!(m, "ATTRNAME_FORMAT_BASIC", gc::ATTRNAME_FORMAT_BASIC);
 
