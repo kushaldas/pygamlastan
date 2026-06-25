@@ -419,12 +419,21 @@ def test_post_roundtrip():
 
 def test_post_decode_rejects_collapsed_mapping_and_duplicates():
     """HTTP-POST decode fails closed on collapsed dict input and duplicate SAML params."""
+    from collections import UserDict
+
     msg = b'<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ID="_r1" Version="2.0" IssueInstant="2026-06-24T10:00:00Z"/>'
     form = {"SAMLRequest": base64.b64encode(msg).decode(), "RelayState": "s2"}
     with pytest.raises(pygamlastan.SamlBindingError):
         bindings.post_decode(form)
 
     dec = bindings.post_decode(form, unsafe_allow_collapsed_form=True)
+    assert dec.is_request and dec.relay_state == "s2"
+
+    user_dict = UserDict(form)
+    with pytest.raises(pygamlastan.SamlBindingError):
+        bindings.post_decode(user_dict)
+
+    dec = bindings.post_decode(user_dict, unsafe_allow_collapsed_form=True)
     assert dec.is_request and dec.relay_state == "s2"
 
     with pytest.raises(pygamlastan.SamlBindingError):

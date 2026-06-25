@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyDict, PyModule};
+use pyo3::types::{PyAny, PyBytes, PyDict, PyIterator, PyModule};
 
 use gamlastan::bindings as gb;
 use gb::HttpRequest;
@@ -262,18 +262,38 @@ fn post_form_from_python(
     form_params: &Bound<'_, PyAny>,
     unsafe_allow_collapsed_form: bool,
 ) -> PyResult<HashMap<String, String>> {
+    let collapsed_form_error = || {
+        binding_err(
+            "post_decode requires duplicate-preserving form input by default; \
+             pass a sequence of (name, value) pairs, or explicitly set \
+             unsafe_allow_collapsed_form=True for legacy mapping input",
+        )
+    };
+
     if let Ok(dict) = form_params.cast::<PyDict>() {
         if !unsafe_allow_collapsed_form {
-            return Err(binding_err(
-                "post_decode requires duplicate-preserving form input by default; \
-                 pass a sequence of (name, value) pairs, or explicitly set \
-                 unsafe_allow_collapsed_form=True for legacy mapping input",
-            ));
+            return Err(collapsed_form_error());
         }
 
         let mut form = HashMap::new();
         for (key, value) in dict.iter() {
             form.insert(key.extract::<String>()?, value.extract::<String>()?);
+        }
+        return Ok(form);
+    }
+
+    if form_params.hasattr("items")? {
+        if !unsafe_allow_collapsed_form {
+            return Err(collapsed_form_error());
+        }
+
+        let items = form_params.call_method0("items").map_err(binding_err)?;
+        let mut form = HashMap::new();
+        for item in PyIterator::from_object(&items).map_err(binding_err)? {
+            let (key, value) = item
+                .and_then(|item| item.extract::<(String, String)>())
+                .map_err(binding_err)?;
+            form.insert(key, value);
         }
         return Ok(form);
     }
