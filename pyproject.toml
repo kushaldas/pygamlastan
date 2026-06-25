@@ -23,6 +23,7 @@ classifiers = [
 
 [project.urls]
 Repository = "https://github.com/kushaldas/pygamlastan"
+Documentation = "https://pygamlastan.readthedocs.io/en/latest/"
 
 [dependency-groups]
 dev = [
