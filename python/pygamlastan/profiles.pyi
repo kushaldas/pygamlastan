@@ -1,10 +1,9 @@
 from datetime import datetime
-from typing import Any
 
 from .core import Attribute, AuthnRequest, NameId, Response
 from .crypto import SamlVerifier
 from .metadata import EntityDescriptor
-from .security import SecurityConfig
+from .security import PersistentIdStoreProtocol, ReplayCacheProtocol, SecurityConfig
 
 class AuthnRequestOptions:
     def __init__(
@@ -110,8 +109,8 @@ def process_response(
     expected_request_id: str | None = ...,
     verified_signed_ids: list[str] | None = ...,
     now: datetime | None = ...,
-    replay_cache: Any | None = ...,
-    persistent_id_store: Any | None = ...,
+    replay_cache: ReplayCacheProtocol | None = ...,
+    persistent_id_store: PersistentIdStoreProtocol | None = ...,
     unsafe_no_replay_cache: bool = ...,
     unsafe_no_persistent_id_store: bool = ...,
 ) -> AuthnResult: ...
@@ -124,8 +123,8 @@ def process_response_verified(
     expected_idp_entity_id: str,
     expected_request_id: str | None = ...,
     now: datetime | None = ...,
-    replay_cache: Any | None = ...,
-    persistent_id_store: Any | None = ...,
+    replay_cache: ReplayCacheProtocol | None = ...,
+    persistent_id_store: PersistentIdStoreProtocol | None = ...,
     unsafe_no_replay_cache: bool = ...,
     unsafe_no_persistent_id_store: bool = ...,
 ) -> AuthnResult: ...

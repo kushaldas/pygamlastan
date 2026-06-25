@@ -674,7 +674,8 @@ def test_process_response_requires_replay_cache_by_default():
     """SP response processing requires a replay cache unless explicitly waived."""
     parsed = xml.parse_response(_built_response_xml())
     cfg = security.SecurityConfig.permissive()
-    with pytest.raises(pygamlastan.SamlProfileError):
+    with pytest.raises(pygamlastan.SamlProfileError,
+                       match="process_response requires replay_cache"):
         profiles.process_response(parsed, cfg, SP, ACS, IDP,
                                   expected_request_id="_req123", now=NOW)
 
@@ -684,6 +685,17 @@ def test_process_response_requires_replay_cache_by_default():
         unsafe_no_replay_cache=True,
     )
     assert result.name_id == "alice@example.org"
+
+
+def test_process_response_verified_names_replay_cache_requirement():
+    """The verified entry point reports its own API name in cache errors."""
+    verifier = crypto.SamlVerifier(crypto.KeysManager())
+    with pytest.raises(pygamlastan.SamlProfileError,
+                       match="process_response_verified requires replay_cache"):
+        profiles.process_response_verified(
+            "<samlp:Response/>", verifier, security.SecurityConfig(),
+            SP, ACS, IDP, expected_request_id="_req123", now=NOW,
+        )
 
 
 # --------------------------------------------------------------------------- #

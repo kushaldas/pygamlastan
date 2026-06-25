@@ -47,17 +47,18 @@ fn parse_comparison(s: Option<String>) -> PyResult<Option<AuthnContextComparison
 type ExtractedNameId = (String, Option<String>, Option<String>, Option<String>);
 
 fn require_profile_replay_cache(
+    api_name: &str,
     replay_cache_present: bool,
     unsafe_no_replay_cache: bool,
 ) -> PyResult<()> {
     if replay_cache_present || unsafe_no_replay_cache {
         return Ok(());
     }
-    Err(profile_err(
-        "process_response requires replay_cache by default; pass an \
+    Err(profile_err(format!(
+        "{api_name} requires replay_cache by default; pass an \
          InMemoryReplayCache or protocol implementation, or explicitly set \
-         unsafe_no_replay_cache=True for legacy unsafe processing",
-    ))
+         unsafe_no_replay_cache=True for legacy unsafe processing"
+    )))
 }
 
 fn require_profile_persistent_id_store(
@@ -425,7 +426,11 @@ fn process_response(
     unsafe_no_replay_cache: bool,
     unsafe_no_persistent_id_store: bool,
 ) -> PyResult<AuthnResult> {
-    require_profile_replay_cache(replay_cache.is_some(), unsafe_no_replay_cache)?;
+    require_profile_replay_cache(
+        "process_response",
+        replay_cache.is_some(),
+        unsafe_no_replay_cache,
+    )?;
     require_profile_persistent_id_store(
         &response.inner,
         config,
@@ -503,7 +508,11 @@ fn process_response_verified(
     unsafe_no_replay_cache: bool,
     unsafe_no_persistent_id_store: bool,
 ) -> PyResult<AuthnResult> {
-    require_profile_replay_cache(replay_cache.is_some(), unsafe_no_replay_cache)?;
+    require_profile_replay_cache(
+        "process_response_verified",
+        replay_cache.is_some(),
+        unsafe_no_replay_cache,
+    )?;
 
     // 1. Verify the signature over the exact bytes; this is the only source of
     //    truth for which IDs count as signed (errors if invalid/unsigned).

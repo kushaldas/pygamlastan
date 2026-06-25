@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Protocol
 
 from .core import Response
 
@@ -67,8 +67,8 @@ def validate_response(
     verified_signed_ids: list[str] | None = ...,
     current_proxy_depth: int = ...,
     now: datetime | None = ...,
-    replay_cache: Any | None = ...,
-    persistent_id_store: Any | None = ...,
+    replay_cache: ReplayCacheProtocol | None = ...,
+    persistent_id_store: PersistentIdStoreProtocol | None = ...,
     unsafe_no_replay_cache: bool = ...,
     unsafe_no_persistent_id_store: bool = ...,
 ) -> ValidationResult: ...
