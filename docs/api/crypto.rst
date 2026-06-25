@@ -55,9 +55,11 @@ Signing
       Apply an enveloped XML-DSig signature to a document that already carries a
       ``<ds:Signature>`` template.
 
-   .. py:method:: sign_redirect_query(query_string: bytes, algorithm_uri: str) -> bytes
+   .. py:method:: sign_redirect_query(query_string: bytes, algorithm_uri: str, unsafe_allow_weak_sha1: bool = False) -> bytes
 
       Sign a HTTP-Redirect query string; returns the raw signature bytes.
+      SHA-1 algorithms are rejected unless ``unsafe_allow_weak_sha1=True`` is
+      explicit.
 
    .. py:method:: signature_method_uri() -> str
    .. py:method:: is_hsm_backed() -> bool
@@ -76,10 +78,24 @@ Verification
       trust anchor.
 
    .. py:method:: verify_enveloped(signed_xml: str) -> VerifyResult
-   .. py:method:: verify_redirect_query(query_string: bytes, signature: bytes, algorithm_uri: str) -> bool
-   .. py:method:: set_skip_time_checks(skip: bool) -> None
-   .. py:method:: set_trusted_keys_only(trusted: bool) -> None
-   .. py:method:: set_strict_verification(strict: bool) -> None
+   .. py:method:: verify_redirect_query(query_string: bytes, signature: bytes, algorithm_uri: str, unsafe_allow_weak_sha1: bool = False) -> bool
+
+      Verify a HTTP-Redirect query signature. SHA-1 algorithms are rejected
+      unless ``unsafe_allow_weak_sha1=True`` is explicit.
+   .. py:method:: set_skip_time_checks(skip: bool, unsafe_allow_skip_time_checks: bool = False) -> None
+
+      ``skip=True`` raises unless ``unsafe_allow_skip_time_checks=True`` is
+      explicit.
+
+   .. py:method:: set_trusted_keys_only(trusted: bool, unsafe_allow_untrusted_keys: bool = False) -> None
+
+      ``trusted=False`` raises unless ``unsafe_allow_untrusted_keys=True`` is
+      explicit.
+
+   .. py:method:: set_strict_verification(strict: bool, unsafe_allow_non_strict: bool = False) -> None
+
+      ``strict=False`` raises unless ``unsafe_allow_non_strict=True`` is
+      explicit.
    .. py:method:: set_hmac_min_out_len(bits: int) -> None
 
 .. py:class:: VerifyResult

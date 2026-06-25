@@ -92,8 +92,21 @@ AUTHN_REQUEST = (
     'AllowCreate="true"/></samlp:AuthnRequest>'
 )
 
+SAMPLE_SP_METADATA = (
+    '<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" '
+    'entityID="https://sp.example.org/sp"><md:SPSSODescriptor '
+    'protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">'
+    '<md:AssertionConsumerService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" '
+    'Location="https://sp.example.org/acs" index="0" isDefault="true"/>'
+    "</md:SPSSODescriptor></md:EntityDescriptor>"
+)
 
-def _built_response_xml(in_response_to="_req123"):
+
+def _built_response_xml(
+    in_response_to="_req123",
+    name_id_value="alice@example.org",
+    name_id_format=core.NAMEID_TRANSIENT,
+):
     """Return the XML of a complete, *validatable* SAML Response.
 
     Unlike the hand-written ``SAMPLE_RESPONSE`` this goes through the IdP profile
@@ -101,7 +114,7 @@ def _built_response_xml(in_response_to="_req123"):
     requires - Conditions/AudienceRestriction, a bearer SubjectConfirmation with
     NotOnOrAfter, and an AuthnStatement. Used by the validation/replay tests.
     """
-    nid = core.NameId("alice@example.org", format=core.NAMEID_TRANSIENT)
+    nid = core.NameId(name_id_value, format=name_id_format)
     ro = profiles.ResponseOptions(
         IDP, SP, ACS, assertion_lifetime_seconds=300, in_response_to=in_response_to,
         authn_context_class_ref=core.AUTHN_CONTEXT_PASSWORD,
@@ -297,7 +310,7 @@ def test_enveloped_sign_and_verify(rsa_keypair):
     assert "<ds:SignatureValue>" in signed and "<ds:SignatureValue/>" not in signed
 
     verifier = crypto.SamlVerifier.from_cert(cert)
-    verifier.set_skip_time_checks(True)
+    verifier.set_skip_time_checks(True, unsafe_allow_skip_time_checks=True)
     result = verifier.verify_enveloped(signed)
     assert result.is_valid()
     assert bool(result) is True  # VerifyResult is truthy when valid
@@ -322,7 +335,7 @@ def test_verify_rejects_tampered(rsa_keypair):
     signed = crypto.SamlSigner.from_pem(priv).sign_enveloped(unsigned)
     tampered = signed.replace("_resp1", "_evil1", 1)  # break the first reference target
     verifier = crypto.SamlVerifier.from_cert(cert)
-    verifier.set_skip_time_checks(True)
+    verifier.set_skip_time_checks(True, unsafe_allow_skip_time_checks=True)
     try:
         assert not verifier.verify_enveloped(tampered).is_valid()
     except pygamlastan.SamlCryptoError:
@@ -351,6 +364,25 @@ def test_pkcs11_signing(softhsm):
     assert len(sig) == 256  # RSA-2048
 
 
+def test_redirect_signature_sha1_rejected_by_default(rsa_keypair):
+    """Redirect signing and verification reject SHA-1 unless explicitly allowed."""
+    priv, cert, _cert_b64 = rsa_keypair
+    signer = crypto.SamlSigner.from_pem(priv)
+    verifier = crypto.SamlVerifier.from_cert(cert)
+    query = b"SAMLRequest=abc&SigAlg=http%3A%2F%2Fwww.w3.org%2F2000%2F09%2Fxmldsig%23rsa-sha1"
+    sha1_uri = "http://www.w3.org/2000/09/xmldsig#rsa-sha1"
+
+    with pytest.raises(pygamlastan.SamlCryptoError):
+        signer.sign_redirect_query(query, sha1_uri)
+
+    sig = signer.sign_redirect_query(query, sha1_uri, unsafe_allow_weak_sha1=True)
+
+    with pytest.raises(pygamlastan.SamlCryptoError):
+        verifier.verify_redirect_query(query, sig, sha1_uri)
+
+    assert verifier.verify_redirect_query(query, sig, sha1_uri, unsafe_allow_weak_sha1=True) is True
+
+
 # --------------------------------------------------------------------------- #
 # bindings
 # --------------------------------------------------------------------------- #
@@ -372,18 +404,56 @@ def test_redirect_roundtrip():
     assert dec.saml_text.startswith("<samlp:AuthnRequest")
 
 
+def test_redirect_encode_sha1_rejection_is_binding_error(rsa_keypair):
+    """Binding-level SHA-1 rejection should not wrap a crypto exception string."""
+    priv, _cert, _cert_b64 = rsa_keypair
+    signer = crypto.SamlSigner.from_pem(priv)
+    sha1_uri = "http://www.w3.org/2000/09/xmldsig#rsa-sha1"
+    msg = b'<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ID="_r1" Version="2.0" IssueInstant="2026-06-24T10:00:00Z"/>'
+
+    with pytest.raises(pygamlastan.SamlBindingError,
+                       match="SHA-1 signature algorithms") as excinfo:
+        bindings.redirect_encode(
+            msg, True, "https://idp.example.org/sso",
+            signer=signer, sig_alg=sha1_uri,
+        )
+    assert "SamlCryptoError" not in str(excinfo.value)
+
+
 def test_post_roundtrip():
     """HTTP-POST encode emits a self-submitting form; decode reverses it.
 
-    POST form fields are plain base64 (no DEFLATE), so `post_decode` takes the
-    already-form-decoded values as a dict, mirroring how a web framework hands
-    over `request.form`.
+    POST form fields are plain base64 (no DEFLATE), so `post_decode` takes
+    duplicate-preserving name/value pairs from a framework MultiDict.
     """
     msg = b'<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ID="_r1" Version="2.0" IssueInstant="2026-06-24T10:00:00Z"/>'
     html = bindings.post_encode(msg, True, "https://idp.example.org/sso", relay_state="s2")
     assert "<form" in html and "SAMLRequest" in html
-    dec = bindings.post_decode({"SAMLRequest": base64.b64encode(msg).decode(), "RelayState": "s2"})
+    dec = bindings.post_decode([("SAMLRequest", base64.b64encode(msg).decode()), ("RelayState", "s2")])
     assert dec.is_request and dec.relay_state == "s2"
+
+
+def test_post_decode_rejects_collapsed_mapping_and_duplicates():
+    """HTTP-POST decode fails closed on collapsed dict input and duplicate SAML params."""
+    from collections import UserDict
+
+    msg = b'<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ID="_r1" Version="2.0" IssueInstant="2026-06-24T10:00:00Z"/>'
+    form = {"SAMLRequest": base64.b64encode(msg).decode(), "RelayState": "s2"}
+    with pytest.raises(pygamlastan.SamlBindingError):
+        bindings.post_decode(form)
+
+    dec = bindings.post_decode(form, unsafe_allow_collapsed_form=True)
+    assert dec.is_request and dec.relay_state == "s2"
+
+    user_dict = UserDict(form)
+    with pytest.raises(pygamlastan.SamlBindingError):
+        bindings.post_decode(user_dict)
+
+    dec = bindings.post_decode(user_dict, unsafe_allow_collapsed_form=True)
+    assert dec.is_request and dec.relay_state == "s2"
+
+    with pytest.raises(pygamlastan.SamlBindingError):
+        bindings.post_decode([("SAMLResponse", "AAAA"), ("SAMLResponse", "BBBB")])
 
 
 def test_relay_state_validation():
@@ -474,6 +544,23 @@ def test_attribute_map_to_local_and_back():
     assert back[0].name == "urn:oid:0.9.2342.19200300.100.1.3"
 
 
+def test_attribute_map_rejects_unknown_friendly_name_by_default():
+    """Unknown attributes do not become local attributes via FriendlyName by default."""
+    wire = core.Attribute(
+        "urn:example:custom-admin-flag",
+        values=["true"],
+        name_format=core.ATTRNAME_FORMAT_URI,
+        friendly_name="isAdmin",
+    )
+
+    strict = attribute_map.AttributeConverterSet.with_default_maps()
+    assert strict.local_name(wire) is None
+    assert strict.to_local([wire]) == []
+
+    unsafe = attribute_map.AttributeConverterSet.with_default_maps(allow_unknown_attributes=True)
+    assert [(la.name, la.values) for la in unsafe.to_local([wire])] == [("isAdmin", ["true"])]
+
+
 def test_attribute_converter_static():
     """A single converter built from a named shipped map resolves wire→local."""
     conv = attribute_map.AttributeConverter.from_static("saml_uri")
@@ -522,11 +609,28 @@ def test_validate_response_structured():
     parsed = xml.parse_response(_built_response_xml())
     cfg = security.SecurityConfig.permissive()
     res = security.validate_response(parsed, cfg, ACS, IDP, SP, ACS,
-                                     expected_request_id="_req123", now=NOW)
+                                     expected_request_id="_req123", now=NOW,
+                                     replay_cache=security.InMemoryReplayCache())
     assert res.is_valid()
     assert res.total_checks() > 0
     assert all(c.passed for c in res.checks)
     assert res.failures() == []
+
+
+def test_validate_response_requires_replay_cache_by_default():
+    """Validation requires replay protection unless the unsafe legacy mode is explicit."""
+    parsed = xml.parse_response(_built_response_xml())
+    cfg = security.SecurityConfig.permissive()
+    with pytest.raises(pygamlastan.SamlSecurityError):
+        security.validate_response(parsed, cfg, ACS, IDP, SP, ACS,
+                                   expected_request_id="_req123", now=NOW)
+
+    res = security.validate_response(
+        parsed, cfg, ACS, IDP, SP, ACS,
+        expected_request_id="_req123", now=NOW,
+        unsafe_no_replay_cache=True,
+    )
+    assert res.is_valid()
 
 
 def test_inmemory_replay_cache():
@@ -582,6 +686,34 @@ def test_python_replay_cache_protocol():
                                   now=NOW, replay_cache=cache)
 
 
+def test_process_response_requires_replay_cache_by_default():
+    """SP response processing requires a replay cache unless explicitly waived."""
+    parsed = xml.parse_response(_built_response_xml())
+    cfg = security.SecurityConfig.permissive()
+    with pytest.raises(pygamlastan.SamlProfileError,
+                       match="process_response requires replay_cache"):
+        profiles.process_response(parsed, cfg, SP, ACS, IDP,
+                                  expected_request_id="_req123", now=NOW)
+
+    result = profiles.process_response(
+        parsed, cfg, SP, ACS, IDP,
+        expected_request_id="_req123", now=NOW,
+        unsafe_no_replay_cache=True,
+    )
+    assert result.name_id == "alice@example.org"
+
+
+def test_process_response_verified_names_replay_cache_requirement():
+    """The verified entry point reports its own API name in cache errors."""
+    verifier = crypto.SamlVerifier(crypto.KeysManager())
+    with pytest.raises(pygamlastan.SamlProfileError,
+                       match="process_response_verified requires replay_cache"):
+        profiles.process_response_verified(
+            "<samlp:Response/>", verifier, security.SecurityConfig(),
+            SP, ACS, IDP, expected_request_id="_req123", now=NOW,
+        )
+
+
 # --------------------------------------------------------------------------- #
 # profiles - full Web SSO round trip
 # --------------------------------------------------------------------------- #
@@ -615,7 +747,14 @@ def test_idp_process_authn_request():
     build its Response.
     """
     req = xml.parse_authn_request(AUTHN_REQUEST)
-    processed = profiles.process_authn_request(req)
+    with pytest.raises(pygamlastan.SamlProfileError):
+        profiles.process_authn_request(req)
+
+    unsafe_processed = profiles.process_authn_request(req, unsafe_allow_missing_metadata=True)
+    assert unsafe_processed.acs_url == ACS
+
+    sp_md = metadata.parse_entity(SAMPLE_SP_METADATA)
+    processed = profiles.process_authn_request(req, sp_metadata=sp_md)
     assert processed.request_id == "_req1"
     assert processed.sp_entity_id == SP
     assert processed.acs_url == ACS
@@ -777,6 +916,7 @@ def test_process_response_verified_accepts_signed(rsa_keypair):
     result = profiles.process_response_verified(
         signed, verifier, security.SecurityConfig.permissive(),
         SP, ACS, IDP, expected_request_id="_req123", now=NOW,
+        replay_cache=security.InMemoryReplayCache(),
     )
     assert result.name_id == "alice@example.org"
     assert result.idp_entity_id == IDP
@@ -794,6 +934,7 @@ def test_process_response_verified_rejects_unsigned(rsa_keypair):
         profiles.process_response_verified(
             unsigned, verifier, security.SecurityConfig.permissive(),
             SP, ACS, IDP, expected_request_id="_req123", now=NOW,
+            replay_cache=security.InMemoryReplayCache(),
         )
 
 
@@ -808,6 +949,7 @@ def test_process_response_verified_rejects_tampered(rsa_keypair):
         profiles.process_response_verified(
             tampered, verifier, security.SecurityConfig.permissive(),
             SP, ACS, IDP, expected_request_id="_req123", now=NOW,
+            replay_cache=security.InMemoryReplayCache(),
         )
 
 
@@ -818,17 +960,23 @@ def test_permissive_config_warns():
 
 
 def test_verifier_downgrade_setters_warn():
-    """The verification-weakening knobs warn on the insecure direction (F-3);
-    the secure direction stays silent."""
+    """Verifier downgrade knobs block by default and warn only with unsafe flags."""
     import warnings
 
     verifier = crypto.SamlVerifier(crypto.KeysManager())
-    with pytest.warns(UserWarning, match="trusted_keys_only"):
+    with pytest.raises(pygamlastan.SamlCryptoError):
         verifier.set_trusted_keys_only(False)
-    with pytest.warns(UserWarning, match="strict_verification"):
+    with pytest.raises(pygamlastan.SamlCryptoError):
         verifier.set_strict_verification(False)
-    with pytest.warns(UserWarning, match="skip_time_checks"):
+    with pytest.raises(pygamlastan.SamlCryptoError):
         verifier.set_skip_time_checks(True)
+
+    with pytest.warns(UserWarning, match="trusted_keys_only"):
+        verifier.set_trusted_keys_only(False, unsafe_allow_untrusted_keys=True)
+    with pytest.warns(UserWarning, match="strict_verification"):
+        verifier.set_strict_verification(False, unsafe_allow_non_strict=True)
+    with pytest.warns(UserWarning, match="skip_time_checks"):
+        verifier.set_skip_time_checks(True, unsafe_allow_skip_time_checks=True)
     # Secure direction: no warning.
     with warnings.catch_warnings():
         warnings.simplefilter("error")
@@ -905,12 +1053,52 @@ def test_persistent_id_store_detects_reassignment():
             return existing == principal  # False => conflict
 
     store = DictPidStore()
-    cfg = security.SecurityConfig()  # default-on enforce_persistent_id_uniqueness
+    cfg = security.SecurityConfig.permissive()
+    cfg.enforce_persistent_id_uniqueness = True
     assert cfg.enforce_persistent_id_uniqueness is True
-    # The store stands alone; exercise its protocol contract directly.
-    assert store.check_and_record("p-alice", SP, "alice") is True
-    assert store.check_and_record("p-alice", SP, "alice") is True   # same principal: ok
-    assert store.check_and_record("p-alice", SP, "mallory") is False  # reassignment: conflict
+    parsed = xml.parse_response(_built_response_xml(
+        name_id_value="p-alice",
+        name_id_format=core.NAMEID_PERSISTENT,
+    ))
+
+    with pytest.raises(pygamlastan.SamlSecurityError):
+        security.validate_response(
+            parsed, cfg, ACS, IDP, SP, ACS,
+            expected_request_id="_req123", now=NOW,
+            replay_cache=security.InMemoryReplayCache(),
+        )
+
+    res = security.validate_response(
+        parsed, cfg, ACS, IDP, SP, ACS,
+        expected_request_id="_req123", now=NOW,
+        replay_cache=security.InMemoryReplayCache(),
+        persistent_id_store=store,
+    )
+    assert res.is_valid()
+    store.seen[("p-alice", SP)] = "mallory"
+
+    conflict = security.validate_response(
+        parsed, cfg, ACS, IDP, SP, ACS,
+        expected_request_id="_req123", now=NOW,
+        replay_cache=security.InMemoryReplayCache(),
+        persistent_id_store=store,
+    )
+    assert not conflict.is_valid()
+
+    with pytest.raises(pygamlastan.SamlProfileError):
+        profiles.process_response(
+            parsed, cfg, SP, ACS, IDP,
+            expected_request_id="_req123", now=NOW,
+            replay_cache=security.InMemoryReplayCache(),
+        )
+
+    result = profiles.process_response(
+        parsed, cfg, SP, ACS, IDP,
+        expected_request_id="_req123", now=NOW,
+        replay_cache=security.InMemoryReplayCache(),
+        persistent_id_store=DictPidStore(),
+    )
+    assert result.name_id == "p-alice"
 
 
 def test_individual_check_assertion_age():
@@ -929,6 +1117,7 @@ def test_individual_check_assertion_age():
     res = security.validate_response(
         parsed, security.SecurityConfig.permissive(), ACS, IDP, SP, ACS,
         expected_request_id="_req123", now=NOW,
+        replay_cache=security.InMemoryReplayCache(),
     )
     assert res.total_checks() == len(res.checks)
     assert len(res.passed_checks()) + len(res.failures()) == res.total_checks()

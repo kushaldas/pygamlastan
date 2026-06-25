@@ -43,10 +43,18 @@ def idp_metadata_xml(cfg: IdpConfig) -> str:
 
 # --- Inbound ---------------------------------------------------------------
 
-def decode_authn_request(method: str, query_string: str, form: dict) -> tuple[str, str | None]:
+def _duplicate_preserving_form_pairs(form) -> list[tuple[str, str]]:
+    if hasattr(form, "lists"):
+        return [(name, value) for name, values in form.lists() for value in values]
+    if hasattr(form, "items"):
+        return list(form.items())
+    return list(form)
+
+
+def decode_authn_request(method: str, query_string: str, form) -> tuple[str, str | None]:
     """Return (saml_xml_text, relay_state) from a Redirect (GET) or POST request."""
     if method == "POST":
-        decoded = bindings.post_decode(form)
+        decoded = bindings.post_decode(_duplicate_preserving_form_pairs(form))
     else:
         # The raw, still-percent-encoded query string (do NOT pre-decode it).
         decoded = bindings.redirect_decode(query_string)

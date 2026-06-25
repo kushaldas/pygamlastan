@@ -19,13 +19,23 @@ Service Provider
 
    Build an (unsigned) ``AuthnRequest`` from ``options``.
 
-.. py:function:: process_response(response, config, sp_entity_id, acs_url, expected_idp_entity_id, expected_request_id=None, verified_signed_ids=None, now=None, replay_cache=None) -> AuthnResult
+.. py:function:: process_response(response, config, sp_entity_id, acs_url, expected_idp_entity_id, expected_request_id=None, verified_signed_ids=None, now=None, replay_cache=None, persistent_id_store=None, unsafe_no_replay_cache=False, unsafe_no_persistent_id_store=False) -> AuthnResult
 
    Validate a :class:`pygamlastan.core.Response` and extract the identity. Pass
    ``verified_signed_ids`` from a trusted
    :class:`pygamlastan.crypto.SamlVerifier` to enforce signed assertions, and a
-   ``replay_cache`` to detect assertion replay. Raises
+   ``replay_cache`` to detect assertion replay. ``replay_cache`` is required by
+   default; pass ``unsafe_no_replay_cache=True`` only for legacy unsafe
+   processing. If persistent NameID uniqueness is enabled, persistent NameID
+   responses also require ``persistent_id_store`` unless explicitly waived.
+   Raises
    :class:`pygamlastan.SamlProfileError` on any validation failure.
+
+.. py:function:: process_response_verified(response_xml, verifier, config, sp_entity_id, acs_url, expected_idp_entity_id, expected_request_id=None, now=None, replay_cache=None, persistent_id_store=None, unsafe_no_replay_cache=False, unsafe_no_persistent_id_store=False) -> AuthnResult
+
+   Verify the XML signature with ``verifier``, then validate and extract the
+   identity. This is the preferred SP entry point when the raw response XML is
+   available. ``replay_cache`` is required by default.
 
 .. py:class:: AuthnResult
 
@@ -63,11 +73,13 @@ Service Provider
 Identity Provider
 -----------------
 
-.. py:function:: process_authn_request(request, sp_metadata=None) -> ProcessedAuthnRequest
+.. py:function:: process_authn_request(request, sp_metadata=None, unsafe_allow_missing_metadata=False) -> ProcessedAuthnRequest
 
    Distil an incoming ``AuthnRequest`` into the fields needed to build a
-   response. Pass ``sp_metadata`` (a :class:`pygamlastan.metadata.EntityDescriptor`)
-   to validate the ACS endpoint.
+   response. ``sp_metadata`` (a :class:`pygamlastan.metadata.EntityDescriptor`)
+   is required by default so the ACS endpoint is resolved against trusted
+   metadata. Pass ``unsafe_allow_missing_metadata=True`` only for legacy unsafe
+   processing.
 
 .. py:class:: ProcessedAuthnRequest
 

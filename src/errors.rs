@@ -7,16 +7,61 @@
 use pyo3::prelude::*;
 use pyo3::{create_exception, exceptions::PyException};
 
-create_exception!(pygamlastan, SamlError, PyException, "Base class for all pygamlastan errors.");
-create_exception!(pygamlastan, SamlCoreError, SamlError, "Core SAML type error.");
-create_exception!(pygamlastan, SamlXmlError, SamlError, "XML parsing/serialization error.");
-create_exception!(pygamlastan, SamlCryptoError, SamlError, "Cryptographic operation error.");
-create_exception!(pygamlastan, SamlBindingError, SamlError, "Protocol binding error.");
+create_exception!(
+    pygamlastan,
+    SamlError,
+    PyException,
+    "Base class for all pygamlastan errors."
+);
+create_exception!(
+    pygamlastan,
+    SamlCoreError,
+    SamlError,
+    "Core SAML type error."
+);
+create_exception!(
+    pygamlastan,
+    SamlXmlError,
+    SamlError,
+    "XML parsing/serialization error."
+);
+create_exception!(
+    pygamlastan,
+    SamlCryptoError,
+    SamlError,
+    "Cryptographic operation error."
+);
+create_exception!(
+    pygamlastan,
+    SamlBindingError,
+    SamlError,
+    "Protocol binding error."
+);
 create_exception!(pygamlastan, SamlMetadataError, SamlError, "Metadata error.");
-create_exception!(pygamlastan, SamlSecurityError, SamlError, "Security validation error.");
-create_exception!(pygamlastan, SamlProfileError, SamlError, "SAML profile error.");
-create_exception!(pygamlastan, SamlPolicyError, SamlError, "Attribute-release policy error.");
-create_exception!(pygamlastan, SamlIdentError, SamlError, "Identity store error.");
+create_exception!(
+    pygamlastan,
+    SamlSecurityError,
+    SamlError,
+    "Security validation error."
+);
+create_exception!(
+    pygamlastan,
+    SamlProfileError,
+    SamlError,
+    "SAML profile error."
+);
+create_exception!(
+    pygamlastan,
+    SamlPolicyError,
+    SamlError,
+    "Attribute-release policy error."
+);
+create_exception!(
+    pygamlastan,
+    SamlIdentError,
+    SamlError,
+    "Identity store error."
+);
 
 // --- Error-mapping helpers (gamlastan/kryptering error enums -> PyErr) ---
 // The orphan rule prevents `impl From<ForeignError> for PyErr`, so we use small

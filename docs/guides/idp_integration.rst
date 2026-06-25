@@ -7,15 +7,16 @@ the user, and returns a ``Response`` carrying an assertion.
 Processing an incoming AuthnRequest
 -----------------------------------
 
-Parse the request, then distil it into the fields you need with
-:func:`pygamlastan.profiles.process_authn_request`:
+Parse the request, resolve the SP's metadata, then distil it into the fields you
+need with :func:`pygamlastan.profiles.process_authn_request`:
 
 .. code-block:: python
 
-   from pygamlastan import xml, profiles
+   from pygamlastan import xml, metadata, profiles
 
    request = xml.parse_authn_request(request_xml)
-   processed = profiles.process_authn_request(request)
+   sp_md = metadata.parse_entity(sp_metadata_xml)
+   processed = profiles.process_authn_request(request, sp_metadata=sp_md)
 
    processed.request_id               # echo as InResponseTo
    processed.sp_entity_id             # who is asking
@@ -24,7 +25,7 @@ Parse the request, then distil it into the fields you need with
    processed.requested_name_id_format # the SP's preferred NameID format
    processed.force_authn              # must the user re-authenticate?
 
-If you have the SP's metadata, pass it so the ACS URL/binding can be validated
+SP metadata is required by default so the ACS URL/binding can be validated
 against the registered endpoints:
 
 .. code-block:: python
@@ -33,6 +34,9 @@ against the registered endpoints:
 
    sp_md = metadata.parse_entity(sp_metadata_xml)
    processed = profiles.process_authn_request(request, sp_metadata=sp_md)
+
+Only legacy compatibility code should use
+``unsafe_allow_missing_metadata=True``.
 
 Resolving the SP's metadata
 ---------------------------

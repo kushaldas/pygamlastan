@@ -10,12 +10,17 @@ use gamlastan::security as gs;
 
 use crate::convert::new_submodule;
 use crate::core::Response;
+use crate::errors::security_err;
 
 // ---------------------------------------------------------------------------
 // SecurityConfig
 // ---------------------------------------------------------------------------
 
-#[pyclass(module = "pygamlastan.security", name = "SecurityConfig", skip_from_py_object)]
+#[pyclass(
+    module = "pygamlastan.security",
+    name = "SecurityConfig",
+    skip_from_py_object
+)]
 #[derive(Clone)]
 pub struct SecurityConfig {
     pub inner: gs::SecurityConfig,
@@ -25,7 +30,9 @@ pub struct SecurityConfig {
 impl SecurityConfig {
     #[new]
     fn new() -> Self {
-        SecurityConfig { inner: gs::SecurityConfig::new() }
+        SecurityConfig {
+            inner: gs::SecurityConfig::new(),
+        }
     }
     /// Permissive config for testing only (NOT for production). Emits a
     /// `UserWarning` because it disables security checks such as the
@@ -37,12 +44,16 @@ impl SecurityConfig {
             "SecurityConfig.permissive() disables SAML security checks (e.g. the \
              signed-assertion/response requirements) and must never be used in production.",
         );
-        SecurityConfig { inner: gs::SecurityConfig::permissive() }
+        SecurityConfig {
+            inner: gs::SecurityConfig::permissive(),
+        }
     }
     /// Strict config: all checks plus optional ones enabled.
     #[staticmethod]
     fn strict() -> Self {
-        SecurityConfig { inner: gs::SecurityConfig::strict() }
+        SecurityConfig {
+            inner: gs::SecurityConfig::strict(),
+        }
     }
 
     #[getter]
@@ -217,12 +228,21 @@ impl ValidationResult {
     }
     /// Only the checks that passed.
     fn passed_checks(&self) -> Vec<ValidationCheck> {
-        self.inner.checks.iter().filter(|c| c.passed).map(check_to_py).collect()
+        self.inner
+            .checks
+            .iter()
+            .filter(|c| c.passed)
+            .map(check_to_py)
+            .collect()
     }
     /// The check with the given checklist number (1-32), or None. Lets a profile
     /// inspect one specific outcome without re-walking the full `checks` list.
     fn get(&self, check_number: u32) -> Option<ValidationCheck> {
-        self.inner.checks.iter().find(|c| c.check_number == check_number).map(check_to_py)
+        self.inner
+            .checks
+            .iter()
+            .find(|c| c.check_number == check_number)
+            .map(check_to_py)
     }
     /// The first check whose name equals `name` (case-insensitive), or None.
     fn by_name(&self, name: &str) -> Option<ValidationCheck> {
@@ -255,7 +275,9 @@ pub struct InMemoryReplayCache {
 impl InMemoryReplayCache {
     #[new]
     fn new() -> Self {
-        InMemoryReplayCache { inner: gs::InMemoryReplayCache::new() }
+        InMemoryReplayCache {
+            inner: gs::InMemoryReplayCache::new(),
+        }
     }
     /// True if `id` is new (inserted); False if already seen before `expiry`.
     fn check_and_insert(&self, id: &str, expiry: DateTime<Utc>) -> bool {
@@ -304,7 +326,12 @@ pub struct PyPersistentIdStore {
 }
 
 impl gs::name_id::PersistentIdStore for PyPersistentIdStore {
-    fn check_and_record(&self, name_id: &str, sp_entity_id: &str, principal: &str) -> Result<(), String> {
+    fn check_and_record(
+        &self,
+        name_id: &str,
+        sp_entity_id: &str,
+        principal: &str,
+    ) -> Result<(), String> {
         Python::attach(|py| {
             let ok = self
                 .obj
@@ -327,6 +354,69 @@ impl gs::name_id::PersistentIdStore for PyPersistentIdStore {
 // ---------------------------------------------------------------------------
 // validate_response
 // ---------------------------------------------------------------------------
+
+pub(crate) fn response_requires_persistent_id_store_inner(
+    response: &gamlastan::core::protocol::response::Response,
+    config: &gs::SecurityConfig,
+) -> bool {
+    if !config.enforce_persistent_id_uniqueness {
+        return false;
+    }
+
+    response.assertions.iter().any(|assertion| {
+        assertion
+            .subject
+            .as_ref()
+            .and_then(|subject| subject.name_id.as_ref())
+            .is_some_and(|name_id| {
+                matches!(
+                    name_id,
+                    gamlastan::core::assertion::name_id::NameIdOrEncryptedId::NameId(nid)
+                        if nid.format.as_deref()
+                            == Some(gamlastan::core::constants::NAMEID_PERSISTENT)
+                )
+            })
+    })
+}
+
+pub(crate) fn response_requires_persistent_id_store(
+    response: &Response,
+    config: &SecurityConfig,
+) -> bool {
+    response_requires_persistent_id_store_inner(&response.inner, &config.inner)
+}
+
+fn require_replay_cache(replay_cache_present: bool, unsafe_no_replay_cache: bool) -> PyResult<()> {
+    if replay_cache_present || unsafe_no_replay_cache {
+        return Ok(());
+    }
+    Err(security_err(
+        "validate_response requires replay_cache by default; pass an \
+         InMemoryReplayCache or protocol implementation, or explicitly set \
+         unsafe_no_replay_cache=True for legacy unsafe processing",
+    ))
+}
+
+fn require_persistent_id_store(
+    response: &Response,
+    config: &SecurityConfig,
+    persistent_id_store_present: bool,
+    unsafe_no_persistent_id_store: bool,
+) -> PyResult<()> {
+    if !response_requires_persistent_id_store(response, config)
+        || persistent_id_store_present
+        || unsafe_no_persistent_id_store
+    {
+        return Ok(());
+    }
+
+    Err(security_err(
+        "persistent NameID uniqueness is enabled and this response contains a \
+         persistent NameID, but no persistent_id_store was provided; pass a store \
+         or explicitly set unsafe_no_persistent_id_store=True for legacy unsafe \
+         processing",
+    ))
+}
 
 /// Run the full Web-SSO validation suite over a parsed `Response`, returning a
 /// structured `ValidationResult` (does not raise on validation failure).
@@ -352,6 +442,7 @@ impl gs::name_id::PersistentIdStore for PyPersistentIdStore {
     expected_request_id=None, client_address=None, relay_state=None,
     response_signature_verified=None, verified_signed_ids=None,
     current_proxy_depth=0, now=None, replay_cache=None, persistent_id_store=None,
+    unsafe_no_replay_cache=false, unsafe_no_persistent_id_store=false,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn validate_response(
@@ -370,7 +461,17 @@ fn validate_response(
     now: Option<DateTime<Utc>>,
     replay_cache: Option<Py<PyAny>>,
     persistent_id_store: Option<Py<PyAny>>,
-) -> ValidationResult {
+    unsafe_no_replay_cache: bool,
+    unsafe_no_persistent_id_store: bool,
+) -> PyResult<ValidationResult> {
+    require_replay_cache(replay_cache.is_some(), unsafe_no_replay_cache)?;
+    require_persistent_id_store(
+        response,
+        config,
+        persistent_id_store.is_some(),
+        unsafe_no_persistent_id_store,
+    )?;
+
     // `gs::ValidationParams<'a>` borrows all its string inputs, so it cannot be
     // stored in a #[pyclass]. We instead take owned `String`/`Vec<String>` from
     // Python, keep them alive in these locals, and build the borrowed params
@@ -412,7 +513,7 @@ fn validate_response(
         validator = validator.with_persistent_id_store(s);
     }
     let result = validator.validate_response(&response.inner, &params);
-    ValidationResult { inner: result }
+    Ok(ValidationResult { inner: result })
 }
 
 /// Run a single check standalone: the assertion-age check (checklist #0).

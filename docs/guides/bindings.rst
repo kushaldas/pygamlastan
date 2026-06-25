@@ -3,7 +3,7 @@ Protocol bindings
 
 The :doc:`../api/bindings` module encodes and decodes SAML messages for the
 HTTP-Redirect, HTTP-POST, and Artifact bindings. The functions work on plain
-Python data (bytes, strings, dicts), so they fit any web framework: you do the
+Python data (bytes, strings, and name/value pairs), so they fit any web framework: you do the
 HTTP I/O, pygamlastan does the SAML encoding.
 
 HTTP-Redirect
@@ -68,15 +68,15 @@ Encode a self-submitting HTML form; render it in the browser to auto-post:
        relay_state="state",
    )
 
-Decode from the already form-decoded POST parameters (POST fields are plain
-base64, not DEFLATE-compressed):
+Decode from duplicate-preserving, already form-decoded POST parameters (POST
+fields are plain base64, not DEFLATE-compressed):
 
 .. code-block:: python
 
-   decoded = bindings.post_decode({
-       "SAMLResponse": form["SAMLResponse"],
-       "RelayState": form.get("RelayState", ""),
-   })
+   decoded = bindings.post_decode([
+       ("SAMLResponse", form["SAMLResponse"]),
+       ("RelayState", form.get("RelayState", "")),
+   ])
 
 RelayState
 ----------

@@ -30,12 +30,16 @@ pub struct AttributeConverter {
 impl AttributeConverter {
     #[new]
     fn new(name_format: String) -> Self {
-        AttributeConverter { inner: gam::AttributeConverter::new(name_format) }
+        AttributeConverter {
+            inner: gam::AttributeConverter::new(name_format),
+        }
     }
     /// Build a converter from a shipped static map name (e.g. "saml_uri").
     #[staticmethod]
     fn from_static(name: &str) -> PyResult<Self> {
-        Ok(AttributeConverter { inner: gam::AttributeConverter::from_static(static_map(name)?) })
+        Ok(AttributeConverter {
+            inner: gam::AttributeConverter::from_static(static_map(name)?),
+        })
     }
     fn add_mapping(&mut self, wire: &str, local: &str) {
         self.inner.add_mapping(wire, local);
@@ -52,7 +56,11 @@ impl AttributeConverter {
     }
 }
 
-#[pyclass(module = "pygamlastan.attribute_map", name = "LocalAttribute", from_py_object)]
+#[pyclass(
+    module = "pygamlastan.attribute_map",
+    name = "LocalAttribute",
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct LocalAttribute {
     inner: gam::LocalAttribute,
@@ -63,7 +71,9 @@ impl LocalAttribute {
     #[new]
     fn new(name: String, values: Vec<String>) -> Self {
         let refs: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
-        LocalAttribute { inner: gam::LocalAttribute::from_strings(name, &refs) }
+        LocalAttribute {
+            inner: gam::LocalAttribute::from_strings(name, &refs),
+        }
     }
     #[getter]
     fn name(&self) -> &str {
@@ -72,7 +82,11 @@ impl LocalAttribute {
     /// String-typed values of this attribute.
     #[getter]
     fn values(&self) -> Vec<String> {
-        self.inner.values.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+        self.inner
+            .values
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect()
     }
     fn __repr__(&self) -> String {
         format!("LocalAttribute(name={:?})", self.inner.name)
@@ -82,6 +96,7 @@ impl LocalAttribute {
 #[pyclass(module = "pygamlastan.attribute_map", name = "AttributeConverterSet")]
 pub struct AttributeConverterSet {
     inner: gam::AttributeConverterSet,
+    allow_unknown_attributes: bool,
 }
 
 #[pymethods]
@@ -90,26 +105,52 @@ impl AttributeConverterSet {
     #[staticmethod]
     #[pyo3(signature = (allow_unknown_attributes=false))]
     fn with_default_maps(allow_unknown_attributes: bool) -> Self {
-        let inner =
-            gam::AttributeConverterSet::with_default_maps().allow_unknown_attributes(allow_unknown_attributes);
-        AttributeConverterSet { inner }
+        let inner = gam::AttributeConverterSet::with_default_maps()
+            .allow_unknown_attributes(allow_unknown_attributes);
+        AttributeConverterSet {
+            inner,
+            allow_unknown_attributes,
+        }
     }
 
     /// Convert wire `Attribute`s into local (name, values) attributes.
     fn to_local(&self, attributes: Vec<Attribute>) -> Vec<LocalAttribute> {
-        let owned: Vec<_> = attributes.into_iter().map(|a| a.inner).collect();
-        self.inner.to_local(&owned).into_iter().map(|inner| LocalAttribute { inner }).collect()
+        let owned: Vec<_> = attributes
+            .into_iter()
+            .map(|a| {
+                let mut attr = a.inner;
+                if !self.allow_unknown_attributes {
+                    attr.friendly_name = None;
+                }
+                attr
+            })
+            .collect();
+        self.inner
+            .to_local(&owned)
+            .into_iter()
+            .map(|inner| LocalAttribute { inner })
+            .collect()
     }
 
     /// Convert local attributes back into wire `Attribute`s for `name_format`.
+    #[allow(clippy::wrong_self_convention)]
     fn from_local(&self, ava: Vec<LocalAttribute>, name_format: &str) -> Vec<Attribute> {
         let owned: Vec<_> = ava.into_iter().map(|a| a.inner).collect();
-        self.inner.from_local(&owned, name_format).into_iter().map(Attribute::wrap).collect()
+        self.inner
+            .from_local(&owned, name_format)
+            .into_iter()
+            .map(Attribute::wrap)
+            .collect()
     }
 
     /// The local name for a wire attribute, if a converter knows it.
     fn local_name(&self, attribute: &Attribute) -> Option<String> {
-        self.inner.local_name(&attribute.inner)
+        if self.allow_unknown_attributes {
+            return self.inner.local_name(&attribute.inner);
+        }
+        let mut attr = attribute.inner.clone();
+        attr.friendly_name = None;
+        self.inner.local_name(&attr)
     }
 }
 
@@ -123,7 +164,10 @@ fn eptid_attribute(name_ids: Vec<NameId>) -> Attribute {
 /// Extract the NameIds from an eduPersonTargetedID attribute.
 #[pyfunction]
 fn eptid_name_ids(attribute: &Attribute) -> Vec<NameId> {
-    gam::eptid_name_ids(&attribute.inner).into_iter().map(|n| NameId::wrap(n.clone())).collect()
+    gam::eptid_name_ids(&attribute.inner)
+        .into_iter()
+        .map(|n| NameId::wrap(n.clone()))
+        .collect()
 }
 
 pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {

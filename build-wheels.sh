@@ -1,13 +1,24 @@
 #!/bin/bash
 set -ex
 
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-export PATH="$HOME/.cargo/bin:$PATH"
+command -v cargo >/dev/null 2>&1 || {
+    echo "cargo is required; install Rust in the build image before running this script" >&2
+    exit 1
+}
+command -v uv >/dev/null 2>&1 || {
+    echo "uv is required; install it in the build image before running this script" >&2
+    exit 1
+}
 
-curl -LsSf https://astral.sh/uv/install.sh | sh
-uv venv --python /opt/python/cp314-cp314/bin/python3.14 /opt/venv
+PYTHON="${PYTHON:-/opt/python/cp314-cp314/bin/python3.14}"
+test -x "$PYTHON" || {
+    echo "Python build driver not found or not executable: $PYTHON" >&2
+    exit 1
+}
+
+uv venv --python "$PYTHON" /opt/venv
 source /opt/venv/bin/activate
-uv pip install --upgrade "maturin>=1,<2"
+uv pip install --upgrade "maturin==1.9.6"
 cd /io/
 # pygamlastan builds an abi3 (py310+) wheel, so the single artifact produced
 # here covers every supported CPython; the cp314 interpreter above is only the
