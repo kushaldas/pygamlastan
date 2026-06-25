@@ -7,13 +7,19 @@ build:
   os: ubuntu-24.04
   tools:
     python: "3.12"
+  jobs:
+    # Install only the docs dependency group; do NOT build the Rust extension
+    # (the API docs use hand-written directives, so the compiled package is not
+    # needed to render them - this avoids a multi-minute maturin/cargo build).
+    # `uv pip install` resolves for the active 3.12 interpreter, so sphinx 9.1.0
+    # (which needs >=3.12) installs cleanly; `uv sync` would instead resolve the
+    # whole requires-python >=3.10 range and fail.
+    install:
+      - pip install uv
+      - uv pip install --group docs
+    build:
+      html:
+        - python -m sphinx -b html -W docs $READTHEDOCS_OUTPUT/html
 
 sphinx:
   configuration: docs/conf.py
-
-python:
-  install:
-    - method: pip
-      path: .
-      extra_requirements:
-        - docs
