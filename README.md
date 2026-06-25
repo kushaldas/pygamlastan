@@ -67,7 +67,7 @@ installed; when present it provisions a throwaway token and signs for real.
 
 ## Documentation
 
-User documentation (Sphinx 9.1) lives in `docs/`: installation, a quickstart, task
+You can read the [latest](https://pygamlastan.readthedocs.io/en/latest/) or the documentation (Sphinx 9.1) lives in `docs/`: installation, a quickstart, task
 guides (SP/IdP integration, signing & HSM, bindings, metadata, attributes,
 validation), and a per-module API reference. Build it with the project venv so the
 package is importable:
