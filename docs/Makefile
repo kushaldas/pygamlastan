@@ -14,7 +14,7 @@ BUILDDIR      = _build
 # Only targets that have their own recipe are phony. html/linkcheck/etc. must
 # NOT be listed here, or their empty explicit entry shadows the catch-all below
 # and make reports "Nothing to be done".
-.PHONY: help clean Makefile
+.PHONY: help clean
 
 help:
 	@$(SPHINXBUILD) -M help "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS)

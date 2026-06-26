@@ -14,6 +14,7 @@ default:
 # Only needed until pygamlastan is published to PyPI. Requires Rust + maturin.
 wheel:
     cd ../ && maturin build --release
+    mkdir -p django-idp/wheels django-sp/wheels
     cp ../target/wheels/pygamlastan-*.whl django-idp/wheels/
     cp ../target/wheels/pygamlastan-*.whl django-sp/wheels/
     @echo "Staged pygamlastan wheel in django-idp/wheels and django-sp/wheels"

@@ -17,15 +17,15 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
 
-# Install dependencies first for better layer caching. pygamlastan is pulled from
-# PyPI (manylinux abi3 wheel - no Rust toolchain needed); if it is not published
-# yet, a wheel placed in ./wheels is used instead via --find-links.
-COPY wheels/ /app/wheels/
+# Copy the app (including optional ./wheels) so the build works whether or not a local wheel is present.
+COPY . /app
+RUN mkdir -p /app/wheels
+
+# Install dependencies. If a local pygamlastan wheel is present in ./wheels it will win via --find-links.
 RUN uv venv /app/.venv \
  && uv pip install --find-links /app/wheels \
         "django==6.0.6" "pygamlastan>=0.1" "cryptography>=42" "gunicorn>=22" "whitenoise>=6"
 
-COPY . /app
 RUN chmod +x /app/entrypoint.sh
 
 EXPOSE 8000
