@@ -1,0 +1,88 @@
+# pygamlastan local SAML federation (IdP + SP behind one Caddy).
+# Run `just` to list recipes.
+
+set dotenv-load := true
+
+# SWAMID QA metadata signing cert (verifies MDQ responses). Prod signer:
+#   just swamid-cert https://mds.swamid.se/md/md-signer2.crt
+swamid_cert_url := "https://mds.swamid.se/qa/md/swamid-qa.crt"
+
+default:
+    @just --list
+
+# Build a pygamlastan wheel from the repo and stage it in both app wheel dirs.
+# Only needed until pygamlastan is published to PyPI. Requires Rust + maturin.
+wheel:
+    cd ../ && maturin build --release
+    cp ../target/wheels/pygamlastan-*.whl django-idp/wheels/
+    cp ../target/wheels/pygamlastan-*.whl django-sp/wheels/
+    @echo "Staged pygamlastan wheel in django-idp/wheels and django-sp/wheels"
+
+# Create locally-trusted TLS certs for both domains with mkcert (for Caddy).
+# `mkcert -install` adds the local CA to your trust store the first time.
+tls:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    idp="${IDP_DOMAIN:-idp.localhost}"
+    sp="${SP_DOMAIN:-sp.localhost}"
+    mkcert -install
+    mkdir -p certs/idp certs/sp
+    [[ -f certs/idp/cert.pem ]] || mkcert -cert-file certs/idp/cert.pem -key-file certs/idp/key.pem "$idp"
+    [[ -f certs/sp/cert.pem ]]  || mkcert -cert-file certs/sp/cert.pem  -key-file certs/sp/key.pem  "$sp"
+    echo "TLS certs in ./certs for ${idp} and ${sp}"
+
+# Fetch the SWAMID signing cert into both data dirs (for the MDQ path).
+swamid-cert url=swamid_cert_url:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for d in django-idp/data django-sp/data; do
+        mkdir -p "$d"
+        [[ -f "$d/swamid-signing.pem" ]] || curl -fsSL "{{url}}" -o "$d/swamid-signing.pem"
+    done
+    @echo "SWAMID signing cert present in django-idp/data and django-sp/data"
+
+# Build both images.
+build:
+    docker compose build
+
+# Certs + build + start (SP uses SWAMID QA MDQ + discovery; local pairing: `just link`).
+up: tls swamid-cert
+    docker compose up -d --build
+    @echo "IdP:  https://${IDP_DOMAIN:-idp.localhost}/   (login: angela / gamlastan)"
+    @echo "SP:   https://${SP_DOMAIN:-sp.localhost}/      (Log in -> SWAMID QA discovery)"
+
+# Optional local pairing (no SWAMID): exchange IdP<->SP metadata as trusted files.
+link:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    idp="${IDP_DOMAIN:-idp.localhost}"
+    sp="${SP_DOMAIN:-sp.localhost}"
+    mkdir -p django-idp/data/metadata django-sp/data/metadata
+    curl -fsSk "https://${idp}/idp/metadata" -o django-sp/data/metadata/local-idp.xml
+    curl -fsSk "https://${sp}/sp/metadata"   -o django-idp/data/metadata/local-sp.xml
+    docker compose restart idp sp
+    echo "Linked: IdP metadata -> SP, SP metadata -> IdP (both restarted)."
+
+# Stop and remove the containers.
+down:
+    docker compose down
+
+# Follow container logs (optionally a single service: `just logs sp`).
+logs service="":
+    docker compose logs -f {{service}}
+
+# Restart one or both services (`just restart`, `just restart sp`).
+restart service="":
+    docker compose restart {{service}}
+
+# Print the SP metadata (submit this to SWAMID QA to register the SP).
+sp-metadata:
+    curl -sk "https://${SP_DOMAIN:-sp.localhost}/sp/metadata"
+
+# Print the IdP metadata.
+idp-metadata:
+    curl -sk "https://${IDP_DOMAIN:-idp.localhost}/idp/metadata"
+
+# Open a Django shell in a container (`just shell idp` or `just shell sp`).
+shell service="sp":
+    docker compose exec {{service}} python manage.py shell

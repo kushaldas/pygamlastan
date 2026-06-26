@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}pygamlastan SAML SP{% endblock %}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 52rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; color: #18181b; }
+    code, pre { background: #f4f4f5; padding: .1rem .3rem; border-radius: .2rem; word-break: break-all; }
+    .card { border: 1px solid #e4e4e7; border-radius: .5rem; padding: 1rem; margin: 1rem 0; }
+    a { color: #2563eb; }
+    button { padding: .55rem 1.1rem; margin-top: 1rem; cursor: pointer; }
+    .err { color: #b91c1c; }
+    header { display: flex; justify-content: space-between; align-items: baseline; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+    th, td { border: 1px solid #e4e4e7; padding: .4rem .6rem; text-align: left; vertical-align: top; font-size: .95rem; }
+    th { background: #f4f4f5; }
+  </style>
+</head>
+<body>
+  <header>
+    <span><strong>pygamlastan</strong> &middot; SAML 2.0 Service Provider</span>
+    {% if identity %}
+      <span>{{ identity.name_id }} &middot; <a href="{% url 'sp:logout' %}">log out</a></span>
+    {% endif %}
+  </header>
+  <hr>
+  {% block content %}{% endblock %}
+</body>
+</html>

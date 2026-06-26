@@ -33,9 +33,16 @@ Service Provider
 
 .. py:function:: process_response_verified(response_xml, verifier, config, sp_entity_id, acs_url, expected_idp_entity_id, expected_request_id=None, now=None, replay_cache=None, persistent_id_store=None, unsafe_no_replay_cache=False, unsafe_no_persistent_id_store=False) -> AuthnResult
 
-   Verify the XML signature with ``verifier``, then validate and extract the
-   identity. This is the preferred SP entry point when the raw response XML is
-   available. ``replay_cache`` is required by default.
+   The **safe, preferred SP entry point**. It performs XML-DSig verification with
+   ``verifier`` over the *exact* ``response_xml`` bytes and feeds only the
+   cryptographically verified reference IDs into validation - so the caller
+   cannot assert "this was signed" without real crypto, closing the
+   auth-bypass-by-mis-integration gap that hand-passing ``verified_signed_ids``
+   to :func:`process_response` leaves open. Raises
+   :class:`pygamlastan.SamlCryptoError` if the signature is missing or invalid,
+   and :class:`pygamlastan.SamlProfileError` on any validation failure.
+   ``replay_cache`` is required by default (see :func:`process_response` for the
+   ``unsafe_*`` waivers and the ``persistent_id_store`` requirement).
 
 .. py:class:: AuthnResult
 

@@ -1,0 +1,52 @@
+{% extends "sp/base.html" %}
+{% block content %}
+<h1>Service Provider</h1>
+
+{% if identity %}
+  <p>You are signed in. The Identity Provider released the following.</p>
+
+  <div class="card">
+    <div><strong>NameID:</strong> <code>{{ identity.name_id }}</code></div>
+    <div><strong>NameID format:</strong> <code>{{ identity.name_id_format }}</code></div>
+    <div><strong>Issuing IdP:</strong> <code>{{ identity.idp_entity_id }}</code></div>
+    <div><strong>Authn context:</strong> <code>{{ identity.authn_context }}</code></div>
+    {% if identity.session_index %}<div><strong>Session index:</strong> <code>{{ identity.session_index }}</code></div>{% endif %}
+  </div>
+
+  <h2>Released attributes</h2>
+  {% if identity.attributes %}
+    <table>
+      <thead><tr><th>FriendlyName</th><th>Name</th><th>Value(s)</th></tr></thead>
+      <tbody>
+        {% for a in identity.attributes %}
+          <tr>
+            <td>{{ a.friendly_name }}</td>
+            <td><code>{{ a.name }}</code></td>
+            <td>{% for v in a.values %}<div>{{ v }}</div>{% endfor %}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p>The IdP released no attributes.</p>
+  {% endif %}
+
+  <p><a href="{% url 'sp:logout' %}">Log out</a></p>
+{% else %}
+  <div class="card">
+    <div><strong>Entity ID:</strong> <code>{{ cfg.entity_id }}</code></div>
+    <div><strong>Metadata:</strong> <a href="{% url 'sp:metadata' %}">{{ cfg.metadata_url }}</a></div>
+    <div><strong>ACS:</strong> <code>{{ cfg.acs_url }}</code> (HTTP-POST)</div>
+    <div><strong>IdP selection:</strong> {% if cfg.idp_entity_id %}fixed: <code>{{ cfg.idp_entity_id }}</code>{% else %}discovery service{% endif %}</div>
+  </div>
+
+  <h2>IdP metadata resolution</h2>
+  <div class="card">
+    <div><strong>Discovery service:</strong> {% if cfg.idp_entity_id %}&mdash; (fixed IdP){% elif cfg.discovery_url %}<code>{{ cfg.discovery_url }}</code>{% else %}<span class="err">not configured</span>{% endif %}</div>
+    <div><strong>MDQ service:</strong> {% if mdq_url %}<code>{{ mdq_url }}</code> (signature-verified){% else %}disabled{% endif %}</div>
+    <div><strong>Local metadata files:</strong> {{ file_idp_count }} IdP(s) (trusted as provided)</div>
+  </div>
+
+  <p><a href="{% url 'sp:login' %}">Log in (choose your Identity Provider)</a></p>
+{% endif %}
+{% endblock %}

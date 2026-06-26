@@ -23,7 +23,8 @@ from local metadata files or an MDQ service (see
 - Looks the SP up by issuer, validates the request against the SP's metadata
   (`process_authn_request`), and resolves the AssertionConsumerService.
 - Authenticates the user (Django login), then builds an assertion with a small
-  attribute set (`displayName`, `uid`, `mail`) and the requested NameID format
+  attribute set (`displayName`, `uid`, `givenName`, `sn`, `mail`, and the scoped
+  `eduPersonPrincipalName` / `eduPersonScopedAffiliation`) and the requested NameID format
   (transient / persistent / email).
 - **Signs the assertion** (enveloped XML-DSig, `WantAssertionsSigned`-friendly)
   and POSTs it back to the SP's ACS via a self-submitting form.
@@ -33,10 +34,26 @@ All SAML work lives in [`idp/saml_logic.py`](idp/saml_logic.py); the Django view
 
 ## Quick start (Docker Compose + Caddy)
 
+> **Orchestration moved up a level.** The Docker Compose file, Caddy config,
+> `.env`, and `justfile` now live in [`examples/`](../) and run this IdP together
+> with the [`django-sp`](../django-sp/) example behind a **single** Caddy. Run
+> the stack from there - see [`examples/README.md`](../README.md):
+>
+> ```console
+> cd ..            # the examples/ directory
+> cp .env-example .env
+> just wheel       # only until pygamlastan is on PyPI
+> just up          # certs, build, start, and link IdP <-> SP metadata
+> ```
+>
+> The recipe names below (`just add-sp`, `just swamid-cert`, ...) and the
+> `./data/caddy` TLS path describe the previous standalone layout; the equivalents
+> now live in the top-level `justfile` (`just link`, `just swamid-cert`, certs in
+> `examples/certs/`). The rest of this document still describes the IdP itself.
+
 Prerequisites: Docker (with Compose), [`just`](https://github.com/casey/just),
-`openssl`, and [`mkcert`](https://github.com/FiloSottile/mkcert) (for locally-
-trusted TLS). Until `pygamlastan` is on PyPI, also Rust + `maturin` for the
-one-time wheel build.
+and [`mkcert`](https://github.com/FiloSottile/mkcert) (for locally-trusted TLS).
+Until `pygamlastan` is on PyPI, also Rust + `maturin` for the one-time wheel build.
 
 ```console
 # 0. configure: copy the template and set IDP_DOMAIN (.env is gitignored).

@@ -1,0 +1,89 @@
+# A local SAML federation: a pygamlastan IdP and SP behind a single Caddy that
+# terminates TLS for both hostnames.
+#
+#   idp  -> https://${IDP_DOMAIN}/   (Django + gunicorn, examples/django-idp)
+#   sp   -> https://${SP_DOMAIN}/    (Django + gunicorn, examples/django-sp)
+#   caddy-> ports 80/443, routes by hostname to idp / sp
+#
+# Set IDP_DOMAIN / SP_DOMAIN in .env. mkcert provides locally-trusted TLS certs
+# (see the justfile `tls` recipe); they are read from ./certs/{idp,sp}.
+services:
+  idp:
+    build: ./django-idp
+    environment:
+      SAML_IDP_BASE_URL: "https://${IDP_DOMAIN:-idp.localhost}"
+      SAML_IDP_ENTITY_ID: "https://${IDP_DOMAIN:-idp.localhost}/idp/metadata"
+      DJANGO_ALLOWED_HOSTS: "${IDP_DOMAIN:-idp.localhost},localhost,idp"
+      DJANGO_CSRF_TRUSTED: "https://${IDP_DOMAIN:-idp.localhost}"
+      DJANGO_DEBUG: "0"
+      DJANGO_SECRET_KEY: "${DJANGO_SECRET_KEY:-dev-insecure-change-me}"
+      SAML_IDP_DATA_DIR: "/data"
+      SAML_IDP_METADATA_DIR: "/data/metadata"
+      SAML_IDP_MDQ_URL: "${SAML_IDP_MDQ_URL:-}"
+      SAML_IDP_METADATA_CERT: "${SAML_IDP_METADATA_CERT:-}"
+      SAML_IDP_SUPPORT_EMAIL: "${SAML_IDP_SUPPORT_EMAIL:-}"
+      SAML_IDP_SCOPE: "${SAML_IDP_SCOPE:-}"
+      DJANGO_ADMIN_USERNAME: "${DJANGO_ADMIN_USERNAME:-admin}"
+      DJANGO_ADMIN_PASSWORD: "${DJANGO_ADMIN_PASSWORD:-admin}"
+      DEMO_PASSWORD: "${DEMO_PASSWORD:-gamlastan}"
+    volumes:
+      - ./django-idp/data:/data
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  sp:
+    build: ./django-sp
+    environment:
+      SAML_SP_BASE_URL: "https://${SP_DOMAIN:-sp.localhost}"
+      SAML_SP_ENTITY_ID: "https://${SP_DOMAIN:-sp.localhost}/sp/metadata"
+      DJANGO_ALLOWED_HOSTS: "${SP_DOMAIN:-sp.localhost},localhost,sp"
+      DJANGO_CSRF_TRUSTED: "https://${SP_DOMAIN:-sp.localhost}"
+      DJANGO_DEBUG: "0"
+      DJANGO_SECRET_KEY: "${DJANGO_SECRET_KEY:-dev-insecure-change-me}"
+      SAML_SP_DATA_DIR: "/data"
+      SAML_SP_METADATA_DIR: "/data/metadata"
+      # Empty fixed IdP -> users go to the discovery service to pick one.
+      SAML_SP_IDP_ENTITYID: "${SAML_SP_IDP_ENTITYID:-}"
+      SAML_SP_DISCOVERY_URL: "${SAML_SP_DISCOVERY_URL:-https://ds.qa.swamid.se/ds/}"
+      # IdP metadata resolution: SWAMID QA MDQ (signature-verified against the cert).
+      SAML_SP_MDQ_URL: "${SAML_SP_MDQ_URL:-}"
+      SAML_SP_METADATA_CERT: "${SAML_SP_METADATA_CERT:-}"
+      # Descriptive metadata fields (shown by IdP discovery / required by SWAMID).
+      # Defaults live here (values with spaces - kept out of .env so `just`'s
+      # dotenv parser is happy); override via the environment if needed.
+      SAML_SP_DISPLAY_NAME: "${SAML_SP_DISPLAY_NAME:-pygamlastan demo SP}"
+      SAML_SP_DESCRIPTION: "${SAML_SP_DESCRIPTION:-A pygamlastan example Service Provider that displays released attributes.}"
+      SAML_SP_ORG_NAME: "${SAML_SP_ORG_NAME:-pygamlastan}"
+      SAML_SP_ORG_DISPLAY_NAME: "${SAML_SP_ORG_DISPLAY_NAME:-pygamlastan demo}"
+      SAML_SP_ORG_URL: "${SAML_SP_ORG_URL:-https://github.com/kushaldas/pygamlastan}"
+      SAML_SP_TECHNICAL_EMAIL: "${SAML_SP_TECHNICAL_EMAIL:-}"
+      SAML_SP_SUPPORT_EMAIL: "${SAML_SP_SUPPORT_EMAIL:-}"
+      SAML_SP_SECURITY_EMAIL: "${SAML_SP_SECURITY_EMAIL:-}"
+    volumes:
+      - ./django-sp/data:/data
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    depends_on:
+      - idp
+      - sp
+    environment:
+      IDP_DOMAIN: "${IDP_DOMAIN:-idp.localhost}"
+      SP_DOMAIN: "${SP_DOMAIN:-sp.localhost}"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
