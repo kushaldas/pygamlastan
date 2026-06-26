@@ -57,6 +57,7 @@ a Rust document and are safe to keep, pass around, and store.
    guides/attributes
    guides/validation
    guides/writing_profiles
+   guides/profile_worked_example
 
 .. toctree::
    :maxdepth: 2

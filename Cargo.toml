@@ -1,6 +1,6 @@
 [package]
 name = "pygamlastan"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Python bindings for the gamlastan SAML 2.0 library"
 license = "BSD-2-Clause"

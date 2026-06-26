@@ -14,7 +14,7 @@ copyright = "2026, Kushal Das"
 try:
     release = importlib.metadata.version("pygamlastan")
 except importlib.metadata.PackageNotFoundError:
-    release = "0.1.0"
+    release = "0.1.1"
 version = ".".join(release.split(".")[:2])
 
 extensions = [

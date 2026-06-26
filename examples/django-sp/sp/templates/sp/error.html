@@ -1,0 +1,18 @@
+{% extends "sp/base.html" %}
+{% block title %}Sign-in problem &middot; pygamlastan SAML SP{% endblock %}
+{% block content %}
+<h1>Something went wrong signing you in</h1>
+
+{% if message %}
+  <p class="err">{{ message }}</p>
+{% else %}
+  <p>This sign-in could not be completed.</p>
+{% endif %}
+
+<div class="card">
+  <div><strong>Service Provider:</strong> <code>{{ cfg.entity_id }}</code></div>
+  {% if cfg.idp_entity_id %}<div><strong>Identity Provider:</strong> <code>{{ cfg.idp_entity_id }}</code></div>{% endif %}
+</div>
+
+<p><a href="{% url 'sp:index' %}">Back to the SP home page</a></p>
+{% endblock %}

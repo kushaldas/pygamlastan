@@ -1,13 +1,20 @@
 # Minimal makefile for Sphinx documentation.
 #
-# Build with the project virtualenv so `pygamlastan` is importable, e.g.:
-#   make -C docs html SPHINXBUILD="../.venv/bin/python -m sphinx"
+# Builds with the project virtualenv (../.venv) when present so `pygamlastan` is
+# importable; override with e.g. `make html SPHINXBUILD="python -m sphinx"`.
 
+ifneq (,$(wildcard ../.venv/bin/python))
+SPHINXBUILD   ?= ../.venv/bin/python -m sphinx
+else
 SPHINXBUILD   ?= python -m sphinx
+endif
 SOURCEDIR     = .
 BUILDDIR      = _build
 
-.PHONY: help html clean
+# Only targets that have their own recipe are phony. html/linkcheck/etc. must
+# NOT be listed here, or their empty explicit entry shadows the catch-all below
+# and make reports "Nothing to be done".
+.PHONY: help clean
 
 help:
 	@$(SPHINXBUILD) -M help "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS)
@@ -15,6 +22,6 @@ help:
 clean:
 	rm -rf "$(BUILDDIR)"
 
-# Catch-all: route html, linkcheck, etc. to sphinx-build.
-%:
+# Catch-all: route html, linkcheck, etc. to sphinx-build (-M <target>).
+%: Makefile
 	@$(SPHINXBUILD) -M $@ "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS)

@@ -18,9 +18,8 @@ honest about the three cases you may hit - from "trivial" to "needs a small
 Rust binding addition". The design rationale is recorded in the project's
 Architecture Decision Records (``adr/0001-profile-extension-surface.md``).
 
-.. contents::
-   :local:
-   :depth: 1
+For a step-by-step build of one complete profile, see the companion tutorial
+:doc:`profile_worked_example`.
 
 
 The three tiers
