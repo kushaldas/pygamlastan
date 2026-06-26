@@ -138,7 +138,9 @@ SAML_SP_DESCRIPTION = os.environ.get(
     "SAML_SP_DESCRIPTION", "A pygamlastan example Service Provider that displays released attributes."
 )
 SAML_SP_INFO_URL = os.environ.get("SAML_SP_INFO_URL", f"{SAML_SP_BASE_URL}/")
-SAML_SP_PRIVACY_URL = os.environ.get("SAML_SP_PRIVACY_URL", f"{SAML_SP_BASE_URL}/sp/privacy")
+# No privacy-statement page ships with this example, so default to empty; the
+# metadata omits PrivacyStatementURL unless you set a real URL here.
+SAML_SP_PRIVACY_URL = os.environ.get("SAML_SP_PRIVACY_URL", "")
 SAML_SP_ORG_NAME = os.environ.get("SAML_SP_ORG_NAME", "pygamlastan")
 SAML_SP_ORG_DISPLAY_NAME = os.environ.get("SAML_SP_ORG_DISPLAY_NAME", "pygamlastan demo")
 SAML_SP_ORG_URL = os.environ.get("SAML_SP_ORG_URL", "https://github.com/kushaldas/pygamlastan")

@@ -98,6 +98,14 @@ def sp_metadata_xml(cfg: SpConfig) -> str:
         extra=f' xmlns:remd="{_REMD_NS}" '
         'remd:contactType="http://refeds.org/metadata/contactType/security"',
     )
+    # Only advertise a PrivacyStatementURL when one is configured; otherwise the
+    # metadata would point at a page this example does not serve.
+    privacy_url = (
+        f'<mdui:PrivacyStatementURL xml:lang="en">{escape(cfg.privacy_url)}'
+        "</mdui:PrivacyStatementURL>"
+        if cfg.privacy_url
+        else ""
+    )
     return (
         f'<md:EntityDescriptor xmlns:md="{_MD_NS}" entityID={quoteattr(cfg.entity_id)}>'
         # REFEDS R&S entity category (entity-level attribute).
@@ -116,7 +124,7 @@ def sp_metadata_xml(cfg: SpConfig) -> str:
         f'<mdui:DisplayName xml:lang="en">{escape(cfg.display_name)}</mdui:DisplayName>'
         f'<mdui:Description xml:lang="en">{escape(cfg.description)}</mdui:Description>'
         f'<mdui:InformationURL xml:lang="en">{escape(cfg.info_url)}</mdui:InformationURL>'
-        f'<mdui:PrivacyStatementURL xml:lang="en">{escape(cfg.privacy_url)}</mdui:PrivacyStatementURL>'
+        f"{privacy_url}"
         "</mdui:UIInfo>"
         # DiscoveryResponse: the endpoint the discovery service returns to. The
         # SeamlessAccess DS validates the SAMLDS `return` URL against this, so it
@@ -178,7 +186,8 @@ def build_authn_redirect(cfg: SpConfig, idp_sso_url: str, relay_state: str | Non
     )
     request = profiles.create_authn_request(options)
     redirect_url = bindings.redirect_encode(
-        request.to_xml().encode(), True, idp_sso_url, relay_state=relay_state
+        request.to_xml().encode(), is_request=True,
+        destination=idp_sso_url, relay_state=relay_state,
     )
     return redirect_url, request.id
 
@@ -186,14 +195,20 @@ def build_authn_redirect(cfg: SpConfig, idp_sso_url: str, relay_state: str | Non
 # --- Inbound: process the Response posted to the ACS -----------------------
 
 def _duplicate_preserving_form_pairs(form) -> list[tuple[str, str]]:
-    """Flatten a Django QueryDict (or dict) to (name, value) pairs, preserving
-    duplicates. ``post_decode`` wants the raw pairs so it can reject a request
-    that smuggles a second SAMLResponse past a collapsing ``dict``."""
-    if hasattr(form, "lists"):
+    """Flatten a Django QueryDict to ``(name, value)`` pairs, preserving duplicates.
+
+    ``post_decode`` wants the raw pairs so it can reject a request that smuggles a
+    second ``SAMLResponse``. A plain ``dict``/mapping has *already* collapsed any
+    duplicates, which would silently defeat that protection, so it is rejected
+    here rather than accepted. Pass ``request.POST`` (a QueryDict), or a sequence
+    of pairs."""
+    if hasattr(form, "lists"):  # Django QueryDict / MultiValueDict
         return [(name, value) for name, values in form.lists() for value in values]
-    if hasattr(form, "items"):
-        return list(form.items())
-    return list(form)
+    if hasattr(form, "items"):  # a plain mapping cannot preserve duplicates
+        raise TypeError(
+            "pass a multi-value mapping (e.g. request.POST), not a collapsed dict"
+        )
+    return list(form)  # assume an already-correct sequence of (name, value) pairs
 
 
 def issuer_from_post(form) -> str | None:

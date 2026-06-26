@@ -57,9 +57,12 @@ link:
     set -euo pipefail
     idp="${IDP_DOMAIN:-idp.localhost}"
     sp="${SP_DOMAIN:-sp.localhost}"
+    # Verify TLS against the mkcert root CA (installed by `just tls`) instead of
+    # `curl -k`, so a misconfigured cert is caught rather than silently trusted.
+    ca="$(mkcert -CAROOT)/rootCA.pem"
     mkdir -p django-idp/data/metadata django-sp/data/metadata
-    curl -fsSk "https://${idp}/idp/metadata" -o django-sp/data/metadata/local-idp.xml
-    curl -fsSk "https://${sp}/sp/metadata"   -o django-idp/data/metadata/local-sp.xml
+    curl -fsS --cacert "$ca" "https://${idp}/idp/metadata" -o django-sp/data/metadata/local-idp.xml
+    curl -fsS --cacert "$ca" "https://${sp}/sp/metadata"   -o django-idp/data/metadata/local-sp.xml
     docker compose restart idp sp
     echo "Linked: IdP metadata -> SP, SP metadata -> IdP (both restarted)."
 
@@ -77,11 +80,11 @@ restart service="":
 
 # Print the SP metadata (submit this to SWAMID QA to register the SP).
 sp-metadata:
-    curl -sk "https://${SP_DOMAIN:-sp.localhost}/sp/metadata"
+    curl -sS --cacert "$(mkcert -CAROOT)/rootCA.pem" "https://${SP_DOMAIN:-sp.localhost}/sp/metadata"
 
 # Print the IdP metadata.
 idp-metadata:
-    curl -sk "https://${IDP_DOMAIN:-idp.localhost}/idp/metadata"
+    curl -sS --cacert "$(mkcert -CAROOT)/rootCA.pem" "https://${IDP_DOMAIN:-idp.localhost}/idp/metadata"
 
 # Open a Django shell in a container (`just shell idp` or `just shell sp`).
 shell service="sp":

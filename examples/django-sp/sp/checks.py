@@ -32,7 +32,8 @@ def federation_config(app_configs, **kwargs):
             Warning(
                 "No IdP metadata source configured: set SAML_SP_MDQ_URL, or place "
                 "IdP metadata XML files in SAML_SP_METADATA_DIR.",
-                hint="Set SAML_SP_MDQ_URL in .env, or `just add-idp <file>`.",
+                hint="Set SAML_SP_MDQ_URL in .env, or drop IdP metadata XML into "
+                "SAML_SP_METADATA_DIR.",
                 id="sp.W001",
             )
         )

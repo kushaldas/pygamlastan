@@ -1,5 +1,7 @@
 """SP HTTP endpoints: home (shows released attributes), metadata, login (start
 SSO), ACS (consume the Response), logout."""
+import logging
+
 from django.conf import settings
 from django.http import HttpResponse
 from django.shortcuts import redirect, render
@@ -9,6 +11,8 @@ from django.views.decorators.http import require_http_methods
 from . import idp_resolver
 from . import saml_logic as sl
 from .sp_config import get_sp_config
+
+log = logging.getLogger(__name__)
 
 # Session keys: the in-flight request id, the IdP it was sent to, and the
 # established SAML identity.
@@ -62,8 +66,9 @@ def _start_sso(request, cfg, idp_entity_id):
 
     try:
         redirect_url, request_id = sl.build_authn_redirect(cfg, sso_url, relay_state=None)
-    except Exception as exc:  # noqa: BLE001
-        return _error(request, f"Could not build the AuthnRequest: {exc}")
+    except Exception:  # noqa: BLE001
+        log.exception("failed to build AuthnRequest for IdP %s", idp_entity_id)
+        return _error(request, "Could not start the login. Please try again.")
 
     request.session[PENDING_REQUEST_ID] = request_id
     request.session[PENDING_IDP] = idp_entity_id
@@ -113,8 +118,9 @@ def acs(request):
         result, _relay_state = sl.process_acs(
             cfg, request.POST, idp, expected_request_id
         )
-    except Exception as exc:  # noqa: BLE001
-        return _error(request, f"The SAML Response was rejected: {exc}", status=403)
+    except Exception:  # noqa: BLE001
+        log.warning("SAML Response from %s rejected", idp.entity_id, exc_info=True)
+        return _error(request, "The SAML Response could not be validated.", status=403)
 
     request.session[IDENTITY] = {
         "name_id": result.name_id,
