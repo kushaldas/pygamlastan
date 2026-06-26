@@ -93,10 +93,21 @@ def _mdq_fetch(entity_id: str):
         log.warning("MDQ metadata for %s failed signature verification; rejecting", entity_id)
         return None
     try:
-        return metadata.parse_entity(xml_text)
+        entity = metadata.parse_entity(xml_text)
     except Exception as exc:  # noqa: BLE001
         log.warning("could not parse MDQ metadata for %s: %s", entity_id, exc)
         return None
+    # Guard against an MDQ endpoint (or a proxy/cache mix-up) returning signed
+    # metadata for a *different* entity than the one requested: a valid signature
+    # only proves the document is authentic, not that it answers our query.
+    if entity.entity_id != entity_id:
+        log.warning(
+            "MDQ returned metadata for %s but %s was requested; rejecting",
+            entity.entity_id,
+            entity_id,
+        )
+        return None
+    return entity
 
 
 def resolve(entity_id: str | None):

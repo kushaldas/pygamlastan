@@ -1,5 +1,12 @@
 # A self-contained SAML SP image on Debian trixie.
 # Build context is this directory (examples/django-sp).
+#
+# NOTE on worker count: this example keeps replay detection and persistent-NameID
+# uniqueness in per-process, in-memory stores (_replay_cache / _persistent_id_store).
+# Those protections are only consistent within a single process, so the image runs
+# a single gunicorn worker. Scaling to multiple workers (or replicas) requires
+# moving both stores to a shared backend first, otherwise a replay can succeed by
+# landing on a worker that has not yet seen the assertion.
 FROM debian:trixie-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -30,4 +37,4 @@ RUN chmod +x /app/entrypoint.sh
 
 EXPOSE 8000
 ENTRYPOINT ["/app/entrypoint.sh"]
-CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "3", "--timeout", "60"]
+CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "1", "--timeout", "60"]
