@@ -275,7 +275,7 @@ pub struct TargetLogoutState {
 impl TargetLogoutState {
     #[getter]
     fn kind(&self) -> &'static str {
-        match self.inner {
+        match &self.inner {
             gl::TargetLogoutState::Pending => "pending",
             gl::TargetLogoutState::InProgress { .. } => "in_progress",
             gl::TargetLogoutState::Succeeded => "succeeded",
