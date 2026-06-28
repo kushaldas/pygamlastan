@@ -16,3 +16,4 @@ records).
 | [0004](0004-single-logout-binding.md) | Single Logout (SLO) binding surface | Accepted |
 | [0005](0005-attribute-release-policy-surface.md) | Attribute-release policy and entity-category binding surface | Accepted |
 | [0006](0006-metadata-extension-accessors.md) | Metadata extension accessors (MDUI, algsupport, requested attributes) | Accepted |
+| [0007](0007-pysaml2-compat-shim.md) | pysaml2 compatibility shim (`pygamlastan.compat.saml2`) | Accepted |

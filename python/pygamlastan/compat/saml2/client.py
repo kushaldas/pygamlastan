@@ -1,0 +1,311 @@
+"""``saml2.client`` shim: :class:`Saml2Client`, backed by pygamlastan.
+
+Reproduces the SP-side methods eduID calls:
+
+* ``prepare_for_authenticate`` -> ``(session_id, http_info)``
+* ``parse_authn_request_response`` -> :class:`~.response.AuthnResponse`
+* ``global_logout`` -> ``{idp_entity_id: (request_id, http_info)}``
+* ``parse_logout_request_response`` -> :class:`~.response.LogoutResponse`
+* ``handle_logout_request`` -> ``http_info``
+
+``http_info`` mirrors pysaml2's shape: a dict whose ``headers`` is a list with a
+``("Location", url)`` entry for the HTTP-Redirect binding.
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+from typing import Any
+
+from pygamlastan import bindings as _bindings
+from pygamlastan import profiles as _profiles
+from pygamlastan import security as _security
+from pygamlastan import xml as _xml
+from pygamlastan import logout as _logout
+from pygamlastan.core import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT
+from pygamlastan.crypto import SamlSigner, SamlVerifier
+
+from .config import SPConfig
+from .response import AuthnResponse, LogoutResponse, StatusError, UnsolicitedResponse
+from .saml import NameID
+
+
+def _redirect_http_info(url: str) -> dict[str, Any]:
+    """pysaml2-shaped http_info for the HTTP-Redirect binding."""
+    return {
+        "method": "GET",
+        "url": url,
+        "headers": [("Location", url)],
+        "data": [],
+    }
+
+
+def _post_http_info(url: str, html: str) -> dict[str, Any]:
+    """pysaml2-shaped http_info for the HTTP-POST binding (auto-submit form)."""
+    return {
+        "method": "POST",
+        "url": url,
+        "headers": [("Content-type", "text/html")],
+        "data": html,
+    }
+
+
+def _maybe_b64_to_xml(raw: str | bytes) -> str:
+    """Decode a SAMLResponse POST parameter (base64) to XML text.
+
+    Falls back to treating the input as raw XML if it is not valid base64 or the
+    decoded bytes do not look like an XML document.
+    """
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    candidate = raw.strip()
+    if candidate.startswith("<"):
+        return candidate
+    try:
+        decoded = base64.b64decode(candidate, validate=True)
+    except (binascii.Error, ValueError):
+        return candidate
+    text = decoded.decode("utf-8", errors="strict")
+    return text
+
+
+class Saml2Client:
+    """pysaml2-compatible SP client backed by pygamlastan."""
+
+    def __init__(
+        self,
+        config: SPConfig,
+        identity_cache: Any = None,
+        state_cache: Any = None,
+        virtual_organization: Any = None,
+        config_loader: Any = None,
+    ) -> None:
+        self.config = config
+        # Caches are accepted for API parity; the pygamlastan SP flow derives
+        # logout targets from config/metadata rather than pysaml2's identity
+        # bookkeeping, so they are not consulted here.
+        self.identity_cache = identity_cache
+        self.state_cache = state_cache
+        self._signer: SamlSigner | None = None
+
+    # -- signing helper ---------------------------------------------------
+
+    def _get_signer(self) -> SamlSigner:
+        if self._signer is None:
+            if not self.config.key_file:
+                raise ValueError("signing requested but no key_file configured")
+            with open(self.config.key_file, "rb") as fh:
+                self._signer = SamlSigner.from_pem(fh.read())
+        return self._signer
+
+    # -- AuthnRequest -----------------------------------------------------
+
+    def prepare_for_authenticate(
+        self,
+        entityid: str | None = None,
+        relay_state: str = "",
+        binding: str = BINDING_HTTP_REDIRECT,
+        sigalg: str | None = None,
+        digest_alg: str | None = None,
+        subject: Any = None,
+        force_authn: str | bool = "false",
+        requested_authn_context: Any = None,
+        **kwargs: Any,
+    ) -> tuple[str, dict[str, Any]]:
+        idp = entityid or self.config.only_idp()
+        if idp is None:
+            # pysaml2 raises TypeError here; eduID catches it to mean
+            # "unable to know which IdP to use".
+            raise TypeError("Unable to determine which IdP to use")
+
+        sso_url = self.config.single_sign_on_service(idp, BINDING_HTTP_REDIRECT)
+        acs_url, acs_binding = self.config.acs(BINDING_HTTP_POST)
+
+        force = str(force_authn).lower() in ("true", "1", "yes")
+
+        class_refs: list[str] | None = None
+        comparison: str | None = None
+        if requested_authn_context:
+            ref = requested_authn_context.get("authn_context_class_ref")
+            if isinstance(ref, str):
+                class_refs = [ref]
+            elif ref is not None:
+                class_refs = list(ref)
+            comparison = requested_authn_context.get("comparison", "exact")
+
+        options = _profiles.AuthnRequestOptions(
+            sp_entity_id=self.config.entityid,
+            acs_url=acs_url,
+            protocol_binding=acs_binding,
+            force_authn=force,
+            authn_context_class_refs=class_refs,
+            authn_context_comparison=comparison,
+            destination=sso_url,
+        )
+        request = _profiles.create_authn_request(options)
+        session_id = request.id
+        xml = request.to_xml()
+
+        rs = relay_state or None
+        if binding == BINDING_HTTP_REDIRECT:
+            signer = self._get_signer() if sigalg else None
+            url = _bindings.redirect_encode(
+                xml.encode("utf-8"), True, sso_url, relay_state=rs, signer=signer, sig_alg=sigalg
+            )
+            return session_id, _redirect_http_info(url)
+        elif binding == BINDING_HTTP_POST:
+            html = _bindings.post_encode(xml.encode("utf-8"), True, sso_url, relay_state=rs)
+            return session_id, _post_http_info(sso_url, html)
+        raise ValueError(f"unsupported binding for AuthnRequest: {binding}")
+
+    # -- Response processing ----------------------------------------------
+
+    def parse_authn_request_response(
+        self,
+        response: str,
+        binding: str,
+        outstanding: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> AuthnResponse:
+        xml = _maybe_b64_to_xml(response)
+        try:
+            parsed = _xml.parse_response(xml)
+        except Exception as e:  # malformed XML / not a Response
+            # eduID treats parse failures as a bad response.
+            raise StatusError(f"could not parse SAML response: {e}") from e
+
+        in_response_to = parsed.in_response_to
+        if outstanding is not None and in_response_to not in outstanding:
+            raise UnsolicitedResponse(
+                f"InResponseTo {in_response_to!r} not in outstanding queries"
+            )
+
+        if not parsed.is_success():
+            status = parsed.status
+            raise StatusError(
+                f"SAML response status not Success: {status.status_code.value}"
+            )
+
+        sp_entity_id = self.config.entityid
+        acs_url, _ = self.config.acs(BINDING_HTTP_POST)
+        expected_idp = self.config.only_idp()
+        if expected_idp is None and parsed.issuer is not None:
+            expected_idp = parsed.issuer.value
+
+        if self.config.want_response_signed:
+            verifier = SamlVerifier.from_cert(self.config.idp_signing_cert(expected_idp))
+            # Strict posture (signed responses/assertions required, time and
+            # recipient checks on) but without mandating *encrypted* assertions:
+            # eduID, like most SAML SPs, signs but does not encrypt assertions.
+            cfg = _security.SecurityConfig.strict()
+            cfg.require_encrypted_assertions = False
+            try:
+                result = _profiles.process_response_verified(
+                    xml,
+                    verifier,
+                    cfg,
+                    sp_entity_id,
+                    acs_url,
+                    expected_idp,
+                    expected_request_id=in_response_to,
+                    unsafe_no_replay_cache=True,
+                    unsafe_no_persistent_id_store=True,
+                )
+            except Exception as e:
+                # eduID's get_authn_response catches AssertionError as
+                # "SAML response is not verified".
+                raise AssertionError(f"SAML response verification failed: {e}") from e
+        else:
+            # Unsigned responses are only acceptable in dev/test, where the
+            # settings explicitly set want_response_signed=False.
+            cfg = _security.SecurityConfig.permissive()
+            try:
+                result = _profiles.process_response(
+                    parsed,
+                    cfg,
+                    sp_entity_id,
+                    acs_url,
+                    expected_idp,
+                    expected_request_id=in_response_to,
+                    verified_signed_ids=[],
+                    unsafe_no_replay_cache=True,
+                    unsafe_no_persistent_id_store=True,
+                )
+            except Exception as e:
+                raise AssertionError(f"SAML response processing failed: {e}") from e
+
+        return AuthnResponse(result, in_response_to)
+
+    # -- Single Logout ----------------------------------------------------
+
+    def global_logout(
+        self, name_id: NameID, reason: str = "", expire: Any = None, sign: Any = None
+    ) -> dict[str, tuple[str, dict[str, Any]]]:
+        """Build SP-initiated LogoutRequests for each federated IdP with an SLO."""
+        core_name_id = name_id.to_core()
+        out: dict[str, tuple[str, dict[str, Any]]] = {}
+        for idp in self.config.idp:
+            try:
+                slo_url = self.config.single_logout_service(idp, BINDING_HTTP_REDIRECT)
+            except ValueError:
+                continue
+            options = _logout.SpLogoutRequestOptions(
+                sp_entity_id=self.config.entityid,
+                name_id=core_name_id,
+                reason=reason or None,
+                destination=slo_url,
+            )
+            request = _logout.create_sp_logout_request(options)
+            signer = self._get_signer() if (sign and self.config.key_file) else None
+            url = _bindings.redirect_encode(
+                request.to_xml().encode("utf-8"),
+                True,
+                slo_url,
+                signer=signer,
+                sig_alg=None,
+            )
+            out[idp] = (request.id, _redirect_http_info(url))
+        return out
+
+    def parse_logout_request_response(
+        self, response: str, binding: str = BINDING_HTTP_REDIRECT, **kwargs: Any
+    ) -> LogoutResponse:
+        xml = self._decode_message(response, binding)
+        parsed = _xml.parse_logout_response(xml)
+        return LogoutResponse(parsed.is_success(), in_response_to=parsed.in_response_to)
+
+    def handle_logout_request(
+        self,
+        request: str,
+        name_id: NameID,
+        binding: str = BINDING_HTTP_REDIRECT,
+        relay_state: str | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Respond to an IdP-initiated LogoutRequest with a success response."""
+        xml = self._decode_message(request, binding)
+        parsed = _xml.parse_logout_request(xml)
+        issuer = parsed.issuer.value if parsed.issuer is not None else self.config.only_idp()
+        slo_url = self.config.single_logout_service(issuer, BINDING_HTTP_REDIRECT)
+        resp = _logout.create_logout_response_success(
+            self.config.entityid, parsed.id, destination=slo_url
+        )
+        url = _bindings.redirect_encode(
+            resp.to_xml().encode("utf-8"),
+            False,
+            slo_url,
+            relay_state=relay_state or None,
+        )
+        return _redirect_http_info(url)
+
+    # -- helpers ----------------------------------------------------------
+
+    @staticmethod
+    def _decode_message(message: str, binding: str) -> str:
+        """Decode a SAMLRequest/SAMLResponse parameter value to XML text."""
+        if binding == BINDING_HTTP_REDIRECT:
+            from .s_utils import decode_base64_and_inflate
+
+            return decode_base64_and_inflate(message).decode("utf-8")
+        return _maybe_b64_to_xml(message)
