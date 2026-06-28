@@ -566,6 +566,66 @@ def test_cache_set_encodes_payload_name_id():
     assert info["name_id"].text == "payload-subject"
 
 
+def test_decode_rejects_non_object_json():
+    """Valid JSON that is not an object (e.g. a list) is still normalized to
+    ValueError, honouring decode's contract."""
+    import json
+
+    payload = base64.urlsafe_b64encode(json.dumps([1, 2, 3]).encode()).decode("ascii")
+    with pytest.raises(ValueError):
+        decode("pgc1:" + payload)
+
+
+def test_parse_response_redirect_binding(client):
+    """A response delivered over HTTP-Redirect (DEFLATE+base64) is inflated and
+    parsed, honouring the binding parameter."""
+    session_id, _ = client.prepare_for_authenticate(entityid=IDP, binding=BINDING_HTTP_REDIRECT)
+    encoded = deflate_and_base64_encode(_auth_response(session_id))
+    resp = client.parse_authn_request_response(encoded, BINDING_HTTP_REDIRECT, {session_id: "r"})
+    assert resp.session_id() == session_id
+
+
+def test_global_logout_sign_without_key_raises():
+    """Requesting a signed logout without a configured key fails fast (parity
+    with prepare_for_authenticate), rather than silently sending unsigned."""
+    client = Saml2Client(SPConfig().load(CONF))  # CONF has no key_file
+    nid = NameID(text="abc123hash", format=TRANSIENT, sp_name_qualifier=SP)
+    with pytest.raises(ValueError):
+        client.global_logout(nid, sign=True)
+
+
+def _no_entityid_config() -> dict:
+    return {
+        "service": {
+            "sp": {
+                "endpoints": {"assertion_consumer_service": [(ACS, BINDING_HTTP_POST)]},
+                "want_response_signed": False,
+                "idp": {
+                    IDP: {"single_sign_on_service": {BINDING_HTTP_REDIRECT: SSO}}
+                },
+            }
+        }
+    }
+
+
+def test_prepare_missing_entityid_raises():
+    """A missing SP entityid yields a clear ValueError, not a low-level error
+    from the bindings."""
+    client = Saml2Client(SPConfig().load(_no_entityid_config()))
+    with pytest.raises(ValueError):
+        client.prepare_for_authenticate(entityid=IDP, binding=BINDING_HTTP_REDIRECT)
+
+
+def test_parse_missing_entityid_raises():
+    """parse_authn_request_response also validates the SP entityid up front."""
+    full = Saml2Client(SPConfig().load(CONF))
+    session_id, _ = full.prepare_for_authenticate(entityid=IDP, binding=BINDING_HTTP_REDIRECT)
+    raw = base64.b64encode(_auth_response(session_id).encode("utf-8")).decode("ascii")
+    client = Saml2Client(SPConfig().load(_no_entityid_config()))
+    with pytest.raises(ValueError):
+        client.parse_authn_request_response(raw, BINDING_HTTP_POST, {session_id: "r"})
+
+
 def test_global_logout_signed(rsa_keypair, tmp_path):
     """global_logout(sign=True) signs the redirect (passes a sig_alg with the
     signer) instead of erroring on the signer/sig_alg combination."""

@@ -104,6 +104,11 @@ class Saml2Client:
                 self._signer = SamlSigner.from_pem(fh.read())
         return self._signer
 
+    def _require_entityid(self) -> str:
+        if not self.config.entityid:
+            raise ValueError("SPConfig.entityid is required for SP requests/responses")
+        return self.config.entityid
+
     # -- AuthnRequest -----------------------------------------------------
 
     def prepare_for_authenticate(
@@ -146,7 +151,7 @@ class Saml2Client:
             comparison = requested_authn_context.get("comparison", "exact")
 
         options = _profiles.AuthnRequestOptions(
-            sp_entity_id=self.config.entityid,
+            sp_entity_id=self._require_entityid(),
             acs_url=acs_url,
             protocol_binding=acs_binding,
             force_authn=force,
@@ -179,7 +184,9 @@ class Saml2Client:
         outstanding: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> AuthnResponse:
-        xml = _maybe_b64_to_xml(response)
+        # Decode per the binding the response arrived over: HTTP-POST is base64,
+        # HTTP-Redirect is DEFLATE+base64.
+        xml = self._decode_message(response, binding)
         try:
             parsed = _xml.parse_response(xml)
         except Exception as e:  # malformed XML / not a Response
@@ -198,7 +205,7 @@ class Saml2Client:
                 f"SAML response status not Success: {status.status_code.value}"
             )
 
-        sp_entity_id = self.config.entityid
+        sp_entity_id = self._require_entityid()
         acs_url, _ = self.config.acs(BINDING_HTTP_POST)
         expected_idp = self.config.only_idp()
         if expected_idp is None and parsed.issuer is not None:
@@ -268,7 +275,9 @@ class Saml2Client:
                 destination=slo_url,
             )
             request = _logout.create_sp_logout_request(options)
-            signer = self._get_signer() if (sign and self.config.key_file) else None
+            # When signing is requested, _get_signer raises if no key_file is
+            # configured - fail fast rather than silently sending unsigned.
+            signer = self._get_signer() if sign else None
             # redirect_encode requires a sig_alg whenever a signer is given;
             # derive it from the signer's own signature method.
             sig_alg = signer.signature_method_uri() if signer is not None else None

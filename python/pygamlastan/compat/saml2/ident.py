@@ -46,6 +46,9 @@ def decode(value: str) -> NameID:
         payload = json.loads(raw.decode("utf-8"))
     except (binascii.Error, ValueError, UnicodeDecodeError) as e:
         raise ValueError(f"corrupt pygamlastan-compat NameID: {e}") from e
+    if not isinstance(payload, dict):
+        # valid JSON but not an object (e.g. a list/number) - still corruption.
+        raise ValueError("corrupt pygamlastan-compat NameID: payload is not an object")
     return NameID(
         text=payload.get("v"),
         format=payload.get("f"),
