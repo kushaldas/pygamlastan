@@ -180,8 +180,19 @@ def _make_nameid(name_id_format: str | None, user, cfg: IdpConfig, sp_entity_id:
 def build_signed_response(
     *, sp_entity_id: str, acs_url: str, request_id: str | None,
     name_id_format: str | None, user, cfg: IdpConfig,
+    authn_instant=None,
 ) -> str:
-    """Build and assertion-sign a SAML Response for `user`; return the XML."""
+    """Build and assertion-sign a SAML Response for `user`; return the XML.
+
+    ``authn_instant`` is *when the principal actually authenticated* to the IdP.
+    When an existing browser session is reused (the user was already logged in
+    when the AuthnRequest arrived) this predates the response issue time, so it
+    must be reported separately - otherwise the IdP over-reports authentication
+    freshness to SPs that enforce it (``ForceAuthn`` / ``RequestedAuthnContext``
+    / a max-age policy). Pass the real login time (e.g. Django's
+    ``user.last_login``); when ``None`` the library treats it as a fresh login
+    and uses the issue instant.
+    """
     nameid = _make_nameid(name_id_format, user, cfg, sp_entity_id)
     options = profiles.ResponseOptions(
         cfg.entity_id, sp_entity_id, acs_url,
@@ -191,7 +202,7 @@ def build_signed_response(
         authn_context_class_ref=core.AUTHN_CONTEXT_PASSWORD_PROTECTED_TRANSPORT,
         attributes=_user_attributes(user, cfg),
     )
-    response = profiles.create_response(options, nameid)
+    response = profiles.create_response(options, nameid, authn_instant=authn_instant)
     return _sign_assertion(response.to_xml(), response.assertions[0].id, cfg)
 
 

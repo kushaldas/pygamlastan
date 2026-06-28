@@ -40,7 +40,7 @@ swamid-cert url=swamid_cert_url:
         mkdir -p "$d"
         [[ -f "$d/swamid-signing.pem" ]] || curl -fsSL "{{url}}" -o "$d/swamid-signing.pem"
     done
-    @echo "SWAMID signing cert present in django-idp/data and django-sp/data"
+    echo "SWAMID signing cert present in django-idp/data and django-sp/data"
 
 # Build both images.
 build:

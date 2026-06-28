@@ -14,6 +14,7 @@ mod core;
 mod crypto;
 mod errors;
 mod idp;
+mod logout;
 mod metadata;
 mod profiles;
 mod security;
@@ -35,5 +36,6 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     security::register(py, m)?;
     profiles::register(py, m)?;
     idp::register(py, m)?;
+    logout::register(py, m)?;
     Ok(())
 }

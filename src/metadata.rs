@@ -4,13 +4,82 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyModule};
 
+use gamlastan::idp::policy::sp_attribute_requirements;
 use gamlastan::metadata::types as gmt;
-use gamlastan::metadata::types::{EntityDescriptor as GEntityDescriptor, KeyDescriptor};
+use gamlastan::metadata::types::{
+    EntityDescriptor as GEntityDescriptor, KeyDescriptor, UiInfo as GUiInfo, UiLogo as GUiLogo,
+};
 use gamlastan::metadata::{EntitiesDescriptorRef, EntityDescriptorRef};
-use gamlastan::xml::{parse_saml, uppsala, SamlSerialize};
+use gamlastan::xml::{parse_saml, parse_secure, SamlSerialize};
 
 use crate::convert::new_submodule;
+use crate::core::Attribute;
 use crate::errors::{metadata_err, xml_err};
+
+/// One `mdui:Logo` (URL with optional dimensions and language).
+#[pyclass(module = "pygamlastan.metadata", name = "UiLogo", frozen)]
+pub struct UiLogo {
+    #[pyo3(get)]
+    url: String,
+    #[pyo3(get)]
+    width: Option<u32>,
+    #[pyo3(get)]
+    height: Option<u32>,
+    #[pyo3(get)]
+    lang: Option<String>,
+}
+
+/// Parsed `mdui:UIInfo` - the display metadata (name, logo, description) an SP
+/// or IdP publishes for consent and discovery UIs. Localized fields are lists of
+/// `(lang, value)` tuples in document order; `lang` may be `None`.
+#[pyclass(module = "pygamlastan.metadata", name = "UiInfo", frozen)]
+pub struct UiInfo {
+    inner: GUiInfo,
+}
+
+fn localized(items: &[gmt::LocalizedText]) -> Vec<(Option<String>, String)> {
+    items
+        .iter()
+        .map(|t| (t.lang.clone(), t.value.clone()))
+        .collect()
+}
+
+#[pymethods]
+impl UiInfo {
+    #[getter]
+    fn display_names(&self) -> Vec<(Option<String>, String)> {
+        localized(&self.inner.display_names)
+    }
+    #[getter]
+    fn descriptions(&self) -> Vec<(Option<String>, String)> {
+        localized(&self.inner.descriptions)
+    }
+    #[getter]
+    fn information_urls(&self) -> Vec<(Option<String>, String)> {
+        localized(&self.inner.information_urls)
+    }
+    #[getter]
+    fn privacy_statement_urls(&self) -> Vec<(Option<String>, String)> {
+        localized(&self.inner.privacy_statement_urls)
+    }
+    #[getter]
+    fn keywords(&self) -> Vec<(Option<String>, String)> {
+        localized(&self.inner.keywords)
+    }
+    #[getter]
+    fn logos(&self) -> Vec<UiLogo> {
+        self.inner
+            .logos
+            .iter()
+            .map(|l: &GUiLogo| UiLogo {
+                url: l.url.clone(),
+                width: l.width,
+                height: l.height,
+                lang: l.lang.clone(),
+            })
+            .collect()
+    }
+}
 
 /// A resolved metadata endpoint (Endpoint or IndexedEndpoint).
 #[pyclass(module = "pygamlastan.metadata", name = "EndpointInfo", frozen)]
@@ -213,6 +282,64 @@ impl EntityDescriptor {
         }
     }
 
+    /// The `mdrpi:RegistrationInfo/@registrationAuthority`, if present (the
+    /// federation operator that registered this entity).
+    #[getter]
+    fn registration_authority(&self) -> Option<String> {
+        self.inner.registration_authority()
+    }
+
+    /// The published entity-category URIs (`mdattr:EntityAttributes`,
+    /// `http://macedir.org/entity-category`).
+    fn entity_categories(&self) -> Vec<String> {
+        self.inner.entity_categories()
+    }
+
+    /// All values of the named entity attribute from `mdattr:EntityAttributes`
+    /// (e.g. `urn:oasis:names:tc:SAML:profiles:subject-id:req`).
+    fn entity_attribute_values(&self, name: &str) -> Vec<String> {
+        self.inner.entity_attribute_values(name)
+    }
+
+    /// Every entity attribute as `(name, values)` pairs, in document order.
+    fn entity_attributes(&self) -> Vec<(String, Vec<String>)> {
+        self.inner.md_extensions().entity_attributes.clone()
+    }
+
+    /// Algorithm URIs advertised via `alg:SigningMethod` / `alg:DigestMethod`,
+    /// across the entity and its SSO roles, de-duplicated in document order.
+    fn supported_algorithms(&self) -> Vec<String> {
+        self.inner.supported_algorithms()
+    }
+
+    /// The `mdui:UIInfo` (display name / logo / description) for the given role
+    /// ("sp" or "idp"), if published. Falls back to entity-level Extensions.
+    #[pyo3(signature = (role="sp"))]
+    fn ui_info(&self, role: &str) -> Option<UiInfo> {
+        let info = if role.eq_ignore_ascii_case("idp") {
+            self.inner.idp_ui_info()
+        } else {
+            self.inner.sp_ui_info()
+        };
+        info.map(|inner| UiInfo { inner })
+    }
+
+    /// The SP's requested attributes as `(required, optional)`, read from its
+    /// `AttributeConsumingService` (the one at `acs_index`, else the default).
+    /// Each is a list of `core.Attribute` (a requested value list narrows the
+    /// released values). Feed these into `idp.ReleasePolicy.filter`.
+    #[pyo3(signature = (acs_index=None))]
+    fn requested_attributes(&self, acs_index: Option<u16>) -> (Vec<Attribute>, Vec<Attribute>) {
+        let mut required = Vec::new();
+        let mut optional = Vec::new();
+        for sp in self.inner.sp_sso_descriptors() {
+            let (req, opt) = sp_attribute_requirements(sp, acs_index);
+            required.extend(req.into_iter().map(|r| Attribute::wrap(r.attribute)));
+            optional.extend(opt.into_iter().map(|r| Attribute::wrap(r.attribute)));
+        }
+        (required, optional)
+    }
+
     /// Serialize back to metadata XML.
     fn to_xml(&self) -> PyResult<String> {
         self.inner.to_xml_string().map_err(xml_err)
@@ -229,9 +356,12 @@ impl EntityDescriptor {
 }
 
 /// Parse a single `<md:EntityDescriptor>` document.
+///
+/// SECURITY: remote/published metadata is attacker-influenced, so parsing goes
+/// through `parse_secure` (uppsala 0.5 resource limits + DTD/XXE rejection).
 #[pyfunction]
 fn parse_entity(xml: &str) -> PyResult<EntityDescriptor> {
-    let doc = uppsala::parse(xml).map_err(xml_err)?;
+    let doc = parse_secure(xml).map_err(xml_err)?;
     let r = parse_saml::<EntityDescriptorRef<'_>>(&doc).map_err(xml_err)?;
     Ok(EntityDescriptor::wrap(r.to_owned()))
 }
@@ -239,7 +369,7 @@ fn parse_entity(xml: &str) -> PyResult<EntityDescriptor> {
 /// Parse a `<md:EntitiesDescriptor>` aggregate into a list of EntityDescriptors.
 #[pyfunction]
 fn parse_entities(xml: &str) -> PyResult<Vec<EntityDescriptor>> {
-    let doc = uppsala::parse(xml).map_err(xml_err)?;
+    let doc = parse_secure(xml).map_err(xml_err)?;
     let r = parse_saml::<EntitiesDescriptorRef<'_>>(&doc).map_err(xml_err)?;
     let owned = r.to_owned();
     Ok(owned
@@ -260,6 +390,8 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let m = new_submodule(py, parent, "metadata")?;
     m.add_class::<EntityDescriptor>()?;
     m.add_class::<EndpointInfo>()?;
+    m.add_class::<UiInfo>()?;
+    m.add_class::<UiLogo>()?;
     m.add_function(wrap_pyfunction!(parse_entity, &m)?)?;
     m.add_function(wrap_pyfunction!(parse_entities, &m)?)?;
     m.add_function(wrap_pyfunction!(validate_entity, &m)?)?;

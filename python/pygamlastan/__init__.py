@@ -23,6 +23,7 @@ from ._native import (  # noqa: F401
     core,
     crypto,
     idp,
+    logout,
     metadata,
     profiles,
     security,
@@ -50,4 +51,5 @@ __all__ = [
     "profiles",
     "attribute_map",
     "idp",
+    "logout",
 ]

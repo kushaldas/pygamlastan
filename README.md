@@ -1,6 +1,6 @@
 # pygamlastan
 
-Python bindings for [gamlastan](https://github.com/kushaldas/gamlastan) **0.5.0**, a
+Python bindings for [gamlastan](https://github.com/kushaldas/gamlastan) **0.6.0**, a
 pure-Rust SAML 2.0 library - types, XML, crypto, metadata, bindings, security, and
 profiles. Built with [PyO3](https://pyo3.rs) 0.29 + [maturin](https://www.maturin.rs)
 (abi3, Python ≥ 3.10).
@@ -12,26 +12,34 @@ values at the FFI boundary, so no Rust lifetime escapes into Python.
 
 ## Example - SP processes an IdP response
 
+`process_response_verified` is the safe entry point: it verifies the XML-DSig
+**internally over the exact bytes it validates**, so signature trust cannot drift
+from the assertion you consume. Inbound XML is parsed through a hardened path
+that rejects DTDs (no XXE) and bounds entity expansion.
+
 ```python
-from pygamlastan import xml, profiles, security, crypto
+from pygamlastan import profiles, security, crypto
 
-# Verify the response signature with the trusted IdP certificate.
-verifier = crypto.SamlVerifier.from_cert(idp_cert_pem)
-verified = verifier.verify_enveloped(response_xml)
+verifier = crypto.SamlVerifier.from_cert(idp_cert_pem)   # trusted IdP cert
 
-parsed = xml.parse_response(response_xml)
-result = profiles.process_response(
-    parsed,
+result = profiles.process_response_verified(
+    response_xml,                       # raw bytes as received at the ACS
+    verifier,
     security.SecurityConfig(),          # production defaults
     sp_entity_id="https://sp.example.org/sp",
     acs_url="https://sp.example.org/acs",
     expected_idp_entity_id="https://idp.example.org",
     expected_request_id="_req123",
-    verified_signed_ids=verified.signed_reference_ids(),
     replay_cache=security.InMemoryReplayCache(),
 )
 print(result.name_id, result.attributes_dict())
 ```
+
+> **Security:** prefer `process_response_verified`. The lower-level
+> `profiles.process_response` trusts a caller-supplied `verified_signed_ids` and
+> does *not* verify signatures itself - passing that without a real verification
+> is an authentication bypass. See the
+> [security guide](https://pygamlastan.readthedocs.io/en/latest/guides/security.html).
 
 ## HSM / PKCS#11 signing
 

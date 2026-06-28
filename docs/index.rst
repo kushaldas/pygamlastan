@@ -2,10 +2,19 @@ pygamlastan
 ===========
 
 **pygamlastan** is a Python binding for `gamlastan
-<https://github.com/kushaldas/gamlastan>`_ 0.5.0, a pure-Rust SAML 2.0 library.
+<https://github.com/kushaldas/gamlastan>`_ 0.6.0, a pure-Rust SAML 2.0 library.
 It exposes gamlastan's types, XML parsing, cryptography (including PKCS#11/HSM
 signing), metadata handling, protocol bindings, security validation, and the
 Web Browser SSO profiles to Python.
+
+.. important::
+
+   SAML is a security protocol, and this binding hands attacker-controlled XML
+   straight into authentication decisions. Before integrating, read the
+   :doc:`security guide <guides/security>`: it covers the signature
+   trust-coupling model, the safe ``process_response_verified`` entry point,
+   XXE/DTD input hardening, authentication-freshness reporting, and the
+   "unsafe"/``permissive`` footguns you must avoid.
 
 The binding mirrors gamlastan's modules as Python submodules:
 
@@ -33,6 +42,8 @@ The binding mirrors gamlastan's modules as Python submodules:
      - Wire to local attribute-name conversion.
    * - :doc:`pygamlastan.idp <api/idp>`
      - IdP infrastructure: targeted IDs, authn broker, assertion store.
+   * - :doc:`pygamlastan.logout <api/logout>`
+     - Single Logout: SP orchestrator, response builders, request validation.
 
 Design in one sentence: parsing converts gamlastan's zero-copy ``*Ref`` views to
 *owned* values at the boundary, so the Python objects you hold never borrow from
@@ -49,6 +60,7 @@ a Rust document and are safe to keep, pass around, and store.
    :maxdepth: 2
    :caption: Guides
 
+   guides/security
    guides/sp_integration
    guides/idp_integration
    guides/signing
@@ -72,6 +84,7 @@ a Rust document and are safe to keep, pass around, and store.
    api/profiles
    api/attribute_map
    api/idp
+   api/logout
 
 .. toctree::
    :maxdepth: 1

@@ -18,7 +18,7 @@ test -x "$PYTHON" || {
 
 uv venv --python "$PYTHON" /opt/venv
 source /opt/venv/bin/activate
-uv pip install --upgrade "maturin==1.9.6"
+uv pip install --upgrade "maturin==1.14.1"
 cd /io/
 # pygamlastan builds an abi3 (py310+) wheel, so the single artifact produced
 # here covers every supported CPython; the cp314 interpreter above is only the

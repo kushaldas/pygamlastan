@@ -133,7 +133,12 @@ def process_authn_request(
     sp_metadata: EntityDescriptor | None = ...,
     unsafe_allow_missing_metadata: bool = ...,
 ) -> ProcessedAuthnRequest: ...
-def create_response(options: ResponseOptions, principal_name_id: NameId, now: datetime | None = ...) -> Response: ...
+def create_response(
+    options: ResponseOptions,
+    principal_name_id: NameId,
+    now: datetime | None = ...,
+    authn_instant: datetime | None = ...,
+) -> Response: ...
 def create_unsolicited_response(
     idp_entity_id: str,
     sp_entity_id: str,
@@ -145,5 +150,14 @@ def create_unsolicited_response(
     session_index: str | None = ...,
     session_not_on_or_after: datetime | None = ...,
     client_address: str | None = ...,
+    now: datetime | None = ...,
+    authn_instant: datetime | None = ...,
+) -> Response: ...
+def create_error_response(
+    idp_entity_id: str,
+    acs_url: str,
+    status_code: str,
+    status_message: str | None = ...,
+    in_response_to: str | None = ...,
     now: datetime | None = ...,
 ) -> Response: ...

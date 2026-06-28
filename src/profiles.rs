@@ -14,7 +14,7 @@ use gamlastan::core::protocol::ResponseRef;
 use gamlastan::profiles::sso::{idp as gidp, sp as gsp, web_browser as gwb};
 use gamlastan::profiles::{InMemorySessionStore as GInMemorySessionStore, SessionStore};
 use gamlastan::security as gs;
-use gamlastan::xml::{parse_saml, uppsala};
+use gamlastan::xml::{parse_saml, parse_secure};
 
 use crate::convert::new_submodule;
 use crate::core::{Attribute, AuthnRequest, NameId, Response};
@@ -29,7 +29,7 @@ use crate::security::{
 /// `xml.parse_response`. Used by `process_response_verified` so the bytes that
 /// are signature-verified and the bytes that are parsed are the same input.
 fn parse_response_xml(xml: &str) -> PyResult<Response> {
-    let doc = uppsala::parse(xml).map_err(xml_err)?;
+    let doc = parse_secure(xml).map_err(xml_err)?;
     let r = parse_saml::<ResponseRef<'_>>(&doc).map_err(xml_err)?;
     Ok(Response::wrap(r.to_owned()))
 }
@@ -687,24 +687,42 @@ impl ResponseOptions {
 }
 
 /// Build a signed-or-unsigned SAML Response carrying an assertion (IdP side).
+///
+/// `now` is the document **issue instant** (drives `IssueInstant`,
+/// `Conditions/@NotBefore`, and every `NotOnOrAfter`); it defaults to the
+/// current wall clock. `authn_instant` is when the principal actually
+/// authenticated to the IdP and drives `AuthnStatement/@AuthnInstant`. When a
+/// previously established SSO session is reused it may predate `now`; pass it
+/// explicitly so authentication freshness is not over-reported to SPs that
+/// enforce it (`RequestedAuthnContext` / `ForceAuthn` / max-age). When omitted
+/// it defaults to `now` (a fresh login), reproducing the historical behaviour.
 #[pyfunction]
-#[pyo3(signature = (options, principal_name_id, now=None))]
+#[pyo3(signature = (options, principal_name_id, now=None, authn_instant=None))]
 fn create_response(
     options: &ResponseOptions,
     principal_name_id: &NameId,
     now: Option<DateTime<Utc>>,
+    authn_instant: Option<DateTime<Utc>>,
 ) -> Response {
-    let now = now.unwrap_or_else(Utc::now);
-    let resp = gidp::create_response(&options.inner, &principal_name_id.inner, now);
+    let issue_instant = now.unwrap_or_else(Utc::now);
+    let times = gwb::ResponseTimes {
+        issue_instant,
+        authn_instant: authn_instant.unwrap_or(issue_instant),
+    };
+    let resp = gidp::create_response(&options.inner, &principal_name_id.inner, times);
     Response::wrap(resp)
 }
 
 /// Build an unsolicited (IdP-initiated) Response.
+///
+/// `now` is the document issue instant (defaults to the current wall clock) and
+/// `authn_instant` is when the principal authenticated (defaults to `now`). See
+/// `create_response` for why the two instants are kept separate.
 #[pyfunction]
 #[pyo3(signature = (
     idp_entity_id, sp_entity_id, acs_url, principal_name_id, attributes=None,
     authn_context_class_ref=None, assertion_lifetime_seconds=300, session_index=None,
-    session_not_on_or_after=None, client_address=None, now=None,
+    session_not_on_or_after=None, client_address=None, now=None, authn_instant=None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn create_unsolicited_response(
@@ -719,8 +737,13 @@ fn create_unsolicited_response(
     session_not_on_or_after: Option<DateTime<Utc>>,
     client_address: Option<String>,
     now: Option<DateTime<Utc>>,
+    authn_instant: Option<DateTime<Utc>>,
 ) -> Response {
-    let now = now.unwrap_or_else(Utc::now);
+    let issue_instant = now.unwrap_or_else(Utc::now);
+    let times = gwb::ResponseTimes {
+        issue_instant,
+        authn_instant: authn_instant.unwrap_or(issue_instant),
+    };
     let attrs: Vec<_> = attributes
         .unwrap_or_default()
         .into_iter()
@@ -737,7 +760,41 @@ fn create_unsolicited_response(
         session_index.as_deref(),
         session_not_on_or_after,
         client_address.as_deref(),
-        now,
+        times,
+    );
+    Response::wrap(resp)
+}
+
+/// Build an error `Response` (no assertions) carrying `status_code` (e.g.
+/// `core.STATUS_RESPONDER` / `core.STATUS_REQUESTER`) and an optional message,
+/// delivered to the SP's ACS (pysaml2 `create_error_response`). Returned
+/// unsigned; sign the envelope before delivery if your profile requires it.
+/// `now` defaults to the current wall clock.
+#[pyfunction]
+#[pyo3(signature = (idp_entity_id, acs_url, status_code, status_message=None, in_response_to=None, now=None))]
+fn create_error_response(
+    idp_entity_id: &str,
+    acs_url: &str,
+    status_code: String,
+    status_message: Option<String>,
+    in_response_to: Option<&str>,
+    now: Option<DateTime<Utc>>,
+) -> Response {
+    use gamlastan::core::protocol::{Status, StatusCode};
+    let status = Status {
+        status_code: StatusCode {
+            value: status_code,
+            sub_status: None,
+        },
+        status_message,
+        status_detail: None,
+    };
+    let resp = gidp::create_error_response(
+        idp_entity_id,
+        in_response_to,
+        acs_url,
+        status,
+        now.unwrap_or_else(Utc::now),
     );
     Response::wrap(resp)
 }
@@ -783,5 +840,6 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(process_authn_request, &m)?)?;
     m.add_function(wrap_pyfunction!(create_response, &m)?)?;
     m.add_function(wrap_pyfunction!(create_unsolicited_response, &m)?)?;
+    m.add_function(wrap_pyfunction!(create_error_response, &m)?)?;
     Ok(())
 }

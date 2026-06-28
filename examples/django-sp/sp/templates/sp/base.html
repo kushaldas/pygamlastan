@@ -5,16 +5,23 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}pygamlastan SAML SP{% endblock %}</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 52rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; color: #18181b; }
-    code, pre { background: #f4f4f5; padding: .1rem .3rem; border-radius: .2rem; word-break: break-all; }
+    body { font-family: system-ui, sans-serif; max-width: 80rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; color: #18181b; }
+    code, pre { background: #f4f4f5; padding: .1rem .3rem; border-radius: .2rem; overflow-wrap: anywhere; }
     .card { border: 1px solid #e4e4e7; border-radius: .5rem; padding: 1rem; margin: 1rem 0; }
     a { color: #2563eb; }
     button { padding: .55rem 1.1rem; margin-top: 1rem; cursor: pointer; }
     .err { color: #b91c1c; }
     header { display: flex; justify-content: space-between; align-items: baseline; }
-    table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0; table-layout: fixed; }
     th, td { border: 1px solid #e4e4e7; padding: .4rem .6rem; text-align: left; vertical-align: top; font-size: .95rem; }
     th { background: #f4f4f5; }
+    /* Released-attributes table: keep the identifier columns wide enough that
+       long single-token OID URNs wrap across the cell instead of collapsing to
+       one character per line. */
+    td, th { overflow-wrap: break-word; }
+    table th:nth-child(1), table td:nth-child(1) { width: 16%; }
+    table th:nth-child(2), table td:nth-child(2) { width: 34%; }
+    table td code { background: none; padding: 0; }
   </style>
 </head>
 <body>

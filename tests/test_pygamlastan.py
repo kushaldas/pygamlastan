@@ -22,6 +22,7 @@ self-skips when SoftHSM2 tooling is absent.
 """
 
 import base64
+import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -33,6 +34,7 @@ from pygamlastan import (
     core,
     crypto,
     idp,
+    logout,
     metadata,
     profiles,
     security,
@@ -128,14 +130,14 @@ def _built_response_xml(
 # --------------------------------------------------------------------------- #
 
 def test_version_and_submodules():
-    """The package exposes its version and all nine gamlastan submodules.
+    """The package exposes its version and all ten gamlastan submodules.
 
     Guards the mixed Rust+Python layout: the `_native` extension must register
     each area (core, xml, ...) as an attribute of the `pygamlastan` package.
     """
-    assert pygamlastan.__version__ == "0.1.1"
+    assert pygamlastan.__version__ == "0.3.0"
     for name in ("core", "xml", "crypto", "bindings", "metadata", "security",
-                 "profiles", "attribute_map", "idp"):
+                 "profiles", "attribute_map", "idp", "logout"):
         assert hasattr(pygamlastan, name)
 
 
@@ -235,6 +237,38 @@ def test_parse_invalid_xml_raises():
     """Non-SAML input surfaces as a typed `SamlXmlError`, not a panic/abort."""
     with pytest.raises(pygamlastan.SamlXmlError):
         xml.parse_response("<not-saml/>")
+
+
+def test_parse_rejects_doctype_dtd():
+    """`parse_secure` (used by every parse entry point) refuses any document
+    carrying a DTD/DOCTYPE, closing the XXE / entity-smuggling vector. A
+    legitimate SAML message never has a DTD, so this is always safe to reject."""
+    xxe = (
+        '<?xml version="1.0"?>'
+        '<!DOCTYPE Response [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
+        '<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"'
+        ' ID="_x" Version="2.0" IssueInstant="2026-06-25T10:00:00Z">&xxe;</samlp:Response>'
+    )
+    with pytest.raises(pygamlastan.SamlXmlError):
+        xml.parse_response(xxe)
+
+
+def test_parse_rejects_billion_laughs():
+    """uppsala 0.5's entity-expansion budget (inherited via `parse_secure`)
+    bounds quadratic / billion-laughs amplification before validation runs. The
+    document is rejected at the DTD guard regardless, but this asserts that a
+    classic amplification payload never expands unbounded."""
+    lol = (
+        '<?xml version="1.0"?>'
+        '<!DOCTYPE lolz ['
+        '<!ENTITY lol "lol">'
+        '<!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">'
+        '<!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">'
+        ']>'
+        '<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol">&lol3;</samlp:Response>'
+    )
+    with pytest.raises(pygamlastan.SamlXmlError):
+        xml.parse_response(lol)
 
 
 # --------------------------------------------------------------------------- #
@@ -521,6 +555,109 @@ def test_metadata_entities():
     items = metadata.parse_entities(agg)
     assert len(items) == 1
     assert items[0].entity_id == IDP
+
+
+# An SP descriptor exercising the metadata extensions: registration authority,
+# entity attributes (category + subject-id:req), role-level MDUI + algsupport,
+# and an AttributeConsumingService.
+SAMPLE_SP_EXT_METADATA = (
+    '<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata"'
+    ' xmlns:mdrpi="urn:oasis:names:tc:SAML:metadata:rpi"'
+    ' xmlns:mdattr="urn:oasis:names:tc:SAML:metadata:attribute"'
+    ' xmlns:mdui="urn:oasis:names:tc:SAML:metadata:ui"'
+    ' xmlns:alg="urn:oasis:names:tc:SAML:metadata:algsupport"'
+    ' xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"'
+    ' entityID="https://sp.example.org">'
+    '<md:Extensions>'
+    '<mdrpi:RegistrationInfo registrationAuthority="http://www.swamid.se/"/>'
+    '<mdattr:EntityAttributes>'
+    '<saml:Attribute Name="http://macedir.org/entity-category">'
+    '<saml:AttributeValue>http://refeds.org/category/research-and-scholarship</saml:AttributeValue>'
+    '</saml:Attribute>'
+    '<saml:Attribute Name="urn:oasis:names:tc:SAML:profiles:subject-id:req">'
+    '<saml:AttributeValue>any</saml:AttributeValue></saml:Attribute>'
+    '</mdattr:EntityAttributes></md:Extensions>'
+    '<md:SPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">'
+    '<md:Extensions>'
+    '<mdui:UIInfo>'
+    '<mdui:DisplayName xml:lang="en">Example Service</mdui:DisplayName>'
+    '<mdui:Logo width="80" height="60">https://example.org/logo.png</mdui:Logo>'
+    '</mdui:UIInfo>'
+    '<alg:SigningMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>'
+    '<alg:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>'
+    '</md:Extensions>'
+    '<md:AssertionConsumerService'
+    ' Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST"'
+    ' Location="https://sp.example.org/acs" index="0" isDefault="true"/>'
+    '<md:AttributeConsumingService index="0">'
+    '<md:ServiceName xml:lang="en">Example</md:ServiceName>'
+    '<md:RequestedAttribute Name="urn:oid:0.9.2342.19200300.100.1.3"'
+    ' FriendlyName="mail" isRequired="true"/>'
+    '<md:RequestedAttribute Name="urn:oid:2.5.4.4" FriendlyName="sn"/>'
+    '</md:AttributeConsumingService>'
+    '</md:SPSSODescriptor></md:EntityDescriptor>'
+)
+
+
+def test_metadata_extension_accessors():
+    """Registration authority, entity attributes/categories, role-level MDUI and
+    algorithm support are all exposed off a parsed SP EntityDescriptor."""
+    ed = metadata.parse_entity(SAMPLE_SP_EXT_METADATA)
+    assert ed.registration_authority == "http://www.swamid.se/"
+    assert ed.entity_categories() == ["http://refeds.org/category/research-and-scholarship"]
+    assert ed.entity_attribute_values(
+        "urn:oasis:names:tc:SAML:profiles:subject-id:req") == ["any"]
+    assert dict(ed.entity_attributes())["http://macedir.org/entity-category"]
+    # algsupport, gathered from the SPSSODescriptor Extensions (namespaces are
+    # declared on the EntityDescriptor root, not the captured fragment).
+    algs = ed.supported_algorithms()
+    assert "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256" in algs
+    assert "http://www.w3.org/2001/04/xmlenc#sha256" in algs
+
+
+def test_metadata_ui_info():
+    """mdui:UIInfo on the SP role surfaces the display name and logo."""
+    ed = metadata.parse_entity(SAMPLE_SP_EXT_METADATA)
+    ui = ed.ui_info("sp")
+    assert ui is not None
+    assert ui.display_names == [("en", "Example Service")]
+    assert len(ui.logos) == 1
+    logo = ui.logos[0]
+    assert logo.url == "https://example.org/logo.png"
+    assert logo.width == 80 and logo.height == 60
+    assert ed.ui_info("idp") is None  # no IDPSSODescriptor
+
+
+def test_metadata_requested_attributes_feed_policy():
+    """The SP's AttributeConsumingService requirements flow into
+    ReleasePolicy.filter: required `mail` and optional `sn` are released, `cn`
+    (not requested) is withheld."""
+    ed = metadata.parse_entity(SAMPLE_SP_EXT_METADATA)
+    required, optional = ed.requested_attributes()
+    assert [a.friendly_name for a in required] == ["mail"]
+    assert [a.friendly_name for a in optional] == ["sn"]
+
+    user_attrs = [
+        core.Attribute("mail", values=["a@example.org"]),
+        core.Attribute("sn", values=["Doe"]),
+        core.Attribute("cn", values=["Alice"]),
+    ]
+    out = idp.ReleasePolicy().filter(
+        user_attrs, "https://sp.example.org", required=required, optional=optional)
+    assert sorted(a.name for a in out) == ["mail", "sn"]
+
+
+def test_create_error_response():
+    """create_error_response builds an assertion-less Response with the given
+    non-success status and InResponseTo."""
+    resp = profiles.create_error_response(
+        IDP, ACS, core.STATUS_RESPONDER, "authentication failed",
+        in_response_to="_req123", now=NOW)
+    assert not resp.is_success()
+    assert resp.status.status_code.value == core.STATUS_RESPONDER
+    assert resp.status.status_message == "authentication failed"
+    assert resp.in_response_to == "_req123"
+    assert resp.assertions == []
 
 
 # --------------------------------------------------------------------------- #
@@ -813,6 +950,31 @@ def test_unsolicited_response():
     assert parsed.assertions[0].subject.name_id.value == "bob"
 
 
+def test_authn_instant_separate_from_issue_instant():
+    """A reused SSO session authenticated earlier than the response is issued.
+
+    Passing `authn_instant` separately keeps `AuthnStatement/@AuthnInstant`
+    (real authentication time) independent of the document issue instant, so
+    authentication freshness is not over-reported to SPs that enforce it. When
+    omitted, `authn_instant` defaults to `now` (a fresh login).
+    """
+    earlier = NOW - timedelta(minutes=30)
+    nid = core.NameId("carol", format=core.NAMEID_TRANSIENT)
+    ro = profiles.ResponseOptions(
+        IDP, SP, ACS, assertion_lifetime_seconds=300, in_response_to="_r",
+        authn_context_class_ref=core.AUTHN_CONTEXT_PASSWORD,
+    )
+    resp = profiles.create_response(ro, nid, now=NOW, authn_instant=earlier)
+    assertion = xml.parse_response(resp.to_xml()).assertions[0]
+    assert assertion.issue_instant == NOW
+    assert assertion.authn_statements[0].authn_instant == earlier
+
+    # Default: both instants collapse to `now` (fresh-login behaviour).
+    fresh = profiles.create_response(ro, nid, now=NOW)
+    fa = xml.parse_response(fresh.to_xml()).assertions[0]
+    assert fa.authn_statements[0].authn_instant == fa.issue_instant == NOW
+
+
 # --------------------------------------------------------------------------- #
 # idp
 # --------------------------------------------------------------------------- #
@@ -874,6 +1036,222 @@ def test_assertion_store():
     assert store.get_assertion("_a1").id == "_a1"
     store.remove_assertion("_a1")
     assert store.get_assertion("_a1") is None
+
+
+def test_identdb_transient_and_persistent():
+    """Transient NameIDs are unique per call; persistent NameIDs are stable per
+    (user, SP) and resolve back to the local principal."""
+    db = idp.IdentDb(IDP, domain="example.org")
+    t1 = db.transient_nameid("alice", SP)
+    t2 = db.transient_nameid("alice", SP)
+    assert t1.value != t2.value
+    assert t1.format == core.NAMEID_TRANSIENT
+
+    p1 = db.persistent_nameid("alice", SP)
+    p2 = db.persistent_nameid("alice", SP)
+    assert p1.value == p2.value  # stable
+    assert db.persistent_nameid("alice", "https://other.example.org").value != p1.value
+    assert db.find_local_id(p1) == "alice"
+
+
+def test_identdb_construct_nameid_policy():
+    """`construct_nameid` honors the request NameIDPolicy format and raises
+    SamlIdentError when no format can be determined."""
+    db = idp.IdentDb(IDP)
+    pol = core.NameIdPolicy(format=core.NAMEID_TRANSIENT, allow_create=True)
+    nid = db.construct_nameid("alice", SP, pol)
+    assert nid.format == core.NAMEID_TRANSIENT
+    assert nid.sp_name_qualifier == SP
+
+    with pytest.raises(pygamlastan.SamlIdentError):
+        db.construct_nameid("alice", SP)  # no policy, no default_format
+
+
+def test_identdb_manage_name_id():
+    """Server-side ManageNameID: NewID records the SP-provided alias; Terminate
+    drops the association. An unknown NameID raises SamlIdentError."""
+    db = idp.IdentDb(IDP)
+    nid = db.persistent_nameid("alice", SP)
+    updated = db.manage_name_id_new_id(nid, "sp-alias")
+    assert updated.sp_provided_id == "sp-alias"
+    assert db.find_local_id(updated) == "alice"
+
+    db.manage_name_id_terminate(updated)
+    assert db.find_local_id(updated) is None
+
+    stranger = core.NameId("nobody")
+    with pytest.raises(pygamlastan.SamlIdentError):
+        db.manage_name_id_terminate(stranger)
+
+
+def test_identdb_python_backed_store():
+    """A Python object implementing get/set/remove can back the NameID database
+    (so a deployment can persist to Redis/SQL/Mongo)."""
+    class DictStore:
+        def __init__(self):
+            self.d = {}
+        def get(self, key):
+            return self.d.get(key)
+        def set(self, key, value):
+            self.d[key] = value
+        def remove(self, key):
+            self.d.pop(key, None)
+
+    backing = DictStore()
+    db = idp.IdentDb(IDP, store=backing)
+    nid = db.persistent_nameid("bob", SP)
+    assert db.find_local_id(nid) == "bob"
+    assert backing.d, "data was written through to the Python store"
+    # A fresh IdentDb over the same backing store sees the persisted mapping.
+    db2 = idp.IdentDb(IDP, store=backing)
+    assert db2.find_local_id(nid) == "bob"
+
+
+def test_identdb_broken_store_fails_closed(recwarn):
+    """A backend failure must not masquerade as a missing key. The store trait
+    is infallible, so the error is surfaced via sys.unraisablehook and the
+    lookup falls back to "not found" rather than silently minting a new ID."""
+    class BrokenStore:
+        def get(self, key):
+            raise RuntimeError("backend down")
+        def set(self, key, value):
+            raise RuntimeError("backend down")
+        def remove(self, key):
+            raise RuntimeError("backend down")
+
+    seen = []
+    old = sys.unraisablehook
+    sys.unraisablehook = lambda arg: seen.append(arg.exc_value)
+    try:
+        db = idp.IdentDb(IDP, store=BrokenStore())
+        nid = idp.IdentDb(IDP).persistent_nameid("bob", SP)
+        assert db.find_local_id(nid) is None
+    finally:
+        sys.unraisablehook = old
+    assert any(isinstance(e, RuntimeError) for e in seen), \
+        "the backend error was surfaced, not swallowed"
+
+
+def test_policy_entry_rejects_negative_lifetime():
+    """A negative assertion lifetime would mint already-expired assertions, so
+    it is rejected at the binding boundary."""
+    with pytest.raises(pygamlastan.SamlPolicyError):
+        idp.PolicyEntry(lifetime_seconds=-1)
+    # Zero and positive lifetimes are accepted.
+    idp.PolicyEntry(lifetime_seconds=0)
+    idp.PolicyEntry(lifetime_seconds=300)
+
+
+# ---------------------------------------------------------------------------
+# idp - attribute-release policy + entity categories
+# ---------------------------------------------------------------------------
+
+def test_release_policy_defaults():
+    """An empty ReleasePolicy returns the built-in defaults per SP."""
+    pol = idp.ReleasePolicy()
+    assert pol.nameid_format(SP) == core.NAMEID_TRANSIENT
+    assert pol.name_form(SP) == core.ATTRNAME_FORMAT_URI
+    assert pol.lifetime_seconds(SP) == 3600
+    assert pol.fail_on_missing_requested(SP) is True
+    assert pol.sign(SP).response is False
+
+
+def test_release_policy_entity_category_refeds():
+    """Entity-category release: only the R&S attributes are released to an SP
+    that publishes the REFEDS Research & Scholarship category."""
+    pol = idp.ReleasePolicy(default=idp.PolicyEntry(entity_categories=["refeds"]))
+    attrs = [
+        core.Attribute("mail", values=["a@example.org"]),
+        core.Attribute("cn", values=["Alice"]),
+    ]
+    out = pol.filter(attrs, SP, sp_entity_categories=[idp.REFEDS_RESEARCH_AND_SCHOLARSHIP])
+    assert [a.name for a in out] == ["mail"]  # cn is not in R&S
+
+
+def test_release_policy_required_missing_raises():
+    """A missing required attribute raises SamlPolicyError when
+    fail_on_missing_requested is on (the default)."""
+    pol = idp.ReleasePolicy()
+    required = [core.Attribute("urn:oid:0.9.2342.19200300.100.1.3")]  # mail OID
+    with pytest.raises(pygamlastan.SamlPolicyError):
+        pol.filter([core.Attribute("cn", values=["x"])], SP, required=required)
+
+
+def test_release_policy_value_regex_restriction():
+    """Value restrictions keep only matching values (anchored, re.match-style);
+    an attribute not named in the restrictions is dropped."""
+    entry = idp.PolicyEntry(
+        attribute_restrictions=[("mail", [r".*@example\.org"]), ("givenName", None)])
+    pol = idp.ReleasePolicy(default=entry)
+    attrs = [
+        core.Attribute("mail", values=["a@example.org", "b@evil.com"]),
+        core.Attribute("eduPersonPrincipalName", values=["x"]),
+    ]
+    out = pol.filter(attrs, SP)
+    assert len(out) == 1
+    assert out[0].name == "mail"
+    assert out[0].string_values == ["a@example.org"]
+
+
+def test_release_policy_subject_id_any_prefers_pairwise():
+    """With subject-id:req == any and both ids present, subject-id is dropped in
+    favour of the privacy-preserving pairwise-id (pysaml2 PR #987)."""
+    sid = core.Attribute(idp.SUBJECT_ID_ATTR, values=["alice"], friendly_name="subject-id")
+    pid = core.Attribute(idp.PAIRWISE_ID_ATTR, values=["opaque"], friendly_name="pairwise-id")
+    out = idp.ReleasePolicy().filter(
+        [sid, pid, core.Attribute("mail", values=["m"])], SP, subject_id_req="any")
+    friendly = {a.friendly_name or a.name for a in out}
+    assert "pairwise-id" in friendly
+    assert "subject-id" not in friendly
+
+
+def test_release_policy_custom_entity_category():
+    """A developer-defined (owned) entity category releases its attributes when
+    the SP publishes the custom category URI."""
+    rule = idp.EntityCategoryRule(["https://eduid.se/category/staff"], ["mail"])
+    custom = idp.EntityCategoryPolicy("eduid-local", rules=[rule])
+    pol = idp.ReleasePolicy(default=idp.PolicyEntry(owned_entity_categories=[custom]))
+    attrs = [core.Attribute("mail", values=["a@x"]), core.Attribute("cn", values=["A"])]
+    out = pol.filter(attrs, SP, sp_entity_categories=["https://eduid.se/category/staff"])
+    assert [a.name for a in out] == ["mail"]
+
+    # releasable_attributes exposes the engine directly.
+    assert idp.releasable_attributes([custom], ["https://eduid.se/category/staff"]) == ["mail"]
+
+
+def test_release_policy_registration_authority_from_metadata():
+    """register_sp_metadata reads RegistrationInfo/@registrationAuthority so an
+    SP with no entry of its own resolves to its registration-authority entry."""
+    sp_md = (
+        '<?xml version="1.0"?>'
+        '<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata"'
+        ' xmlns:mdrpi="urn:oasis:names:tc:SAML:metadata:rpi"'
+        ' entityID="https://sp.swamid.example">'
+        '<md:Extensions><mdrpi:RegistrationInfo'
+        ' registrationAuthority="http://www.swamid.se/"/></md:Extensions>'
+        '<md:SPSSODescriptor protocolSupportEnumeration='
+        '"urn:oasis:names:tc:SAML:2.0:protocol">'
+        '<md:AssertionConsumerService'
+        ' Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST"'
+        ' Location="https://sp.swamid.example/acs" index="0"/>'
+        '</md:SPSSODescriptor></md:EntityDescriptor>'
+    )
+    ed = metadata.parse_entity(sp_md)
+    pol = idp.ReleasePolicy()
+    pol.insert("default", idp.PolicyEntry(lifetime_seconds=3600))
+    pol.insert("http://www.swamid.se/", idp.PolicyEntry(lifetime_seconds=600))
+    pol.register_sp_metadata(ed)
+    assert pol.lifetime_seconds("https://sp.swamid.example") == 600  # RA entry
+    assert pol.lifetime_seconds("https://unknown.example") == 3600  # default
+
+
+def test_sign_targets_resolve():
+    """SignTargets.resolve folds the on-demand flag against the SP's
+    WantAssertionsSigned."""
+    st = idp.SignTargets(response=True, on_demand=True)
+    assert st.resolve(True).sign_response is True
+    assert st.resolve(True).sign_assertion is True
+    assert st.resolve(False).sign_assertion is False
 
 
 # --------------------------------------------------------------------------- #
@@ -1124,3 +1502,135 @@ def test_individual_check_assertion_age():
     first = res.checks[0]
     assert res.get(first.check_number).check_name == first.check_name
     assert res.by_name(first.check_name).check_number == first.check_number
+
+
+# ---------------------------------------------------------------------------
+# logout - Single Logout (SLO)
+# ---------------------------------------------------------------------------
+
+def _slo_name_id():
+    return core.NameId("user@example.com", format=core.NAMEID_EMAIL)
+
+
+def test_create_sp_logout_request():
+    """An SP-initiated LogoutRequest carries the SP issuer, NameID, session
+    indexes, reason, and a default NotOnOrAfter window."""
+    opts = logout.SpLogoutRequestOptions(
+        SP,
+        _slo_name_id(),
+        session_indexes=["_sess1"],
+        reason=logout.REASON_USER,
+        destination=f"{IDP}/slo",
+    )
+    req = logout.create_sp_logout_request(opts)
+    assert req.id.startswith("_")
+    assert req.issuer.value == SP
+    assert req.name_id.value == "user@example.com"
+    assert req.session_indexes == ["_sess1"]
+    assert req.reason == logout.REASON_USER
+    # Round-trips through XML and back.
+    reparsed = xml.parse_logout_request(req.to_xml())
+    assert reparsed.issuer.value == SP
+    assert reparsed.session_indexes == ["_sess1"]
+
+
+def test_logout_response_builders():
+    """Success, partial, and error LogoutResponses set the expected status."""
+    ok = logout.create_logout_response_success(IDP, "_req1", f"{SP}/slo")
+    assert ok.is_success()
+    assert ok.in_response_to == "_req1"
+
+    partial = logout.create_logout_response_partial(IDP, "_req1")
+    assert partial.is_success()  # top-level Success ...
+    assert "PartialLogout" in partial.status.status_code.sub_status.value  # ... w/ sub-status
+
+    err = logout.create_logout_response_error(IDP, "_req1", core.STATUS_RESPONDER, "boom")
+    assert not err.is_success()
+    assert err.status.status_code.value == core.STATUS_RESPONDER
+    assert err.status.status_message == "boom"
+
+
+def test_validate_logout_request():
+    """`validate_logout_request` accepts a fresh request and rejects an expired
+    one (raising SamlProfileError)."""
+    opts = logout.SpLogoutRequestOptions(SP, _slo_name_id())
+    req = logout.create_sp_logout_request(opts)
+    logout.validate_logout_request(req, datetime.now(timezone.utc), 180)  # no raise
+
+    # An expired request (NotOnOrAfter in the past) is rejected.
+    past = datetime.now(timezone.utc) - timedelta(minutes=10)
+    expired_opts = logout.SpLogoutRequestOptions(SP, _slo_name_id(), not_on_or_after=past)
+    expired = logout.create_sp_logout_request(expired_opts)
+    with pytest.raises(pygamlastan.SamlProfileError):
+        logout.validate_logout_request(expired, datetime.now(timezone.utc), 180)
+
+
+def test_orchestrator_full_success():
+    """The SP orchestrator drives request->response per target until complete."""
+    orch = logout.SpLogoutOrchestrator(SP)
+    orch.add_target(
+        logout.LogoutTarget("https://idp1.example.org", _slo_name_id(),
+                            "https://idp1.example.org/slo", core.BINDING_SOAP,
+                            session_indexes=["_sess1"]))
+    orch.add_target(
+        logout.LogoutTarget("https://idp2.example.org", _slo_name_id(),
+                            "https://idp2.example.org/slo", core.BINDING_SOAP))
+    assert not orch.is_complete()
+
+    while True:
+        pending = orch.next_request()
+        if pending is None:
+            break
+        assert pending.request.issuer.value == SP
+        resp = logout.create_logout_response_success(
+            pending.entity_id, pending.request.id, f"{SP}/slo")
+        outcome = orch.handle_response(resp)
+        assert outcome.success and not outcome.partial
+
+    assert orch.is_complete()
+    prog = orch.progress()
+    assert prog.total_participants == 2
+    assert prog.successful_logouts == 2
+    assert prog.is_complete()
+    assert orch.target_state("https://idp1.example.org").kind == "succeeded"
+
+
+def test_orchestrator_partial_and_failure():
+    """A PartialLogout response and a transport failure both mark targets failed,
+    and the orchestrator still reaches completion."""
+    orch = logout.SpLogoutOrchestrator(SP)
+    orch.add_target(
+        logout.LogoutTarget("https://idp1.example.org", _slo_name_id(),
+                            "https://idp1.example.org/slo", core.BINDING_SOAP))
+    orch.add_target(
+        logout.LogoutTarget("https://idp2.example.org", _slo_name_id(),
+                            "https://idp2.example.org/slo", core.BINDING_SOAP))
+
+    p1 = orch.next_request()
+    partial = logout.create_logout_response_partial("https://idp1.example.org", p1.request.id)
+    out1 = orch.handle_response(partial)
+    assert out1.success and out1.partial
+    state1 = orch.target_state("https://idp1.example.org")
+    assert state1.kind == "failed"  # partial logout is not a clean success
+
+    p2 = orch.next_request()
+    orch.mark_failed(p2.entity_id, "connection refused")
+
+    assert orch.is_complete()
+    prog = orch.progress()
+    assert prog.successful_logouts == 0
+    assert len(prog.failed_participants) == 2
+
+
+def test_orchestrator_rejects_issuer_mismatch():
+    """A LogoutResponse whose issuer does not match the target entity is
+    rejected (anti-spoofing: InResponseTo alone is insufficient)."""
+    orch = logout.SpLogoutOrchestrator(SP)
+    orch.add_target(
+        logout.LogoutTarget("https://idp1.example.org", _slo_name_id(),
+                            "https://idp1.example.org/slo", core.BINDING_SOAP))
+    pending = orch.next_request()
+    spoofed = logout.create_logout_response_success(
+        "https://evil.example.org", pending.request.id)
+    with pytest.raises(pygamlastan.SamlProfileError):
+        orch.handle_response(spoofed)

@@ -103,9 +103,21 @@ metadata (`just sp-metadata > sp.xml`, then submit it again) so the
 - The session cookie is `SameSite=None; Secure` so it survives the IdP's
   cross-site POST to the ACS (the request-id binding depends on it). The stack
   always runs behind Caddy TLS.
+- Every inbound SAML Response and every resolved IdP metadata document is parsed
+  through the hardened `parse_secure` path: a DTD/`<!DOCTYPE>` is rejected before
+  any further handling (closing XXE / entity smuggling), and uppsala's
+  fail-closed resource limits (nesting depth, entity-expansion budget) bound
+  billion-laughs and deep-nesting amplification. The SP never touches the raw
+  parser, so this protection cannot be accidentally bypassed.
 - The SP trusts an IdP's assertion only after `process_response_verified`
   succeeds against the signing cert in the **resolved IdP metadata**. Local
   metadata files are trusted as provided; MDQ metadata is signature-verified.
+- `process_response_verified` is the *only* safe entry point: it performs the
+  XML-DSig verification internally over the exact received bytes and feeds only
+  the cryptographically verified reference IDs into validation. The lower-level
+  `process_response` / `security.validate_response` trust caller-supplied
+  `verified_signed_ids`, so passing those without real verification is an
+  authentication bypass - the example deliberately never does this.
 - A replay cache and a persistent-NameID store are passed to
   `process_response_verified` (the hardened library requires the latter whenever
   a response carries a persistent NameID, to detect NameID reassignment). Both

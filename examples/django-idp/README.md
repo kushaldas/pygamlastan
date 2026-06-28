@@ -213,10 +213,29 @@ The assertion is signed with the IdP key so the SP can verify it against the
 certificate in the IdP metadata. NameID format follows the SP's `NameIDPolicy`
 (transient by default; persistent uses an opaque per-SP eduPersonTargetedID).
 
+### Authentication freshness (`authn_instant`)
+
+When an AuthnRequest arrives for a user who is **already logged in**, the IdP
+reuses the existing browser session instead of re-prompting. The principal
+authenticated *earlier* than this response is generated, so `_issue()` passes
+`authn_instant=request.user.last_login` into `build_signed_response`, and the
+binding records that real time in `AuthnStatement/@AuthnInstant` rather than
+collapsing it to "now". Conflating the two would over-report freshness to an SP
+that enforces it via `ForceAuthn`, `RequestedAuthnContext`, or a max-age policy.
+A genuinely fresh login (the user just submitted credentials) has
+`last_login == now`, so the value is correct in both paths.
+
 ## Security notes
 
 This example optimises for a working demo. Before any real use:
 
+- Inbound XML (AuthnRequests, resolved SP metadata) is parsed through the
+  hardened `parse_secure` path: documents carrying a DTD/`<!DOCTYPE>` are
+  rejected outright (no XXE / entity smuggling) and uppsala's resource limits
+  bound billion-laughs / deep-nesting amplification. This is automatic - the
+  binding never exposes the raw parser to this example.
+- Authentication freshness is reported truthfully via `authn_instant` (see
+  above); keep that wiring if you fork this example.
 - Replace the demo accounts and set a strong `DJANGO_SECRET_KEY`.
 - Replace the self-signed IdP key with your real signing key/cert, kept off the
   image (mount it, or use the PKCS#11/HSM path - see the main project's
