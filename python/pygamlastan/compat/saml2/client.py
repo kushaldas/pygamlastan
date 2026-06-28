@@ -269,12 +269,15 @@ class Saml2Client:
             )
             request = _logout.create_sp_logout_request(options)
             signer = self._get_signer() if (sign and self.config.key_file) else None
+            # redirect_encode requires a sig_alg whenever a signer is given;
+            # derive it from the signer's own signature method.
+            sig_alg = signer.signature_method_uri() if signer is not None else None
             url = _bindings.redirect_encode(
                 request.to_xml().encode("utf-8"),
                 True,
                 slo_url,
                 signer=signer,
-                sig_alg=None,
+                sig_alg=sig_alg,
             )
             out[idp] = (request.id, _redirect_http_info(url))
         return out

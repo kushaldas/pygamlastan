@@ -532,6 +532,71 @@ def test_prepare_falls_back_to_redirect_endpoint():
     assert info["url"] == SSO
 
 
+def test_decode_normalizes_corrupt_value_to_valueerror():
+    """A corrupted pgc1: payload raises a single ValueError, not a low-level
+    base64/JSON exception."""
+    with pytest.raises(ValueError):
+        decode("pgc1:!!!not-base64!!!")
+    with pytest.raises(ValueError):
+        decode("pgc1:" + base64.urlsafe_b64encode(b"not json").decode("ascii"))
+
+
+def test_entity_descriptor_requires_entityid():
+    """Missing entityid fails fast instead of emitting entityID=''."""
+    conf = {
+        "service": {
+            "sp": {"endpoints": {"assertion_consumer_service": [(ACS, BINDING_HTTP_POST)]}}
+        }
+    }
+    with pytest.raises(ValueError):
+        entity_descriptor(SPConfig().load(conf))
+
+
+def test_cache_set_encodes_payload_name_id():
+    """Cache.set encodes the NameID carried in the info payload, not the key
+    argument, so a differing payload subject round-trips correctly."""
+    from pygamlastan.compat.saml2.cache import Cache
+
+    key_nid = NameID(text="key-subject", format=TRANSIENT, sp_name_qualifier=SP)
+    payload_nid = NameID(text="payload-subject", format=TRANSIENT, sp_name_qualifier=SP)
+    c = Cache()
+    future = int(datetime.now(timezone.utc).timestamp()) + 3600
+    c.set(key_nid, IDP, {"ava": {}, "name_id": payload_nid}, not_on_or_after=future)
+    info = c.get(key_nid, IDP)
+    assert info["name_id"].text == "payload-subject"
+
+
+def test_global_logout_signed(rsa_keypair, tmp_path):
+    """global_logout(sign=True) signs the redirect (passes a sig_alg with the
+    signer) instead of erroring on the signer/sig_alg combination."""
+    priv, _cert_pem, _der = rsa_keypair
+    key_file = tmp_path / "sp.key"
+    key_file.write_bytes(priv)
+    conf = {
+        "entityid": SP,
+        "service": {
+            "sp": {
+                "endpoints": {
+                    "assertion_consumer_service": [(ACS, BINDING_HTTP_POST)],
+                    "single_logout_service": [(SLO, BINDING_HTTP_REDIRECT)],
+                },
+                "idp": {
+                    IDP: {"single_logout_service": {BINDING_HTTP_REDIRECT: IDPSLO}}
+                },
+            }
+        },
+        "key_file": str(key_file),
+    }
+    client = Saml2Client(SPConfig().load(conf))
+    nid = NameID(text="abc123hash", format=TRANSIENT, sp_name_qualifier=SP)
+    logouts = client.global_logout(nid, sign=True)
+    location = dict(logouts[IDP][1]["headers"])["Location"]
+    params = dict(urllib.parse.parse_qsl(location.split("?", 1)[1]))
+    assert "SAMLRequest" in params
+    assert "SigAlg" in params and params["SigAlg"]
+    assert "Signature" in params
+
+
 # --------------------------------------------------------------------------- #
 # cache.Cache - faithful dict-backed pysaml2 contract
 # --------------------------------------------------------------------------- #

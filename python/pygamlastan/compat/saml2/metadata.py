@@ -58,7 +58,9 @@ class _EntityDescriptorDoc:
 
 def entity_descriptor(config: SPConfig) -> _EntityDescriptorDoc:
     """Build this SP's ``<md:EntityDescriptor>`` from its config."""
-    entity_id = config.entityid or ""
+    if not config.entityid:
+        raise ValueError("SPConfig.entityid is required to build SP metadata")
+    entity_id = config.entityid
     cert_body = _read_cert_body(config.cert_file)
 
     key_descriptor = ""

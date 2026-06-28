@@ -122,7 +122,10 @@ class Cache:
     def set(self, name_id: Any, entity_id: Any, info: Any, not_on_or_after: Any = 0) -> None:
         info = dict(info)
         if "name_id" in info and not isinstance(info["name_id"], str):
-            info["name_id"] = code(name_id)
+            # Encode the NameID actually carried in the payload (not the key
+            # argument), so a payload with a different subject round-trips
+            # consistently.
+            info["name_id"] = code(info["name_id"])
         cni = code(name_id)
         if cni not in self._db:
             self._db[cni] = {}
