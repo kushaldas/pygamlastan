@@ -82,6 +82,15 @@ raise :class:`pygamlastan.SamlMetadataError` (or
       The ``mdui:UIInfo`` (display name / logo / description) for the role
       (``"sp"`` or ``"idp"``), if published.
 
+      .. important::
+
+         The returned strings and URLs are **attacker-controlled** metadata.
+         HTML-escape display names / descriptions / keywords before rendering
+         (stored-XSS risk) and allowlist URL/logo schemes (typically ``https:``)
+         before using them as ``href`` / ``<img src>`` - the URLs are **not**
+         scheme-checked and may be ``javascript:`` or hostile ``data:`` URIs. See
+         :doc:`the security guide <../guides/security>`.
+
    .. py:method:: requested_attributes(acs_index: int | None = None) -> tuple[list[pygamlastan.core.Attribute], list[pygamlastan.core.Attribute]]
 
       The SP's ``(required, optional)`` requested attributes from its
@@ -97,10 +106,25 @@ raise :class:`pygamlastan.SamlMetadataError` (or
    ``information_urls``, ``privacy_statement_urls``, ``keywords``. ``logos`` is a
    list of :py:class:`UiLogo`.
 
+   .. warning::
+
+      Every field is copied **verbatim from attacker-controllable metadata** and
+      is parsed for display, not validated for safety. Output-encode the text
+      fields (``display_names`` / ``descriptions`` / ``keywords``) to avoid
+      stored XSS, and scheme-allowlist the URL fields (``information_urls`` /
+      ``privacy_statement_urls``) before using them as links.
+
 .. py:class:: UiLogo
 
    An ``mdui:Logo``: ``url`` (str), ``width`` / ``height`` (int | None), ``lang``
    (str | None).
+
+   .. warning::
+
+      ``url`` is **attacker-controlled and unvalidated** - its scheme is not
+      restricted, so it may be ``javascript:`` or a hostile ``data:`` URI. Reject
+      anything outside an expected allowlist (typically ``https:``, plus ``data:``
+      only when intentionally inlining images) before using it as ``<img src>``.
 
 .. py:class:: EndpointInfo
 

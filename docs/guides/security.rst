@@ -186,6 +186,75 @@ Decrypt first (see :doc:`../api/crypto`) and validate the decrypted assertion,
 or use a profile path that handles decryption.
 
 
+Untrusted metadata: display fields and URLs
+-------------------------------------------
+
+Metadata is **attacker-influenced input**. SAML metadata comes from federation
+aggregates and MDQ servers, and a single entry is controlled by whoever operates
+that SP or IdP - not by you. pygamlastan *parses* metadata; it does **not**
+sanitize the human-facing strings and URLs inside it for safe display. The
+parser rejects DTDs and bounds resource use (see the XML-hardening section
+above), but the **values** it returns are copied verbatim from the document.
+
+This matters most for the :class:`~pygamlastan.metadata.UiInfo` /
+:class:`~pygamlastan.metadata.UiLogo` data (``mdui:UIInfo``) an IdP reads to show
+an SP's name and logo on a consent screen, via
+:meth:`EntityDescriptor.ui_info() <pygamlastan.metadata.EntityDescriptor.ui_info>`.
+
+.. important::
+
+   Treat every ``UiInfo`` / ``UiLogo`` string as untrusted, attacker-controlled
+   data. Two concrete risks:
+
+   * **Stored XSS.** ``display_names``, ``descriptions``, and ``keywords`` values
+     are raw text from the SP's metadata. If you render them into HTML without
+     **output-encoding** them, a hostile SP can inject script into your consent
+     page. Always HTML-escape these before display (most template engines do this
+     by default - do not bypass it with "safe"/"raw" markers here).
+   * **Dangerous URL schemes.** ``information_urls``, ``privacy_statement_urls``,
+     and :attr:`UiLogo.url <pygamlastan.metadata.UiLogo.url>` are **not**
+     scheme-checked. A value may be ``javascript:...`` or a hostile ``data:``
+     URI. Before emitting one as an ``href`` or ``<img src>``, validate it
+     against an explicit allowlist - typically ``https:`` only (and ``data:``
+     only if you intentionally inline images).
+
+.. code-block:: python
+
+   from urllib.parse import urlparse
+
+   def safe_logo_url(logo):
+       # Allow only https logos; reject javascript:/data:/everything else.
+       if urlparse(logo.url).scheme == "https":
+           return logo.url
+       return None  # fall back to a default icon
+
+   ui = sp_metadata.ui_info("sp")
+   if ui and ui.display_names:
+       # `name` must still be HTML-escaped by your template on render.
+       name = ui.display_names[0][1]
+
+The same "parsed, not vetted" rule applies to the other metadata accessors:
+:meth:`~pygamlastan.metadata.EntityDescriptor.entity_categories`,
+:meth:`~pygamlastan.metadata.EntityDescriptor.entity_attribute_values`,
+:meth:`~pygamlastan.metadata.EntityDescriptor.supported_algorithms`, and
+:attr:`~pygamlastan.metadata.EntityDescriptor.registration_authority` are signals
+from the SP's metadata. Use them to *make decisions* (which attributes to
+release, which algorithm to use), but if you ever echo them into a UI or log,
+output-encode them too. The trustworthiness of any of these depends entirely on
+having fetched the metadata over **signature-verified** MDQ or from a vetted
+local file - an unsigned metadata feed lets an attacker set all of it.
+
+.. note::
+
+   Attribute-release decisions key on metadata too:
+   :meth:`EntityDescriptor.requested_attributes()
+   <pygamlastan.metadata.EntityDescriptor.requested_attributes>` and the
+   entity-category URIs drive what
+   :meth:`ReleasePolicy.filter() <pygamlastan.idp.ReleasePolicy.filter>`
+   releases. A hostile or spoofed SP entry could request more than it should, so
+   the release policy is your privacy boundary - see :doc:`idp_integration`.
+
+
 Footguns the API leaves reachable (and why)
 -------------------------------------------
 
@@ -235,3 +304,8 @@ Checklist for a production IdP
 #. Verify inbound ``AuthnRequest`` signatures if your threat model requires them.
 #. Apply attribute-release and NameID policy appropriate to your privacy
    requirements (see :doc:`idp_integration`).
+#. Fetch SP metadata over **signature-verified** MDQ or from a vetted local file.
+#. When showing an SP's ``mdui:UIInfo`` on a consent screen, HTML-escape its
+   display names/descriptions and allowlist logo/URL schemes to ``https:`` - the
+   values are attacker-controlled (see `Untrusted metadata: display fields and
+   URLs`_).
