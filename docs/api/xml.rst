@@ -38,8 +38,8 @@ attacker-influenced) and to the parse performed inside
 
 .. code-block:: python
 
+   import pygamlastan
    from pygamlastan import xml
-
    # A DTD-bearing payload (classic XXE vector) is rejected outright:
    try:
        xml.parse_response(
