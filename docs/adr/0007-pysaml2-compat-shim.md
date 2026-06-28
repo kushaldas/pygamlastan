@@ -57,11 +57,14 @@ shared modules that `from saml2 import server` keep loading.
 **Security posture is config-driven and maps onto the safe entry points.** The
 shim honours pysaml2's `want_response_signed`:
 
-- `want_response_signed=True` (production): responses go through
-  `profiles.process_response_verified`, which verifies the XML-DSig over the exact
-  received bytes using a `crypto.SamlVerifier` built from the IdP signing
-  certificate read from parsed metadata, and feeds only the cryptographically
-  verified IDs into validation. The validation config is `SecurityConfig.strict()`
+- `want_response_signed=True` (production): the shim verifies the XML-DSig first
+  with `crypto.SamlVerifier.verify_enveloped` over the exact received bytes (the
+  verifier built from the IdP signing certificate read from parsed metadata),
+  then checks the Status (a non-Success status raises `StatusError`), then feeds
+  the cryptographically verified reference IDs into `profiles.process_response`
+  as `verified_signed_ids` for validation. Verifying before the status check
+  prevents an unsigned Response from using the status path to bypass the
+  signatures-required policy. The validation config is `SecurityConfig.strict()`
   with `require_encrypted_assertions` turned off (eduID, like most SPs, signs but
   does not encrypt assertions).
 - `want_response_signed=False` (dev/test only, as eduID's test settings set it):

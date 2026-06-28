@@ -46,17 +46,22 @@ def _to_epoch(point: Any) -> float | None:
 
 
 def _expired(point: Any) -> bool:
-    """Mirror pysaml2 ``time_util.after``: a falsy point counts as expired."""
+    """True if the entry is past its expiry.
+
+    Only a missing/unparseable point (``None``) short-circuits; a real numeric
+    timestamp - including ``0`` (pysaml2's reset value, which is in the past) -
+    goes through the comparison so ``_expired`` and ``_valid`` stay consistent.
+    """
     epoch = _to_epoch(point)
-    if not epoch:
+    if epoch is None:
         return True
     return time.time() >= epoch
 
 
 def _valid(point: Any) -> bool:
-    """Mirror pysaml2 ``time_util.before``: a falsy point counts as valid."""
+    """Inverse of :func:`_expired` for a real timestamp; ``None`` counts valid."""
     epoch = _to_epoch(point)
-    if not epoch:
+    if epoch is None:
         return True
     return time.time() < epoch
 

@@ -97,12 +97,19 @@ def entity_descriptor(config: SPConfig) -> _EntityDescriptorDoc:
             f"    <md:SingleLogoutService Binding={quoteattr(binding)} Location={quoteattr(url)}/>\n"
         )
 
+    # Advertise the SP's actual signing behaviour: it can sign AuthnRequests when
+    # a key is configured, and it expects signed responses/assertions when
+    # want_response_signed is set, so IdPs negotiate the right behaviour.
+    authn_requests_signed = "true" if config.key_file else "false"
+    want_assertions_signed = "true" if config.want_response_signed else "false"
+
     xml = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         f'<md:EntityDescriptor xmlns:md="{_MD}" entityID={quoteattr(entity_id)}>\n'
         '  <md:SPSSODescriptor protocolSupportEnumeration='
         '"urn:oasis:names:tc:SAML:2.0:protocol" '
-        'AuthnRequestsSigned="false" WantAssertionsSigned="false">\n'
+        f'AuthnRequestsSigned="{authn_requests_signed}" '
+        f'WantAssertionsSigned="{want_assertions_signed}">\n'
         f"{key_descriptor}"
         f"{slo_xml}"
         f"{acs_xml}"

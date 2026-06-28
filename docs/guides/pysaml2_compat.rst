@@ -314,11 +314,15 @@ Security model
 The shim's trust posture follows the ``want_response_signed`` setting, mapping
 onto pygamlastan's :doc:`safe entry points <security>`:
 
-* **``want_response_signed=True`` (production).** Responses are processed with
-  ``profiles.process_response_verified``: the XML-DSig is verified over the exact
-  received bytes using a ``SamlVerifier`` built from the IdP's signing
-  certificate (read from the parsed metadata), and only the verified IDs feed
-  validation. The validation profile is ``SecurityConfig.strict()`` with
+* **``want_response_signed=True`` (production).** The XML-DSig is verified first,
+  over the exact received bytes, with ``crypto.SamlVerifier.verify_enveloped``
+  using a ``SamlVerifier`` built from the IdP's signing certificate (read from the
+  parsed metadata). Only after the signature is confirmed is the Status checked
+  (a non-Success status then raises ``StatusError``); the verified signature
+  reference IDs are then fed into ``profiles.process_response`` as
+  ``verified_signed_ids`` for validation. Verifying first means an unsigned
+  Response cannot use the status path to bypass the signatures-required policy.
+  The validation profile is ``SecurityConfig.strict()`` with
   ``require_encrypted_assertions`` disabled - SPs that sign but do not encrypt
   assertions (the common case, including eduID) verify correctly, while signed
   encryption is not mandated. A verification or validation failure is raised as

@@ -826,3 +826,51 @@ def test_metadata_uses_first_cert_of_chain(rsa_keypair, tmp_path):
     # the embedded body equals the single leaf cert's DER base64, and parses back
     assert cert_der_b64 in xml
     assert md.parse_entity(xml).signing_certificates("sp")
+
+
+def test_cache_zero_timestamp_consistent():
+    """A not_on_or_after of 0 is treated as an actual (past) timestamp: get
+    raises ToOld and active() reports False, consistently."""
+    from pygamlastan.compat.saml2.cache import Cache, ToOld
+
+    c = Cache()
+    nid = _nid()
+    c.set(nid, IDP, {"ava": {"mail": ["a@b"]}}, not_on_or_after=0)
+    with pytest.raises(ToOld):
+        c.get(nid, IDP)
+    assert c.active(nid, IDP) is False
+
+
+def test_metadata_signing_flags_reflect_config(rsa_keypair, tmp_path):
+    """SP metadata advertises AuthnRequestsSigned from key_file and
+    WantAssertionsSigned from want_response_signed, instead of hard-coded false."""
+    priv, _cert_pem, _der = rsa_keypair
+    key_file = tmp_path / "sp.key"
+    key_file.write_bytes(priv)
+    conf = {
+        "entityid": SP,
+        "service": {
+            "sp": {
+                "endpoints": {"assertion_consumer_service": [(ACS, BINDING_HTTP_POST)]},
+                "want_response_signed": True,
+            }
+        },
+        "key_file": str(key_file),
+    }
+    xml = entity_descriptor(SPConfig().load(conf)).to_xml()
+    assert 'AuthnRequestsSigned="true"' in xml
+    assert 'WantAssertionsSigned="true"' in xml
+
+    # Without a key and with signing disabled, both are advertised false.
+    conf2 = {
+        "entityid": SP,
+        "service": {
+            "sp": {
+                "endpoints": {"assertion_consumer_service": [(ACS, BINDING_HTTP_POST)]},
+                "want_response_signed": False,
+            }
+        },
+    }
+    xml2 = entity_descriptor(SPConfig().load(conf2)).to_xml()
+    assert 'AuthnRequestsSigned="false"' in xml2
+    assert 'WantAssertionsSigned="false"' in xml2
