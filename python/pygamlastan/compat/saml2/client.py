@@ -201,9 +201,17 @@ class Saml2Client:
             )
 
         acs_url, _ = self.config.acs(BINDING_HTTP_POST)
-        expected_idp = self.config.only_idp()
-        if expected_idp is None and parsed.issuer is not None:
-            expected_idp = parsed.issuer.value
+        # The expected IdP must be trusted, never taken from the unverified
+        # Response issuer: with several IdPs that would let a signed response from
+        # an unintended (but known) IdP be accepted. Use an explicit caller hint
+        # or the unambiguous configured IdP; otherwise refuse.
+        expected_idp = kwargs.get("expected_idp") or self.config.only_idp()
+        if expected_idp is None:
+            raise ValueError(
+                "Cannot determine the expected IdP for response processing: more "
+                "than one IdP is configured/known. Pass expected_idp=<entity id> "
+                "(deriving it from the unverified Response issuer would be unsafe)."
+            )
 
         if self.config.want_response_signed:
             # Verify the signature FIRST. Checking the Status before verification

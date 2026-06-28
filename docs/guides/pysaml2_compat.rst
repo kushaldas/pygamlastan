@@ -335,6 +335,12 @@ onto pygamlastan's :doc:`safe entry points <security>`:
   is reachable **only** when the settings explicitly opt out of signatures. Never
   set this in production.
 
+The expected IdP is the unambiguous configured/known IdP, or - when more than
+one is configured - an explicit ``expected_idp=<entity id>`` keyword to
+``parse_authn_request_response``. It is never taken from the unverified Response
+issuer, so a signed response from an unintended (but known) IdP cannot be
+accepted in a multi-IdP deployment.
+
 Replay / solicited-response protection mirrors pysaml2's SP model: the response's
 ``InResponseTo`` must be present in the ``outstanding`` set you pass in (an
 unknown one raises ``UnsolicitedResponse``), and you remove it once consumed. The

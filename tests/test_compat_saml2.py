@@ -841,6 +841,66 @@ def test_cache_zero_timestamp_consistent():
     assert c.active(nid, IDP) is False
 
 
+def test_cache_none_expiry_never_expires():
+    """A None not_on_or_after means 'no expiry': get returns info, active True."""
+    from pygamlastan.compat.saml2.cache import Cache
+
+    c = Cache()
+    nid = _nid()
+    c.set(nid, IDP, {"ava": {"mail": ["a@b"]}}, not_on_or_after=None)
+    assert c.get(nid, IDP)["ava"] == {"mail": ["a@b"]}
+    assert c.active(nid, IDP) is True
+
+
+def test_cache_unparseable_expiry_fails_closed():
+    """An unparseable non-None expiry fails closed: get raises, active False."""
+    from pygamlastan.compat.saml2.cache import Cache, ToOld
+
+    c = Cache()
+    nid = _nid()
+    c.set(nid, IDP, {"ava": {}}, not_on_or_after="not-a-timestamp")
+    with pytest.raises(ToOld):
+        c.get(nid, IDP)
+    assert c.active(nid, IDP) is False
+
+
+def _two_idp_config() -> dict:
+    return {
+        "entityid": SP,
+        "service": {
+            "sp": {
+                "endpoints": {"assertion_consumer_service": [(ACS, BINDING_HTTP_POST)]},
+                "want_response_signed": False,
+                "idp": {
+                    IDP: {"single_sign_on_service": {BINDING_HTTP_REDIRECT: SSO}},
+                    "https://other.idp.example/md": {
+                        "single_sign_on_service": {BINDING_HTTP_REDIRECT: "https://other/sso"}
+                    },
+                },
+            }
+        },
+    }
+
+
+def test_parse_ambiguous_idp_requires_explicit_expected():
+    """With multiple IdPs, the expected IdP is NOT taken from the unverified
+    Response issuer; parse refuses unless given expected_idp explicitly."""
+    client = Saml2Client(SPConfig().load(_two_idp_config()))
+    raw = base64.b64encode(_auth_response("id-req-x").encode("utf-8")).decode("ascii")
+    with pytest.raises(ValueError):
+        client.parse_authn_request_response(raw, BINDING_HTTP_POST, {"id-req-x": "r"})
+
+
+def test_parse_ambiguous_idp_accepts_explicit_expected():
+    """Passing expected_idp lets a multi-IdP SP process the response."""
+    client = Saml2Client(SPConfig().load(_two_idp_config()))
+    raw = base64.b64encode(_auth_response("id-req-x").encode("utf-8")).decode("ascii")
+    resp = client.parse_authn_request_response(
+        raw, BINDING_HTTP_POST, {"id-req-x": "r"}, expected_idp=IDP
+    )
+    assert resp.session_info()["issuer"] == IDP
+
+
 def test_metadata_signing_flags_reflect_config(rsa_keypair, tmp_path):
     """SP metadata advertises AuthnRequestsSigned from key_file and
     WantAssertionsSigned from want_response_signed, instead of hard-coded false."""

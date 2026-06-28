@@ -10,7 +10,7 @@ ACS/SLO endpoints and signing certificate - the same approach the pygamlastan
 
 from __future__ import annotations
 
-from xml.sax.saxutils import escape, quoteattr
+from xml.sax.saxutils import quoteattr
 
 from .config import SPConfig
 
@@ -116,6 +116,6 @@ def entity_descriptor(config: SPConfig) -> _EntityDescriptorDoc:
         "  </md:SPSSODescriptor>\n"
         "</md:EntityDescriptor>\n"
     )
-    # escape() is applied to free text only; attribute values use quoteattr.
-    _ = escape  # kept for clarity; endpoints/cert are controlled config values
+    # All attribute values are emitted via quoteattr; endpoints/cert come from
+    # controlled config, not untrusted input.
     return _EntityDescriptorDoc(xml)
