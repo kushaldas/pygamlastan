@@ -22,6 +22,7 @@ self-skips when SoftHSM2 tooling is absent.
 """
 
 import base64
+import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -1104,6 +1105,41 @@ def test_identdb_python_backed_store():
     # A fresh IdentDb over the same backing store sees the persisted mapping.
     db2 = idp.IdentDb(IDP, store=backing)
     assert db2.find_local_id(nid) == "bob"
+
+
+def test_identdb_broken_store_fails_closed(recwarn):
+    """A backend failure must not masquerade as a missing key. The store trait
+    is infallible, so the error is surfaced via sys.unraisablehook and the
+    lookup falls back to "not found" rather than silently minting a new ID."""
+    class BrokenStore:
+        def get(self, key):
+            raise RuntimeError("backend down")
+        def set(self, key, value):
+            raise RuntimeError("backend down")
+        def remove(self, key):
+            raise RuntimeError("backend down")
+
+    seen = []
+    old = sys.unraisablehook
+    sys.unraisablehook = lambda arg: seen.append(arg.exc_value)
+    try:
+        db = idp.IdentDb(IDP, store=BrokenStore())
+        nid = idp.IdentDb(IDP).persistent_nameid("bob", SP)
+        assert db.find_local_id(nid) is None
+    finally:
+        sys.unraisablehook = old
+    assert any(isinstance(e, RuntimeError) for e in seen), \
+        "the backend error was surfaced, not swallowed"
+
+
+def test_policy_entry_rejects_negative_lifetime():
+    """A negative assertion lifetime would mint already-expired assertions, so
+    it is rejected at the binding boundary."""
+    with pytest.raises(pygamlastan.SamlPolicyError):
+        idp.PolicyEntry(lifetime_seconds=-1)
+    # Zero and positive lifetimes are accepted.
+    idp.PolicyEntry(lifetime_seconds=0)
+    idp.PolicyEntry(lifetime_seconds=300)
 
 
 # ---------------------------------------------------------------------------

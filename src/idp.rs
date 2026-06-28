@@ -173,24 +173,40 @@ struct PyIdentityStore {
 }
 
 impl IdentityStore for PyIdentityStore {
+    // The `IdentityStore` trait is infallible (no `Result`), so a broken Python
+    // backend cannot raise here. Swallowing the error silently would make a
+    // backend outage look like a cache miss (e.g. minting a fresh persistent
+    // NameID instead of returning the stored one), so every failure is reported
+    // via `write_unraisable` before falling back to the "missing" answer.
     fn get(&self, key: &str) -> Option<String> {
         Python::attach(|py| {
-            self.obj
-                .bind(py)
+            let obj = self.obj.bind(py);
+            match obj
                 .call_method1("get", (key,))
-                .ok()
-                .and_then(|r| r.extract::<Option<String>>().ok())
-                .flatten()
+                .and_then(|r| r.extract::<Option<String>>())
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    e.write_unraisable(py, Some(obj));
+                    None
+                }
+            }
         })
     }
     fn set(&self, key: &str, value: String) {
         Python::attach(|py| {
-            let _ = self.obj.bind(py).call_method1("set", (key, value));
+            let obj = self.obj.bind(py);
+            if let Err(e) = obj.call_method1("set", (key, value)) {
+                e.write_unraisable(py, Some(obj));
+            }
         });
     }
     fn remove(&self, key: &str) {
         Python::attach(|py| {
-            let _ = self.obj.bind(py).call_method1("remove", (key,));
+            let obj = self.obj.bind(py);
+            if let Err(e) = obj.call_method1("remove", (key,)) {
+                e.write_unraisable(py, Some(obj));
+            }
         });
     }
 }
@@ -373,7 +389,12 @@ fn shipped_policy(name: &str) -> PyResult<&'static gec::EntityCategoryPolicy> {
 
 /// A single entity-category release rule (releases `attributes` when all of
 /// `categories` are present on the SP and none of `conflicts` is).
-#[pyclass(module = "pygamlastan.idp", name = "EntityCategoryRule", frozen, from_py_object)]
+#[pyclass(
+    module = "pygamlastan.idp",
+    name = "EntityCategoryRule",
+    frozen,
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct EntityCategoryRule {
     inner: gec::OwnedEntityCategoryRule,
@@ -416,7 +437,12 @@ impl EntityCategoryRule {
 
 /// A named set of entity-category release rules. Build one from custom rules,
 /// optionally seeded from a shipped policy via `extend`.
-#[pyclass(module = "pygamlastan.idp", name = "EntityCategoryPolicy", frozen, from_py_object)]
+#[pyclass(
+    module = "pygamlastan.idp",
+    name = "EntityCategoryPolicy",
+    frozen,
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct EntityCategoryPolicy {
     inner: gec::OwnedEntityCategoryPolicy,
@@ -463,7 +489,8 @@ fn releasable_attributes(
     sp_entity_categories: Vec<String>,
     required_local_names: Option<Vec<String>>,
 ) -> Vec<String> {
-    let owned: Vec<gec::OwnedEntityCategoryPolicy> = policies.into_iter().map(|p| p.inner).collect();
+    let owned: Vec<gec::OwnedEntityCategoryPolicy> =
+        policies.into_iter().map(|p| p.inner).collect();
     let required = required_local_names.unwrap_or_default();
     let mut out: Vec<String> =
         gec::releasable_attributes_owned(&owned, &sp_entity_categories, &required)
@@ -506,7 +533,12 @@ fn subject_id_req_from_str(s: &str) -> PyResult<gec::SubjectIdReq> {
 // ---------------------------------------------------------------------------
 
 /// Which messages the IdP signs for an SP.
-#[pyclass(module = "pygamlastan.idp", name = "SignTargets", frozen, from_py_object)]
+#[pyclass(
+    module = "pygamlastan.idp",
+    name = "SignTargets",
+    frozen,
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct SignTargets {
     inner: gpol::SignTargets,
@@ -568,7 +600,12 @@ impl ResolvedSignTargets {
 // ---------------------------------------------------------------------------
 
 /// One attribute-release policy entry (per SP, or the `"default"` fallback).
-#[pyclass(module = "pygamlastan.idp", name = "PolicyEntry", frozen, from_py_object)]
+#[pyclass(
+    module = "pygamlastan.idp",
+    name = "PolicyEntry",
+    frozen,
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct PolicyEntry {
     inner: gpol::PolicyEntry,
@@ -606,6 +643,12 @@ impl PolicyEntry {
             entry = entry.with_name_form(f);
         }
         if let Some(secs) = lifetime_seconds {
+            if secs < 0 {
+                return Err(policy_err(format!(
+                    "lifetime_seconds must be non-negative, got {secs}: a negative \
+                     assertion lifetime would mint already-expired assertions"
+                )));
+            }
             entry = entry.with_lifetime(TimeDelta::seconds(secs));
         }
         if let Some(s) = sign {
@@ -634,7 +677,8 @@ impl PolicyEntry {
                 .map(|(name, pats)| {
                     (
                         name.as_str(),
-                        pats.as_ref().map(|p| p.iter().map(String::as_str).collect()),
+                        pats.as_ref()
+                            .map(|p| p.iter().map(String::as_str).collect()),
                     )
                 })
                 .collect();

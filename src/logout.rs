@@ -159,7 +159,12 @@ fn validate_logout_request(
 // ---------------------------------------------------------------------------
 
 /// A session authority/participant the SP must log out from.
-#[pyclass(module = "pygamlastan.logout", name = "LogoutTarget", frozen, from_py_object)]
+#[pyclass(
+    module = "pygamlastan.logout",
+    name = "LogoutTarget",
+    frozen,
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct LogoutTarget {
     inner: gl::LogoutTarget,
@@ -299,7 +304,11 @@ impl TargetLogoutState {
 }
 
 /// Aggregate progress across all logout targets.
-#[pyclass(module = "pygamlastan.logout", name = "LogoutPropagationResult", frozen)]
+#[pyclass(
+    module = "pygamlastan.logout",
+    name = "LogoutPropagationResult",
+    frozen
+)]
 pub struct LogoutPropagationResult {
     inner: gl::LogoutPropagationResult,
 }
