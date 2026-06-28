@@ -303,7 +303,7 @@ impl EntityDescriptor {
 
     /// Every entity attribute as `(name, values)` pairs, in document order.
     fn entity_attributes(&self) -> Vec<(String, Vec<String>)> {
-        self.inner.md_extensions().entity_attributes
+        self.inner.md_extensions().entity_attributes.clone()
     }
 
     /// Algorithm URIs advertised via `alg:SigningMethod` / `alg:DigestMethod`,
