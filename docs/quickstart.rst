@@ -8,34 +8,38 @@ Service Provider: process a response
 ------------------------------------
 
 Given the XML of a SAML ``Response`` received at your Assertion Consumer Service
-(ACS) endpoint, verify its signature and extract the authenticated identity:
+(ACS) endpoint, the safe entry point is
+:func:`~pygamlastan.profiles.process_response_verified`. It performs the
+XML-DSig verification **internally over the exact bytes it validates**, so the
+"verified" signatures cannot drift from the assertion you trust:
 
 .. code-block:: python
 
-   from pygamlastan import xml, crypto, security, profiles
+   from pygamlastan import crypto, security, profiles
 
-   # 1. Verify the enveloped XML-DSig signature using the trusted IdP cert.
-   verifier = crypto.SamlVerifier.from_cert(idp_certificate_pem)
-   verified = verifier.verify_enveloped(response_xml)
+   verifier = crypto.SamlVerifier.from_cert(idp_certificate_pem)   # trusted IdP cert
 
-   # 2. Parse the response into owned Python objects.
-   response = xml.parse_response(response_xml)
-
-   # 3. Validate and extract identity. `verified_signed_ids` ties the
-   #    signed-assertion requirement to the cryptographic verification above.
-   result = profiles.process_response(
-       response,
-       security.SecurityConfig(),                 # production defaults
+   result = profiles.process_response_verified(
+       response_xml,                                # raw bytes as received
+       verifier,
+       security.SecurityConfig(),                   # production defaults
        sp_entity_id="https://sp.example.org/sp",
        acs_url="https://sp.example.org/acs",
        expected_idp_entity_id="https://idp.example.org",
-       expected_request_id="_the_request_id",     # None for unsolicited
-       verified_signed_ids=verified.signed_reference_ids(),
+       expected_request_id="_the_request_id",       # None for unsolicited
        replay_cache=security.InMemoryReplayCache(),
    )
 
    print(result.name_id)
    print(result.attributes_dict())   # {"mail": ["alice@example.org"], ...}
+
+.. important::
+
+   Prefer ``process_response_verified``. The lower-level
+   :func:`~pygamlastan.profiles.process_response` trusts a caller-supplied
+   ``verified_signed_ids`` and does **not** verify signatures itself — passing
+   that without a real verification is an authentication bypass. See the
+   :doc:`security guide <guides/security>`.
 
 Identity Provider: build a response
 -----------------------------------
@@ -95,6 +99,9 @@ not require real signatures:
 Where to go next
 ----------------
 
+* :doc:`guides/security` is the most important next read: the trust-coupling
+  model, XXE/DTD input hardening, authentication freshness, and the footguns to
+  avoid.
 * :doc:`guides/sp_integration` and :doc:`guides/idp_integration` cover each side
   in depth, including the AuthnRequest.
 * :doc:`guides/signing` explains file-key and PKCS#11/HSM signing and

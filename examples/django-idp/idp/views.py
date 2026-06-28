@@ -118,6 +118,10 @@ def _issue(request):
         name_id_format=pending["name_id_format"],
         user=request.user,
         cfg=cfg,
+        # Real authentication time. When this AuthnRequest reused an existing
+        # browser session the user authenticated earlier than now, so report
+        # `last_login` rather than over-stating freshness to the SP.
+        authn_instant=request.user.last_login,
     )
     html = sl.encode_post_response(signed, pending["acs_url"], pending["relay_state"])
     return HttpResponse(html)

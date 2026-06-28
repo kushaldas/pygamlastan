@@ -100,14 +100,40 @@ Identity Provider
    Inputs to :func:`create_response`. ``attributes`` is a list of
    :class:`pygamlastan.core.Attribute`.
 
-.. py:function:: create_response(options: ResponseOptions, principal_name_id, now=None) -> pygamlastan.core.Response
+.. py:function:: create_response(options: ResponseOptions, principal_name_id, now=None, authn_instant=None) -> pygamlastan.core.Response
 
    Build a ``Response`` carrying an assertion for ``principal_name_id`` (a
    :class:`pygamlastan.core.NameId`).
 
-.. py:function:: create_unsolicited_response(idp_entity_id, sp_entity_id, acs_url, principal_name_id, attributes=None, authn_context_class_ref=None, assertion_lifetime_seconds=300, session_index=None, session_not_on_or_after=None, client_address=None, now=None) -> pygamlastan.core.Response
+   ``now`` is the document **issue instant** (defaults to the current wall
+   clock): it drives ``IssueInstant``, ``Conditions/@NotBefore`` and every
+   ``NotOnOrAfter``. ``authn_instant`` is when the principal actually
+   authenticated to the IdP and drives ``AuthnStatement/@AuthnInstant``; it
+   defaults to ``now`` (a fresh login).
+
+   .. important::
+
+      When a previously established SSO session is reused, the principal
+      authenticated *before* this response is generated. Pass the real
+      authentication time as ``authn_instant`` (e.g. Django's
+      ``user.last_login``) so the IdP does not over-report authentication
+      freshness to SPs that enforce it via ``ForceAuthn``,
+      ``RequestedAuthnContext``, or a max-age policy. Conflating the two instants
+      (the old single-``now`` behaviour) is a freshness-spoofing footgun; keeping
+      them separate is the safe default.
+
+.. py:function:: create_unsolicited_response(idp_entity_id, sp_entity_id, acs_url, principal_name_id, attributes=None, authn_context_class_ref=None, assertion_lifetime_seconds=300, session_index=None, session_not_on_or_after=None, client_address=None, now=None, authn_instant=None) -> pygamlastan.core.Response
 
    Build an IdP-initiated (unsolicited) ``Response`` with no ``InResponseTo``.
+   ``now`` and ``authn_instant`` behave as in :func:`create_response`.
+
+.. py:function:: create_error_response(idp_entity_id, acs_url, status_code, status_message=None, in_response_to=None, now=None) -> pygamlastan.core.Response
+
+   Build an assertion-less error ``Response`` carrying ``status_code`` (e.g.
+   :data:`pygamlastan.core.STATUS_RESPONDER` or
+   :data:`pygamlastan.core.STATUS_REQUESTER`) and an optional message, delivered
+   to the SP's ACS. Returned unsigned; sign the envelope before delivery if your
+   profile requires it. ``now`` defaults to the current wall clock.
 
 Sessions
 --------

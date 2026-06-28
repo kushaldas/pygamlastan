@@ -11,6 +11,7 @@ from . import (
     core as core,
     crypto as crypto,
     idp as idp,
+    logout as logout,
     metadata as metadata,
     profiles as profiles,
     security as security,
