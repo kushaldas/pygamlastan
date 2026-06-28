@@ -1,53 +1,150 @@
 """``saml2.cache`` shim.
 
 eduID subclasses ``saml2.cache.Cache`` for its IdentityCache, passing in a
-dict-like backend. The real pysaml2 ``Cache`` stores per-subject identity and
-expiry data so it can drive Single Logout. The pygamlastan SP flow does not rely
-on pysaml2's internal identity bookkeeping (logout targets come from config /
-metadata), so this shim is a minimal dict-backed store that satisfies the base
-class contract eduID's subclass expects.
+dict-like backend. pysaml2's ``Cache`` stores per-(subject, entity) session
+info with an expiry timestamp so it can drive Single Logout and validity checks.
+
+This is a faithful dict-backed reimplementation of that contract: the same
+``self._db[code(name_id)][entity_id] = (not_on_or_after, info)`` layout and the
+same method semantics, so a subclass that sets ``self._db`` to a MutableMapping
+(as eduID's ``IdentityCache`` does) gets working storage and expiry. The
+pygamlastan SP flow itself derives logout targets from config/metadata rather
+than this cache, but the store is real so subclasses behave as on pysaml2.
 """
 
 from __future__ import annotations
 
+import time
+from datetime import datetime
 from typing import Any
+
+from .ident import code, decode
+
+
+class ToOld(Exception):
+    """Raised by :meth:`Cache.get` when an entry is past its expiry."""
+
+
+# pysaml2 spells the class both ways; keep the alias for drop-in compatibility.
+TooOld = ToOld
+
+
+def _to_epoch(point: Any) -> float | None:
+    """Coerce a stored ``not_on_or_after`` to epoch seconds (or None)."""
+    if point is None:
+        return None
+    if isinstance(point, (int, float)):
+        return float(point)
+    if isinstance(point, datetime):
+        return point.timestamp()
+    if isinstance(point, str):
+        try:
+            return datetime.fromisoformat(point.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _expired(point: Any) -> bool:
+    """Mirror pysaml2 ``time_util.after``: a falsy point counts as expired."""
+    epoch = _to_epoch(point)
+    if not epoch:
+        return True
+    return time.time() >= epoch
+
+
+def _valid(point: Any) -> bool:
+    """Mirror pysaml2 ``time_util.before``: a falsy point counts as valid."""
+    epoch = _to_epoch(point)
+    if not epoch:
+        return True
+    return time.time() < epoch
 
 
 class Cache:
-    """Minimal dict-backed stand-in for ``saml2.cache.Cache``.
+    """Dict-backed stand-in for ``saml2.cache.Cache``.
 
-    Subclasses (e.g. eduID's ``IdentityCache``) set ``self._db`` to a
-    MutableMapping in their own ``__init__``; the methods here operate on
-    whatever ``_db`` the subclass installed, falling back to a plain dict.
+    Subclasses (e.g. eduID's ``IdentityCache``) typically replace ``self._db``
+    with their own MutableMapping in ``__init__``; the methods here operate on
+    whatever ``_db`` is installed.
     """
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        self._db: dict[str, Any] = {}
+    def __init__(self, filename: str | None = None) -> None:
+        # Unlike pysaml2 there is no shelve-backed mode; a filename is accepted
+        # for signature compatibility but storage is always in-memory unless a
+        # subclass swaps in its own backend.
+        self._db: dict[str, dict[str, tuple[Any, dict[str, Any]]]] = {}
         self._sync = False
+
+    def delete(self, name_id: Any) -> None:
+        del self._db[code(name_id)]
 
     def get_identity(
         self, name_id: Any, entities: Any = None, check_not_on_or_after: bool = True
     ) -> tuple[dict[str, Any], list[str]]:
-        """Return (identity-attributes, list-of-entity-ids-still-valid)."""
-        return ({}, [])
+        """Aggregate still-valid identity info; report timed-out entity ids."""
+        if not entities:
+            try:
+                entities = list(self._db[code(name_id)].keys())
+            except KeyError:
+                return {}, []
 
-    def get(self, name_id: Any, entity_id: Any, check_not_on_or_after: bool = True) -> dict[str, Any]:
-        return {}
+        res: dict[str, Any] = {}
+        oldees: list[str] = []
+        for entity_id in entities:
+            try:
+                info = self.get(name_id, entity_id, check_not_on_or_after)
+            except ToOld:
+                oldees.append(entity_id)
+                continue
+            if not info:
+                oldees.append(entity_id)
+                continue
+            for key, vals in info.get("ava", {}).items():
+                if key in res:
+                    res[key] = list(set(res[key]).union(set(vals)))
+                else:
+                    res[key] = vals
+        return res, oldees
 
-    def set(self, name_id: Any, entity_id: Any, info: Any, not_on_or_after: int = 0) -> None:
-        return None
+    def get(
+        self, name_id: Any, entity_id: Any, check_not_on_or_after: bool = True
+    ) -> dict[str, Any] | None:
+        cni = code(name_id)
+        timestamp, info = self._db[cni][entity_id]
+        info = dict(info)
+        if check_not_on_or_after and _expired(timestamp):
+            raise ToOld(f"past {timestamp}")
+        if "name_id" in info and isinstance(info["name_id"], str):
+            info["name_id"] = decode(info["name_id"])
+        return info or None
+
+    def set(self, name_id: Any, entity_id: Any, info: Any, not_on_or_after: Any = 0) -> None:
+        info = dict(info)
+        if "name_id" in info and not isinstance(info["name_id"], str):
+            info["name_id"] = code(name_id)
+        cni = code(name_id)
+        if cni not in self._db:
+            self._db[cni] = {}
+        self._db[cni][entity_id] = (not_on_or_after, info)
 
     def reset(self, name_id: Any, entity_id: Any) -> None:
-        return None
+        self.set(name_id, entity_id, {}, 0)
 
     def entities(self, name_id: Any) -> list[str]:
-        return []
+        return list(self._db[code(name_id)].keys())
 
     def receivers(self, name_id: Any) -> list[str]:
-        return []
+        return self.entities(name_id)
 
     def active(self, name_id: Any, entity_id: Any) -> bool:
-        return False
+        try:
+            timestamp, info = self._db[code(name_id)][entity_id]
+        except KeyError:
+            return False
+        if not info:
+            return False
+        return _valid(timestamp)
 
     def subjects(self) -> list[Any]:
-        return []
+        return [decode(c) for c in self._db.keys()]

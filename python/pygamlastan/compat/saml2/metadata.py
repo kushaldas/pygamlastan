@@ -19,14 +19,19 @@ _DS = "http://www.w3.org/2000/09/xmldsig#"
 
 
 def _read_cert_body(cert_file: str | None) -> str | None:
-    """Return the base64 DER body of a PEM certificate (no header/footer/ws)."""
+    """Return the base64 DER body of a PEM certificate (no header/footer/ws).
+
+    If ``cert_file`` is configured but cannot be read, raise rather than silently
+    omitting the certificate from the generated metadata, so a misconfiguration
+    fails fast instead of producing metadata without a signing key.
+    """
     if not cert_file:
         return None
     try:
         with open(cert_file, encoding="ascii") as fh:
             pem = fh.read()
-    except OSError:
-        return None
+    except OSError as e:
+        raise ValueError(f"configured cert_file {cert_file!r} could not be read: {e}") from e
     lines = [
         line.strip()
         for line in pem.splitlines()

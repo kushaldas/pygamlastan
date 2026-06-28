@@ -54,20 +54,25 @@ def _post_http_info(url: str, html: str) -> dict[str, Any]:
 def _maybe_b64_to_xml(raw: str | bytes) -> str:
     """Decode a SAMLResponse POST parameter (base64) to XML text.
 
-    Falls back to treating the input as raw XML if it is not valid base64 or the
-    decoded bytes do not look like an XML document.
+    Base64 is decoded leniently (whitespace/newlines from line-wrapped values
+    are tolerated). If the input is already XML, or cannot be decoded to valid
+    UTF-8 XML, it is returned unchanged so the caller's XML parser produces the
+    error rather than this helper masking a recoverable case.
     """
     if isinstance(raw, bytes):
-        raw = raw.decode("utf-8")
+        raw = raw.decode("utf-8", errors="replace")
     candidate = raw.strip()
     if candidate.startswith("<"):
         return candidate
     try:
-        decoded = base64.b64decode(candidate, validate=True)
-    except (binascii.Error, ValueError):
+        # validate=False (default) ignores non-alphabet chars, so wrapped/
+        # whitespaced base64 still decodes.
+        decoded = base64.b64decode(candidate)
+        text = decoded.decode("utf-8")
+    except (binascii.Error, ValueError, UnicodeDecodeError):
         return candidate
-    text = decoded.decode("utf-8", errors="strict")
-    return text
+    # Only accept the decoded payload if it actually looks like XML.
+    return text if text.lstrip().startswith("<") else candidate
 
 
 class Saml2Client:
@@ -119,7 +124,13 @@ class Saml2Client:
             # "unable to know which IdP to use".
             raise TypeError("Unable to determine which IdP to use")
 
-        sso_url = self.config.single_sign_on_service(idp, BINDING_HTTP_REDIRECT)
+        # Prefer the SSO endpoint published for the requested binding; fall back
+        # to Redirect (the only binding gamlastan currently encodes a request
+        # for) if the IdP does not advertise the requested one.
+        try:
+            sso_url = self.config.single_sign_on_service(idp, binding)
+        except ValueError:
+            sso_url = self.config.single_sign_on_service(idp, BINDING_HTTP_REDIRECT)
         acs_url, acs_binding = self.config.acs(BINDING_HTTP_POST)
 
         force = str(force_authn).lower() in ("true", "1", "yes")

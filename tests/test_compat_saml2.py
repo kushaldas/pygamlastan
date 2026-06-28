@@ -468,3 +468,119 @@ def test_metadata_includes_signing_cert(rsa_keypair, tmp_path):
     # parses back and the SP exposes a signing certificate
     ed = md.parse_entity(xml)
     assert ed.signing_certificates("sp")
+
+
+def test_metadata_unreadable_cert_file_raises():
+    """A configured-but-unreadable cert_file fails fast rather than silently
+    omitting the certificate from generated metadata."""
+    conf = {
+        "entityid": SP,
+        "service": {
+            "sp": {"endpoints": {"assertion_consumer_service": [(ACS, BINDING_HTTP_POST)]}}
+        },
+        "cert_file": "/nonexistent/path/sp.crt",
+    }
+    with pytest.raises(ValueError):
+        entity_descriptor(SPConfig().load(conf))
+
+
+# --------------------------------------------------------------------------- #
+# Review-fix regression tests (PR #4)
+# --------------------------------------------------------------------------- #
+
+def test_parse_tolerates_wrapped_base64(client):
+    """A line-wrapped / whitespaced base64 SAMLResponse still decodes (lenient
+    base64), rather than failing as if the response were malformed."""
+    session_id, _ = client.prepare_for_authenticate(entityid=IDP, binding=BINDING_HTTP_REDIRECT)
+    b64 = base64.b64encode(_auth_response(session_id).encode("utf-8")).decode("ascii")
+    wrapped = "\n".join(b64[i : i + 64] for i in range(0, len(b64), 64)) + "\n"
+    resp = client.parse_authn_request_response(wrapped, BINDING_HTTP_POST, {session_id: "r"})
+    assert resp.session_id() == session_id
+
+
+def test_prepare_uses_requested_binding_endpoint():
+    """prepare_for_authenticate honours the requested binding when the IdP
+    publishes a distinct SSO endpoint for it."""
+    sso_post = "https://idp.example.com/simplesaml/saml2/idp/SSOPost.php"
+    conf = {
+        "entityid": SP,
+        "service": {
+            "sp": {
+                "endpoints": {"assertion_consumer_service": [(ACS, BINDING_HTTP_POST)]},
+                "idp": {
+                    IDP: {
+                        "single_sign_on_service": {
+                            BINDING_HTTP_REDIRECT: SSO,
+                            BINDING_HTTP_POST: sso_post,
+                        }
+                    }
+                },
+            }
+        },
+    }
+    client = Saml2Client(SPConfig().load(conf))
+    _sid, info = client.prepare_for_authenticate(entityid=IDP, binding=BINDING_HTTP_POST)
+    assert info["method"] == "POST"
+    assert info["url"] == sso_post  # the POST endpoint, not the Redirect one
+
+
+def test_prepare_falls_back_to_redirect_endpoint():
+    """When the IdP only publishes a Redirect SSO endpoint, a POST request still
+    resolves a destination (falls back to the Redirect endpoint)."""
+    client = Saml2Client(SPConfig().load(CONF))  # CONF has only a Redirect SSO
+    _sid, info = client.prepare_for_authenticate(entityid=IDP, binding=BINDING_HTTP_POST)
+    assert info["url"] == SSO
+
+
+# --------------------------------------------------------------------------- #
+# cache.Cache - faithful dict-backed pysaml2 contract
+# --------------------------------------------------------------------------- #
+
+def _nid() -> NameID:
+    return NameID(text="subject-1", format=TRANSIENT, sp_name_qualifier=SP)
+
+
+def test_cache_set_get_round_trip():
+    from pygamlastan.compat.saml2.cache import Cache
+
+    c = Cache()
+    nid = _nid()
+    future = int(datetime.now(timezone.utc).timestamp()) + 3600
+    c.set(nid, IDP, {"ava": {"mail": ["a@b"]}, "name_id": nid}, not_on_or_after=future)
+    info = c.get(nid, IDP)
+    assert info["ava"] == {"mail": ["a@b"]}
+    # name_id was coded for storage and decoded back to a NameID on get.
+    assert isinstance(info["name_id"], NameID)
+    assert info["name_id"].text == "subject-1"
+    assert c.entities(nid) == [IDP]
+    assert c.active(nid, IDP) is True
+    assert [s.text for s in c.subjects()] == ["subject-1"]
+
+
+def test_cache_get_identity_aggregates_and_reports_expired():
+    from pygamlastan.compat.saml2.cache import Cache
+
+    c = Cache()
+    nid = _nid()
+    now = int(datetime.now(timezone.utc).timestamp())
+    c.set(nid, IDP, {"ava": {"mail": ["a@b"], "x": ["1"]}}, not_on_or_after=now + 3600)
+    c.set(nid, "https://idp2.example/md", {"ava": {"x": ["2"]}}, not_on_or_after=now - 10)
+    res, oldees = c.get_identity(nid)
+    assert res["mail"] == ["a@b"]
+    assert sorted(res["x"]) == ["1"]  # only the still-valid entity contributes
+    assert oldees == ["https://idp2.example/md"]
+
+
+def test_cache_get_expired_raises_tooold():
+    from pygamlastan.compat.saml2.cache import Cache, ToOld
+
+    c = Cache()
+    nid = _nid()
+    past = int(datetime.now(timezone.utc).timestamp()) - 10
+    c.set(nid, IDP, {}, not_on_or_after=past)
+    with pytest.raises(ToOld):
+        c.get(nid, IDP)
+    # empty stored info reads back as None (pysaml2 'info or None'), even when
+    # the expiry check is skipped
+    assert c.get(nid, IDP, check_not_on_or_after=False) is None
+    assert c.active(nid, IDP) is False

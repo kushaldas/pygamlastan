@@ -93,7 +93,8 @@ names an SP consumer touches:
    * - ``...saml2.metadata``
      - ``entity_descriptor(config)`` - build this SP's own metadata document.
    * - ``...saml2.cache``
-     - ``Cache`` - a minimal dict-backed base for an identity cache.
+     - ``Cache`` - a dict-backed identity cache faithful to pysaml2's
+       per-(subject, entity) storage and expiry semantics.
    * - ``...saml2.s_utils``
      - ``deflate_and_base64_encode`` (and its inverse) for the Redirect binding.
    * - ``...saml2.sigver``
