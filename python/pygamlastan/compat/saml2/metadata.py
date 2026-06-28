@@ -32,12 +32,20 @@ def _read_cert_body(cert_file: str | None) -> str | None:
             pem = fh.read()
     except OSError as e:
         raise ValueError(f"configured cert_file {cert_file!r} could not be read: {e}") from e
-    lines = [
-        line.strip()
-        for line in pem.splitlines()
-        if line.strip() and "BEGIN CERTIFICATE" not in line and "END CERTIFICATE" not in line
-    ]
-    return "".join(lines) or None
+    # Extract only the FIRST certificate block: a full-chain PEM has several, and
+    # concatenating all of them would produce an invalid X509Certificate body.
+    body: list[str] = []
+    in_cert = False
+    for line in pem.splitlines():
+        stripped = line.strip()
+        if "BEGIN CERTIFICATE" in stripped:
+            in_cert = True
+            continue
+        if "END CERTIFICATE" in stripped:
+            break
+        if in_cert and stripped:
+            body.append(stripped)
+    return "".join(body) or None
 
 
 class _EntityDescriptorDoc:

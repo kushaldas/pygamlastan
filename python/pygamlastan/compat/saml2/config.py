@@ -50,6 +50,9 @@ class SPConfig:
         self.key_file = conf.get("key_file")
         self.cert_file = conf.get("cert_file")
 
+        # Reset before (re)loading so a reused SPConfig instance does not
+        # accumulate stale metadata across load() calls.
+        self.metadata = {}
         for path in conf.get("metadata", {}).get("local", []):
             self._load_metadata_file(path)
 

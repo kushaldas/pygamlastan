@@ -184,6 +184,7 @@ class Saml2Client:
         outstanding: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> AuthnResponse:
+        sp_entity_id = self._require_entityid()
         # Decode per the binding the response arrived over: HTTP-POST is base64,
         # HTTP-Redirect is DEFLATE+base64.
         xml = self._decode_message(response, binding)
@@ -199,44 +200,52 @@ class Saml2Client:
                 f"InResponseTo {in_response_to!r} not in outstanding queries"
             )
 
-        if not parsed.is_success():
-            status = parsed.status
-            raise StatusError(
-                f"SAML response status not Success: {status.status_code.value}"
-            )
-
-        sp_entity_id = self._require_entityid()
         acs_url, _ = self.config.acs(BINDING_HTTP_POST)
         expected_idp = self.config.only_idp()
         if expected_idp is None and parsed.issuer is not None:
             expected_idp = parsed.issuer.value
 
         if self.config.want_response_signed:
+            # Verify the signature FIRST. Checking the Status before verification
+            # would let an unsigned non-Success Response drive control flow and
+            # bypass the "signatures required" policy, so the status check moves
+            # after verification here.
             verifier = SamlVerifier.from_cert(self.config.idp_signing_cert(expected_idp))
+            try:
+                verify = verifier.verify_enveloped(xml)
+                valid = verify.is_valid()
+            except Exception as e:
+                # An unsigned response raises here (no Signature element); treat
+                # it like any other verification failure.
+                raise AssertionError(f"SAML response is not verified: {e}") from e
+            if not valid:
+                # eduID's get_authn_response catches AssertionError as
+                # "SAML response is not verified".
+                raise AssertionError(f"SAML response signature invalid: {verify.reason}")
+            self._raise_on_failed_status(parsed)
             # Strict posture (signed responses/assertions required, time and
             # recipient checks on) but without mandating *encrypted* assertions:
             # eduID, like most SAML SPs, signs but does not encrypt assertions.
             cfg = _security.SecurityConfig.strict()
             cfg.require_encrypted_assertions = False
             try:
-                result = _profiles.process_response_verified(
-                    xml,
-                    verifier,
+                result = _profiles.process_response(
+                    parsed,
                     cfg,
                     sp_entity_id,
                     acs_url,
                     expected_idp,
                     expected_request_id=in_response_to,
+                    verified_signed_ids=verify.signed_reference_ids(),
                     unsafe_no_replay_cache=True,
                     unsafe_no_persistent_id_store=True,
                 )
             except Exception as e:
-                # eduID's get_authn_response catches AssertionError as
-                # "SAML response is not verified".
-                raise AssertionError(f"SAML response verification failed: {e}") from e
+                raise AssertionError(f"SAML response validation failed: {e}") from e
         else:
             # Unsigned responses are only acceptable in dev/test, where the
             # settings explicitly set want_response_signed=False.
+            self._raise_on_failed_status(parsed)
             cfg = _security.SecurityConfig.permissive()
             try:
                 result = _profiles.process_response(
@@ -255,32 +264,48 @@ class Saml2Client:
 
         return AuthnResponse(result, in_response_to)
 
+    @staticmethod
+    def _raise_on_failed_status(parsed: Any) -> None:
+        if not parsed.is_success():
+            raise StatusError(
+                f"SAML response status not Success: {parsed.status.status_code.value}"
+            )
+
     # -- Single Logout ----------------------------------------------------
 
     def global_logout(
         self, name_id: NameID, reason: str = "", expire: Any = None, sign: Any = None
     ) -> dict[str, tuple[str, dict[str, Any]]]:
-        """Build SP-initiated LogoutRequests for each federated IdP with an SLO."""
+        """Build SP-initiated LogoutRequests for each federated IdP with an SLO.
+
+        IdPs are discovered from both the ``idp`` config block and parsed
+        metadata, so metadata-only deployments are covered too.
+        """
+        sp_entity_id = self._require_entityid()
         core_name_id = name_id.to_core()
+        # When signing is requested, _get_signer raises if no key_file is
+        # configured - fail fast rather than silently sending unsigned.
+        signer = self._get_signer() if sign else None
+        sig_alg = signer.signature_method_uri() if signer is not None else None
+
+        candidate_idps = list(self.config.idp) + [
+            eid for eid in self.config.metadata if eid not in self.config.idp
+        ]
         out: dict[str, tuple[str, dict[str, Any]]] = {}
-        for idp in self.config.idp:
+        for idp in candidate_idps:
             try:
                 slo_url = self.config.single_logout_service(idp, BINDING_HTTP_REDIRECT)
             except ValueError:
                 continue
             options = _logout.SpLogoutRequestOptions(
-                sp_entity_id=self.config.entityid,
+                sp_entity_id=sp_entity_id,
                 name_id=core_name_id,
                 reason=reason or None,
                 destination=slo_url,
             )
             request = _logout.create_sp_logout_request(options)
-            # When signing is requested, _get_signer raises if no key_file is
-            # configured - fail fast rather than silently sending unsigned.
-            signer = self._get_signer() if sign else None
             # redirect_encode requires a sig_alg whenever a signer is given;
             # derive it from the signer's own signature method.
-            sig_alg = signer.signature_method_uri() if signer is not None else None
             url = _bindings.redirect_encode(
                 request.to_xml().encode("utf-8"),
                 True,
@@ -307,12 +332,13 @@ class Saml2Client:
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Respond to an IdP-initiated LogoutRequest with a success response."""
+        sp_entity_id = self._require_entityid()
         xml = self._decode_message(request, binding)
         parsed = _xml.parse_logout_request(xml)
         issuer = parsed.issuer.value if parsed.issuer is not None else self.config.only_idp()
         slo_url = self.config.single_logout_service(issuer, BINDING_HTTP_REDIRECT)
         resp = _logout.create_logout_response_success(
-            self.config.entityid, parsed.id, destination=slo_url
+            sp_entity_id, parsed.id, destination=slo_url
         )
         url = _bindings.redirect_encode(
             resp.to_xml().encode("utf-8"),
