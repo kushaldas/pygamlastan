@@ -62,6 +62,7 @@ a Rust document and are safe to keep, pass around, and store.
 
    guides/security
    guides/sp_integration
+   guides/pysaml2_compat
    guides/idp_integration
    guides/signing
    guides/bindings
