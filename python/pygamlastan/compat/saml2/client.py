@@ -357,6 +357,10 @@ class Saml2Client:
         metadata, so metadata-only deployments are covered too.
         """
         sp_entity_id = self._require_entityid()
+        # Fail closed on a missing/blank subject rather than emitting
+        # LogoutRequests with an empty NameID, matching _nameid_key's posture.
+        if _nameid_key(name_id) is None:
+            raise ValueError("global_logout requires a NameID with a non-empty identifier")
         core_name_id = name_id.to_core()
         # When signing is requested, _get_signer raises if no key_file is
         # configured - fail fast rather than silently sending unsigned.

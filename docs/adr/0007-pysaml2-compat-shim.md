@@ -57,16 +57,18 @@ shared modules that `from saml2 import server` keep loading.
 **Security posture is config-driven and maps onto the safe entry points.** The
 shim honours pysaml2's `want_response_signed`:
 
-- `want_response_signed=True` (production): the shim verifies the XML-DSig first
-  with `crypto.SamlVerifier.verify_enveloped` over the exact received bytes (the
-  verifier built from the IdP signing certificate read from parsed metadata),
-  then checks the Status (a non-Success status raises `StatusError`), then feeds
-  the cryptographically verified reference IDs into `profiles.process_response`
-  as `verified_signed_ids` for validation. Verifying before the status check
-  prevents an unsigned Response from using the status path to bypass the
-  signatures-required policy. The validation config is `SecurityConfig.strict()`
-  with `require_encrypted_assertions` turned off (eduID, like most SPs, signs but
-  does not encrypt assertions).
+- `want_response_signed=True` (production): the shim calls
+  `profiles.process_response_verified`, the safe-by-construction entry point that
+  verifies the XML-DSig over the exact received bytes internally (with a verifier
+  built from the IdP signing certificate read from parsed metadata) and feeds
+  only the cryptographically verified reference IDs into validation - so there is
+  no `verified_signed_ids` to thread or mis-wire. Because verification happens
+  first, a missing/invalid signature (`SamlCryptoError`) is surfaced as
+  `AssertionError` before any status logic; a *verified* Response carrying a
+  non-Success status is surfaced as `StatusError` for pysaml2 parity. The
+  validation config is `SecurityConfig.strict()` with
+  `require_encrypted_assertions` turned off (eduID, like most SPs, signs but does
+  not encrypt assertions).
 - `want_response_signed=False` (dev/test only, as eduID's test settings set it):
   responses go through `profiles.process_response` with
   `SecurityConfig.permissive()`. The unsigned path is reachable **only** when the

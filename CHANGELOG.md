@@ -60,6 +60,16 @@ surfacing it correctly to Python.
 - **`profiles.create_error_response`.** Build an assertion-less error Response
   carrying a status-code URI (e.g. `core.STATUS_RESPONDER`) and optional message,
   delivered to the SP's ACS (pysaml2 `create_error_response`).
+- **pysaml2 SP compatibility shim (`pygamlastan.compat.saml2`).** A pure-Python,
+  drop-in subset of the pysaml2 SP-side API backed by this binding, so a pysaml2
+  Service Provider can migrate by swapping `from saml2 import X` for
+  `from pygamlastan.compat.saml2 import X` while leaving its web-framework and
+  session code untouched: `Saml2Client` (AuthnRequest preparation, response
+  parsing, Single Logout), `SPConfig`, the pysaml2-shaped `AuthnResponse` /
+  `session_info`, NameID `code`/`decode`, `Cache`, and templated SP metadata.
+  Untrusted XML is parsed through `parse_secure` and signed responses are
+  validated with `profiles.process_response_verified` (no xmlsec1 subprocess).
+  See `docs/adr/0007-pysaml2-compat-shim.md` and the pysaml2 compatibility guide.
 
 ## [0.2.0] - 2026-06-27
 

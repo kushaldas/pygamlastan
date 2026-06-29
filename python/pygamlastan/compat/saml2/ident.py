@@ -55,10 +55,22 @@ def decode(value: str) -> NameID:
     if not isinstance(payload, dict):
         # valid JSON but not an object (e.g. a list/number) - still corruption.
         raise ValueError("corrupt pygamlastan-compat NameID: payload is not an object")
+
+    def _field(key: str) -> str | None:
+        # Each NameID field must be a string or absent/null; a non-string value
+        # (list/int/...) is corruption, normalized to ValueError per the contract
+        # so NameID.text et al. never become non-string.
+        val = payload.get(key)
+        if val is not None and not isinstance(val, str):
+            raise ValueError(
+                f"corrupt pygamlastan-compat NameID: field {key!r} is not a string"
+            )
+        return val
+
     return NameID(
-        text=payload.get("v"),
-        format=payload.get("f"),
-        name_qualifier=payload.get("nq"),
-        sp_name_qualifier=payload.get("spnq"),
-        sp_provided_id=payload.get("spid"),
+        text=_field("v"),
+        format=_field("f"),
+        name_qualifier=_field("nq"),
+        sp_name_qualifier=_field("spnq"),
+        sp_provided_id=_field("spid"),
     )

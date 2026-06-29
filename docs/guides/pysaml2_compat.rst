@@ -314,20 +314,21 @@ Security model
 The shim's trust posture follows the ``want_response_signed`` setting, mapping
 onto pygamlastan's :doc:`safe entry points <security>`:
 
-* **``want_response_signed=True`` (production).** The XML-DSig is verified first,
-  over the exact received bytes, with ``crypto.SamlVerifier.verify_enveloped``
-  using a ``SamlVerifier`` built from the IdP's signing certificate (read from the
-  parsed metadata). Only after the signature is confirmed is the Status checked
-  (a non-Success status then raises ``StatusError``); the verified signature
-  reference IDs are then fed into ``profiles.process_response`` as
-  ``verified_signed_ids`` for validation. Verifying first means an unsigned
-  Response cannot use the status path to bypass the signatures-required policy.
-  The validation profile is ``SecurityConfig.strict()`` with
-  ``require_encrypted_assertions`` disabled - SPs that sign but do not encrypt
-  assertions (the common case, including eduID) verify correctly, while signed
-  encryption is not mandated. A verification or validation failure is raised as
-  ``AssertionError`` (the exception pysaml2 SP code already catches as "response
-  is not verified").
+* **``want_response_signed=True`` (production).** The shim calls
+  ``profiles.process_response_verified``, the safe-by-construction entry point
+  that verifies the XML-DSig over the exact received bytes *internally* (with a
+  ``SamlVerifier`` built from the IdP's signing certificate, read from the parsed
+  metadata) and feeds only the cryptographically verified reference IDs into
+  validation - so the shim never threads ``verified_signed_ids`` by hand and
+  cannot mis-wire it. Because verification runs first, an unsigned or
+  invalidly-signed Response cannot use the status path to bypass the
+  signatures-required policy: a missing/invalid signature (``SamlCryptoError``) is
+  raised as ``AssertionError`` (the exception pysaml2 SP code already catches as
+  "response is not verified"), while a *verified* Response carrying a non-Success
+  status is raised as ``StatusError`` for pysaml2 parity. The validation profile
+  is ``SecurityConfig.strict()`` with ``require_encrypted_assertions`` disabled -
+  SPs that sign but do not encrypt assertions (the common case, including eduID)
+  verify correctly, while signed encryption is not mandated.
 
 * **``want_response_signed=False`` (development/testing only).** Responses are
   processed with ``profiles.process_response`` under

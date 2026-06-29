@@ -673,6 +673,17 @@ def test_decode_rejects_non_object_json():
         decode("pgc1:" + payload)
 
 
+def test_decode_rejects_non_string_field():
+    """A NameID field that is valid JSON but not a string normalizes to ValueError."""
+    import json
+
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"v": ["not", "a", "string"]}).encode()
+    ).decode("ascii")
+    with pytest.raises(ValueError):
+        decode("pgc1:" + payload)
+
+
 def test_parse_response_redirect_binding(client):
     """A response delivered over HTTP-Redirect (DEFLATE+base64) is inflated and
     parsed, honouring the binding parameter."""
@@ -688,6 +699,12 @@ def test_global_logout_sign_without_key_raises():
     nid = NameID(text="abc123hash", format=TRANSIENT, sp_name_qualifier=SP)
     with pytest.raises(ValueError):
         client.global_logout(nid, sign=True)
+
+
+def test_global_logout_blank_nameid_raises(client):
+    """A NameID with no identifier text is rejected rather than logging out an empty subject."""
+    with pytest.raises(ValueError, match="non-empty identifier"):
+        client.global_logout(NameID(text="", format=TRANSIENT))
 
 
 def _no_entityid_config() -> dict:
