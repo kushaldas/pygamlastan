@@ -142,6 +142,10 @@ class Saml2Client:
             sso_url = self.config.single_sign_on_service(idp, binding)
         except ValueError:
             sso_url = self.config.single_sign_on_service(idp, BINDING_HTTP_REDIRECT)
+        # Request HTTP-POST as the response ACS by default (the SAML Web SSO
+        # norm), but config.acs falls back to the first configured ACS endpoint
+        # when no POST ACS is declared, so an SP with only a different binding
+        # can still build a request.
         acs_url, acs_binding = self.config.acs(BINDING_HTTP_POST)
 
         force = str(force_authn).lower() in ("true", "1", "yes")
@@ -206,7 +210,10 @@ class Saml2Client:
                 f"InResponseTo {in_response_to!r} not in outstanding queries"
             )
 
-        acs_url, _ = self.config.acs(BINDING_HTTP_POST)
+        # Recipient/ACS check uses the ACS for the binding this response actually
+        # arrived over (config.acs falls back to the first configured ACS when the
+        # exact binding is absent), rather than assuming HTTP-POST.
+        acs_url, _ = self.config.acs(binding)
         # The expected IdP must be trusted, never taken from the unverified
         # Response issuer: with several IdPs that would let a signed response from
         # an unintended (but known) IdP be accepted. Use an explicit caller hint

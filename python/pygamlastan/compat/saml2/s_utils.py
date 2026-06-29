@@ -18,7 +18,15 @@ def deflate_and_base64_encode(value: str | bytes) -> str:
 
 
 def decode_base64_and_inflate(value: str | bytes) -> bytes:
-    """Inverse of :func:`deflate_and_base64_encode`."""
-    if isinstance(value, str):
-        value = value.encode("ascii")
-    return zlib.decompress(base64.b64decode(value), -15)
+    """Inverse of :func:`deflate_and_base64_encode`.
+
+    Strips ASCII whitespace (line-wrapped Redirect payloads), restores any
+    missing padding, and decodes with ``validate=True`` so stray non-alphabet
+    characters fail closed instead of being silently discarded.
+    """
+    if isinstance(value, bytes):
+        value = value.decode("ascii", errors="strict")
+    compact = "".join(value.split())
+    if len(compact) % 4:
+        compact += "=" * (4 - len(compact) % 4)
+    return zlib.decompress(base64.b64decode(compact, validate=True), -15)
