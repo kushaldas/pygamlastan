@@ -1,10 +1,11 @@
 """Tests for the pysaml2 compatibility shim (``pygamlastan.compat.saml2``).
 
 These mirror the eduID SP flow without the Flask/Mongo stack: build an
-AuthnRequest, feed back a (test-style, unsigned) Response, read pysaml2-shaped
-``session_info``, round-trip the NameID via ``code``/``decode``, and exercise the
-Single Logout helpers and SP metadata generation. Signed-response handling and
-the full eduID integration are verified separately in the eduid-developer env.
+AuthnRequest, feed back a Response, read pysaml2-shaped ``session_info``,
+round-trip the NameID via ``code``/``decode``, and exercise the Single Logout
+helpers and SP metadata generation. Both unsigned (dev) and signed-response
+handling are covered here (see the ``test_signed_response_*`` cases); the full
+eduID integration is verified separately in the eduid-developer env.
 """
 
 import base64

@@ -41,8 +41,14 @@ def decode(value: str) -> NameID:
     """
     if not value.startswith(_PREFIX):
         raise ValueError("not a pygamlastan-compat encoded NameID")
+    body = value[len(_PREFIX) :]
+    # Restore any stripped padding, then decode strictly: validate=True makes any
+    # non-alphabet character (e.g. injected punctuation) fail closed instead of
+    # being silently discarded, honouring the "corruption -> ValueError" contract.
+    if len(body) % 4:
+        body += "=" * (4 - len(body) % 4)
     try:
-        raw = base64.urlsafe_b64decode(value[len(_PREFIX) :].encode("ascii"))
+        raw = base64.b64decode(body.encode("ascii"), altchars=b"-_", validate=True)
         payload = json.loads(raw.decode("utf-8"))
     except (binascii.Error, ValueError, UnicodeDecodeError) as e:
         raise ValueError(f"corrupt pygamlastan-compat NameID: {e}") from e

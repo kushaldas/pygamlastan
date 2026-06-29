@@ -114,9 +114,12 @@ class Cache:
                 continue
             for key, vals in info.get("ava", {}).items():
                 if key in res:
-                    res[key] = list(set(res[key]).union(set(vals)))
+                    # Merge while preserving order: append only values not
+                    # already present, so the result is deterministic across runs.
+                    existing = res[key]
+                    existing.extend(v for v in vals if v not in existing)
                 else:
-                    res[key] = vals
+                    res[key] = list(vals)
         return res, oldees
 
     def get(
