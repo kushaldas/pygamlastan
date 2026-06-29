@@ -88,9 +88,15 @@ class SPConfig:
         return self.slo_endpoints[0] if self.slo_endpoints else None
 
     def only_idp(self) -> str | None:
-        """The single IdP this SP federates with, if unambiguous."""
-        if len(self.idp) == 1:
-            return next(iter(self.idp))
+        """The single IdP this SP federates with, if unambiguous.
+
+        Explicitly configured IdPs take precedence: more than one configured IdP
+        is genuinely ambiguous and must NOT be resolved from metadata (which could
+        otherwise hide the ambiguity). Metadata discovery is only a fallback when
+        no IdPs are configured at all.
+        """
+        if self.idp:
+            return next(iter(self.idp)) if len(self.idp) == 1 else None
         idp_md = [eid for eid, ed in self.metadata.items() if ed.is_idp()]
         if len(idp_md) == 1:
             return idp_md[0]

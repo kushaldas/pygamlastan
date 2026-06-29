@@ -276,6 +276,21 @@ def test_handle_logout_request_rejects_mismatched_subject(client):
         client.handle_logout_request(encoded, other, BINDING_HTTP_REDIRECT)
 
 
+def test_handle_logout_request_rejects_stale_request(client):
+    """An expired LogoutRequest (NotOnOrAfter in the past) cannot be replayed."""
+    nid = NameID(text="abc123hash", format=TRANSIENT, sp_name_qualifier=SP)
+    past = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    stale = f"""<?xml version='1.0' encoding='UTF-8'?>
+<samlp:LogoutRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="id-stale" IssueInstant="{ts}" NotOnOrAfter="{past}" Version="2.0" Destination="{SLO}">
+  <saml:Issuer>{IDP}</saml:Issuer>
+  <saml:NameID Format="{TRANSIENT}" SPNameQualifier="{SP}">abc123hash</saml:NameID>
+</samlp:LogoutRequest>"""
+    encoded = deflate_and_base64_encode(stale)
+    with pytest.raises(ValueError, match="invalid LogoutRequest"):
+        client.handle_logout_request(encoded, nid, BINDING_HTTP_REDIRECT)
+
+
 def test_entity_descriptor_parses_back():
     cfg = SPConfig().load(CONF)
     xml = entity_descriptor(cfg).to_xml()
@@ -679,7 +694,7 @@ def test_cache_get_identity_aggregates_and_reports_expired():
     assert oldees == ["https://idp2.example/md"]
 
 
-def test_cache_get_expired_raises_tooold():
+def test_cache_get_expired_raises_too_old():
     from pygamlastan.compat.saml2.cache import Cache, ToOld
 
     c = Cache()

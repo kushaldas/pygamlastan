@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from datetime import datetime, timezone
 from typing import Any
 
 from pygamlastan import bindings as _bindings
@@ -425,6 +426,13 @@ class Saml2Client:
         sp_entity_id = self._require_entityid()
         xml = self._decode_message(request, binding)
         parsed = _xml.parse_logout_request(xml)
+        # Reject stale or malformed requests before acting on them: a NameID must
+        # be present and any NotOnOrAfter must not be expired (default 180s skew),
+        # so an old LogoutRequest cannot be replayed to force-log out a session.
+        try:
+            _logout.validate_logout_request(parsed, datetime.now(timezone.utc))
+        except Exception as e:
+            raise ValueError(f"invalid LogoutRequest: {e}") from e
         # Subject correlation: the LogoutRequest must target the same principal as
         # the active session - compared over the FULL NameID (text plus Format and
         # the qualifiers, which are part of the SAML subject identity), not just
