@@ -21,9 +21,10 @@ _DS = "http://www.w3.org/2000/09/xmldsig#"
 def _read_cert_body(cert_file: str | None) -> str | None:
     """Return the base64 DER body of a PEM certificate (no header/footer/ws).
 
-    If ``cert_file`` is configured but cannot be read, raise rather than silently
-    omitting the certificate from the generated metadata, so a misconfiguration
-    fails fast instead of producing metadata without a signing key.
+    If ``cert_file`` is configured but cannot be read - or does not actually
+    contain a PEM certificate block - raise rather than silently omitting the
+    certificate from the generated metadata, so a misconfiguration fails fast
+    instead of producing metadata without a signing key.
     """
     if not cert_file:
         return None
@@ -45,7 +46,12 @@ def _read_cert_body(cert_file: str | None) -> str | None:
             break
         if in_cert and stripped:
             body.append(stripped)
-    return "".join(body) or None
+    der = "".join(body)
+    if not der:
+        raise ValueError(
+            f"configured cert_file {cert_file!r} contains no PEM CERTIFICATE block"
+        )
+    return der
 
 
 class _EntityDescriptorDoc:

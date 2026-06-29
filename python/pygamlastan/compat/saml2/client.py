@@ -54,20 +54,26 @@ def _post_http_info(url: str, html: str) -> dict[str, Any]:
 def _maybe_b64_to_xml(raw: str | bytes) -> str:
     """Decode a SAMLResponse POST parameter (base64) to XML text.
 
-    Base64 is decoded leniently (whitespace/newlines from line-wrapped values
-    are tolerated). If the input is already XML, or cannot be decoded to valid
-    UTF-8 XML, it is returned unchanged so the caller's XML parser produces the
-    error rather than this helper masking a recoverable case.
+    Line-wrapped base64 is supported by stripping interior whitespace explicitly,
+    but decoding then uses ``validate=True`` so that any remaining non-alphabet
+    character is rejected rather than silently ignored (which would let malformed,
+    attacker-controlled input smuggle extra bytes past the decoder). If the input
+    is already XML, or cannot be decoded to valid UTF-8 XML, it is returned
+    unchanged so the caller's XML parser produces the error rather than this
+    helper masking a recoverable case.
     """
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8", errors="replace")
     candidate = raw.strip()
     if candidate.startswith("<"):
         return candidate
+    # Drop only whitespace (line wrapping); everything else must be valid base64.
+    compact = "".join(candidate.split())
+    # Restore any padding a wrapped value may have lost.
+    if len(compact) % 4:
+        compact += "=" * (4 - len(compact) % 4)
     try:
-        # validate=False (default) ignores non-alphabet chars, so wrapped/
-        # whitespaced base64 still decodes.
-        decoded = base64.b64decode(candidate)
+        decoded = base64.b64decode(compact, validate=True)
         text = decoded.decode("utf-8")
     except (binascii.Error, ValueError, UnicodeDecodeError):
         return candidate

@@ -93,7 +93,9 @@ class Cache:
         self, name_id: Any, entities: Any = None, check_not_on_or_after: bool = True
     ) -> tuple[dict[str, Any], list[str]]:
         """Aggregate still-valid identity info; report timed-out entity ids."""
-        if not entities:
+        # ``None`` means "default to every stored entity"; an explicitly empty
+        # list is honoured as a request to aggregate over no entities.
+        if entities is None:
             try:
                 entities = list(self._db[code(name_id)].keys())
             except KeyError:

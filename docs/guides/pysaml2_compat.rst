@@ -9,7 +9,7 @@ import lines only, leaving the surrounding web-framework and session code
 untouched.
 
 The design rationale and the security mapping are recorded in ADR 0007
-(``adr/0007-pysaml2-compat-shim.md`` in the source tree). This guide is the
+(``docs/adr/0007-pysaml2-compat-shim.md`` in the source tree). This guide is the
 user-facing reference for what the shim provides and how to migrate onto it.
 
 .. important::
