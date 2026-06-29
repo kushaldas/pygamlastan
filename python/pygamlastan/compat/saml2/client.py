@@ -232,6 +232,17 @@ class Saml2Client:
             )
             return session_id, _redirect_http_info(url)
         elif binding == BINDING_HTTP_POST:
+            # The bindings post_encode API cannot sign, but the generated SP
+            # metadata advertises AuthnRequestsSigned="true" when a key is
+            # configured. Rather than silently emit an unsigned POST request that
+            # an IdP may reject on the metadata's word, fail fast and steer the
+            # caller to HTTP-Redirect (where request signing is implemented).
+            if sigalg or self.config.key_file:
+                raise ValueError(
+                    "signed AuthnRequests are only supported over HTTP-Redirect; "
+                    "use binding=BINDING_HTTP_REDIRECT (HTTP-POST request signing "
+                    "is not implemented)"
+                )
             html = _bindings.post_encode(xml.encode("utf-8"), True, sso_url, relay_state=rs)
             return session_id, _post_http_info(sso_url, html)
         raise ValueError(f"unsupported binding for AuthnRequest: {binding}")

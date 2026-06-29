@@ -606,6 +606,40 @@ def test_global_logout_signed(rsa_keypair, tmp_path):
     assert "Signature" in params
 
 
+def _client_with_key(rsa_keypair, tmp_path):
+    priv, _cert_pem, _der = rsa_keypair
+    key_file = tmp_path / "sp.key"
+    key_file.write_bytes(priv)
+    conf = {
+        "entityid": SP,
+        "service": {
+            "sp": {
+                "endpoints": {"assertion_consumer_service": [(ACS, BINDING_HTTP_POST)]},
+                "idp": {IDP: {"single_sign_on_service": {BINDING_HTTP_REDIRECT: SSO}}},
+            }
+        },
+        "key_file": str(key_file),
+    }
+    return Saml2Client(SPConfig().load(conf))
+
+
+def test_prepare_authn_request_signs_redirect_with_key(rsa_keypair, tmp_path):
+    """With a key configured, a Redirect AuthnRequest is signed by default."""
+    client = _client_with_key(rsa_keypair, tmp_path)
+    _sid, info = client.prepare_for_authenticate(entityid=IDP, binding=BINDING_HTTP_REDIRECT)
+    params = dict(urllib.parse.parse_qsl(dict(info["headers"])["Location"].split("?", 1)[1]))
+    assert "SAMLRequest" in params
+    assert params.get("SigAlg")
+    assert "Signature" in params
+
+
+def test_prepare_authn_request_post_with_key_raises(rsa_keypair, tmp_path):
+    """A signing key plus HTTP-POST fails fast: POST request signing is unsupported."""
+    client = _client_with_key(rsa_keypair, tmp_path)
+    with pytest.raises(ValueError, match="only supported over HTTP-Redirect"):
+        client.prepare_for_authenticate(entityid=IDP, binding=BINDING_HTTP_POST)
+
+
 # --------------------------------------------------------------------------- #
 # cache.Cache - faithful dict-backed pysaml2 contract
 # --------------------------------------------------------------------------- #
