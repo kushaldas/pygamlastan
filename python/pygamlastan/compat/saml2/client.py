@@ -24,6 +24,7 @@ from pygamlastan import security as _security
 from pygamlastan import xml as _xml
 from pygamlastan import logout as _logout
 from pygamlastan.core import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT
+from pygamlastan import SamlCryptoError
 from pygamlastan.crypto import SamlSigner, SamlVerifier
 
 from .config import SPConfig
@@ -51,22 +52,39 @@ def _post_http_info(url: str, html: str) -> dict[str, Any]:
     }
 
 
-def _nameid_text(name_id: Any) -> str | None:
-    """Extract the identifier text from a NameID-like value for comparison.
+def _nameid_key(name_id: Any) -> tuple[str, str | None, str | None, str | None, str | None] | None:
+    """Full identity tuple of a NameID-like value, for subject correlation.
 
-    Accepts the shim :class:`~.saml.NameID` (``.text``), a pygamlastan core
-    ``NameId`` (``.value``), or a bare string. Returns the stripped identifier,
-    or ``None`` when no textual identifier can be found.
+    Returns ``(text, format, name_qualifier, sp_name_qualifier, sp_provided_id)``,
+    normalising the shim :class:`~.saml.NameID` (``.text``), a pygamlastan core
+    ``NameId`` (``.value``), or a bare string. The qualifiers are part of the SAML
+    subject identity, so they are compared too (not just the text). Returns
+    ``None`` when there is no identifier text to compare.
     """
     if name_id is None:
         return None
+    text: str | None = None
     for attr in ("text", "value"):
         value = getattr(name_id, attr, None)
         if isinstance(value, str):
-            return value.strip()
-    if isinstance(name_id, str):
-        return name_id.strip()
-    return None
+            text = value.strip()
+            break
+    if text is None and isinstance(name_id, str):
+        text = name_id.strip()
+    if not text:
+        return None
+
+    def _q(attr: str) -> str | None:
+        value = getattr(name_id, attr, None)
+        return value if isinstance(value, str) else None
+
+    return (
+        text,
+        _q("format"),
+        _q("name_qualifier"),
+        _q("sp_name_qualifier"),
+        _q("sp_provided_id"),
+    )
 
 
 def _maybe_b64_to_xml(raw: str | bytes) -> str:
@@ -193,9 +211,24 @@ class Saml2Client:
 
         rs = relay_state or None
         if binding == BINDING_HTTP_REDIRECT:
-            signer = self._get_signer() if sigalg else None
+            # Sign whenever a key is configured (the generated SP metadata
+            # advertises AuthnRequestsSigned="true" when key_file is set, so an
+            # IdP relying on metadata expects signed requests). Derive a default
+            # sig_alg from the key - as global_logout does - but honour an
+            # explicit sigalg override.
+            signer = None
+            effective_sigalg = sigalg
+            if sigalg or self.config.key_file:
+                signer = self._get_signer()
+                if effective_sigalg is None:
+                    effective_sigalg = signer.signature_method_uri()
             url = _bindings.redirect_encode(
-                xml.encode("utf-8"), True, sso_url, relay_state=rs, signer=signer, sig_alg=sigalg
+                xml.encode("utf-8"),
+                True,
+                sso_url,
+                relay_state=rs,
+                signer=signer,
+                sig_alg=effective_sigalg,
             )
             return session_id, _redirect_http_info(url)
         elif binding == BINDING_HTTP_POST:
@@ -247,41 +280,42 @@ class Saml2Client:
             )
 
         if self.config.want_response_signed:
-            # Verify the signature FIRST. Checking the Status before verification
-            # would let an unsigned non-Success Response drive control flow and
-            # bypass the "signatures required" policy, so the status check moves
-            # after verification here.
+            # Use the safe-by-construction entry point: process_response_verified
+            # performs XML-DSig verification over the EXACT bytes internally and
+            # feeds only the cryptographically verified IDs into validation, so
+            # there is no verified_signed_ids to thread (and no chance to mis-wire
+            # it). Strict posture (signed responses/assertions, time and recipient
+            # checks) but without mandating *encrypted* assertions: eduID, like
+            # most SAML SPs, signs but does not encrypt assertions.
             verifier = SamlVerifier.from_cert(self.config.idp_signing_cert(expected_idp))
-            try:
-                verify = verifier.verify_enveloped(xml)
-                valid = verify.is_valid()
-            except Exception as e:
-                # An unsigned response raises here (no Signature element); treat
-                # it like any other verification failure.
-                raise AssertionError(f"SAML response is not verified: {e}") from e
-            if not valid:
-                # eduID's get_authn_response catches AssertionError as
-                # "SAML response is not verified".
-                raise AssertionError(f"SAML response signature invalid: {verify.reason}")
-            self._raise_on_failed_status(parsed)
-            # Strict posture (signed responses/assertions required, time and
-            # recipient checks on) but without mandating *encrypted* assertions:
-            # eduID, like most SAML SPs, signs but does not encrypt assertions.
             cfg = _security.SecurityConfig.strict()
             cfg.require_encrypted_assertions = False
             try:
-                result = _profiles.process_response(
-                    parsed,
+                result = _profiles.process_response_verified(
+                    xml,
+                    verifier,
                     cfg,
                     sp_entity_id,
                     acs_url,
                     expected_idp,
                     expected_request_id=in_response_to,
-                    verified_signed_ids=verify.signed_reference_ids(),
                     unsafe_no_replay_cache=True,
                     unsafe_no_persistent_id_store=True,
                 )
+            except SamlCryptoError as e:
+                # Missing or invalid signature is checked first, before any
+                # status/validation logic; eduID's get_authn_response catches
+                # AssertionError as "SAML response is not verified".
+                raise AssertionError(f"SAML response is not verified: {e}") from e
             except Exception as e:
+                # Signature verified, but validation failed. A non-Success Status
+                # surfaces as StatusError for pysaml2 parity (only after the
+                # signature has been verified); anything else stays AssertionError.
+                if not parsed.is_success():
+                    raise StatusError(
+                        "SAML response status not Success: "
+                        f"{parsed.status.status_code.value}"
+                    ) from e
                 raise AssertionError(f"SAML response validation failed: {e}") from e
         else:
             # Unsigned responses are only acceptable in dev/test, where the
@@ -377,11 +411,17 @@ class Saml2Client:
         xml = self._decode_message(request, binding)
         parsed = _xml.parse_logout_request(xml)
         # Subject correlation: the LogoutRequest must target the same principal as
-        # the active session. Without this an IdP (or a replayed/forged request)
-        # could log the wrong user out, so fail closed on any mismatch.
-        expected_subject = _nameid_text(name_id)
-        request_subject = _nameid_text(parsed.name_id)
-        if expected_subject is None or request_subject != expected_subject:
+        # the active session - compared over the FULL NameID (text plus Format and
+        # the qualifiers, which are part of the SAML subject identity), not just
+        # the text. Without this an IdP (or a replayed/forged request) could log
+        # the wrong user out, so fail closed on any mismatch or missing NameID.
+        expected_subject = _nameid_key(name_id)
+        request_subject = _nameid_key(parsed.name_id)
+        if (
+            expected_subject is None
+            or request_subject is None
+            or request_subject != expected_subject
+        ):
             raise ValueError(
                 "LogoutRequest NameID does not match the session NameID"
             )
