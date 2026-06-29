@@ -424,12 +424,15 @@ class Saml2Client:
     ) -> dict[str, Any]:
         """Respond to an IdP-initiated LogoutRequest with a success response."""
         sp_entity_id = self._require_entityid()
-        xml = self._decode_message(request, binding)
-        parsed = _xml.parse_logout_request(xml)
-        # Reject stale or malformed requests before acting on them: a NameID must
-        # be present and any NotOnOrAfter must not be expired (default 180s skew),
-        # so an old LogoutRequest cannot be replayed to force-log out a session.
+        # Decode, parse, and validate inside one guard so transport/XML failures
+        # (bad base64/DEFLATE/UTF-8, non-XML) and validation failures all surface
+        # uniformly as ValueError("invalid LogoutRequest: ..."). validate_logout_
+        # request rejects stale/malformed requests (NameID present, NotOnOrAfter
+        # not expired, default 180s skew), so an old LogoutRequest cannot be
+        # replayed to force-log out a session.
         try:
+            xml = self._decode_message(request, binding)
+            parsed = _xml.parse_logout_request(xml)
             _logout.validate_logout_request(parsed, datetime.now(timezone.utc))
         except Exception as e:
             raise ValueError(f"invalid LogoutRequest: {e}") from e

@@ -291,6 +291,19 @@ def test_handle_logout_request_rejects_stale_request(client):
         client.handle_logout_request(encoded, nid, BINDING_HTTP_REDIRECT)
 
 
+def test_handle_logout_request_wraps_decode_errors(client):
+    """Undecodable transport (not valid base64/DEFLATE) surfaces as ValueError."""
+    nid = NameID(text="abc123hash", format=TRANSIENT, sp_name_qualifier=SP)
+    with pytest.raises(ValueError, match="invalid LogoutRequest"):
+        client.handle_logout_request("!!!not-base64!!!", nid, BINDING_HTTP_REDIRECT)
+
+
+def test_nameid_rejects_non_string_field():
+    """NameID validates field types upfront rather than crashing later."""
+    with pytest.raises(TypeError, match="NameID.format"):
+        NameID(text="abc", format=123)  # type: ignore[arg-type]
+
+
 def test_entity_descriptor_parses_back():
     cfg = SPConfig().load(CONF)
     xml = entity_descriptor(cfg).to_xml()

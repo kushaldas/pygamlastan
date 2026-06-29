@@ -43,6 +43,18 @@ class NameID:
         sp_name_qualifier: str | None = None,
         sp_provided_id: str | None = None,
     ) -> None:
+        # Every field is a string or None; validate upfront so a non-string
+        # (e.g. format=123) raises a clear TypeError here instead of crashing
+        # later in to_core()/code() or being passed across the FFI boundary.
+        for field, value in (
+            ("text", text),
+            ("format", format),
+            ("name_qualifier", name_qualifier),
+            ("sp_name_qualifier", sp_name_qualifier),
+            ("sp_provided_id", sp_provided_id),
+        ):
+            if value is not None and not isinstance(value, str):
+                raise TypeError(f"NameID.{field} must be str or None, got {type(value).__name__}")
         # pysaml2 sometimes carries surrounding whitespace from XML text nodes.
         self.text = text.strip() if isinstance(text, str) else text
         self.format = format
