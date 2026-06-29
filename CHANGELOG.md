@@ -84,7 +84,7 @@ surfacing it correctly to Python.
 
   These protections are applied inside the binding and cannot be bypassed from
   Python — there is no API that exposes the raw, unhardened parser. See
-  [ADR 0002](adr/0002-parse-secure-untrusted-xml.md).
+  [ADR 0002](docs/adr/0002-parse-secure-untrusted-xml.md).
 
 - Adopted the upstream `gamlastan` 0.5 → 0.6 security fixes by upgrading the
   dependency. Among them: ACS signature verification before claim extraction,
@@ -121,7 +121,7 @@ surfacing it correctly to Python.
 
   This is a **backward-compatible** addition: existing calls that omit
   `authn_instant` behave exactly as before (a fresh login, both instants equal).
-  See [ADR 0003](adr/0003-authn-instant-response-times.md).
+  See [ADR 0003](docs/adr/0003-authn-instant-response-times.md).
 
 - Bumped the build toolchain pin from `maturin==1.9.6` to `maturin==1.14.1`
   (`pyproject.toml` and `build-wheels.sh`).

@@ -51,6 +51,24 @@ def _post_http_info(url: str, html: str) -> dict[str, Any]:
     }
 
 
+def _nameid_text(name_id: Any) -> str | None:
+    """Extract the identifier text from a NameID-like value for comparison.
+
+    Accepts the shim :class:`~.saml.NameID` (``.text``), a pygamlastan core
+    ``NameId`` (``.value``), or a bare string. Returns the stripped identifier,
+    or ``None`` when no textual identifier can be found.
+    """
+    if name_id is None:
+        return None
+    for attr in ("text", "value"):
+        value = getattr(name_id, attr, None)
+        if isinstance(value, str):
+            return value.strip()
+    if isinstance(name_id, str):
+        return name_id.strip()
+    return None
+
+
 def _maybe_b64_to_xml(raw: str | bytes) -> str:
     """Decode a SAMLResponse POST parameter (base64) to XML text.
 
@@ -195,12 +213,14 @@ class Saml2Client:
         **kwargs: Any,
     ) -> AuthnResponse:
         sp_entity_id = self._require_entityid()
-        # Decode per the binding the response arrived over: HTTP-POST is base64,
-        # HTTP-Redirect is DEFLATE+base64.
-        xml = self._decode_message(response, binding)
+        # Decode per the binding the response arrived over (HTTP-POST is base64,
+        # HTTP-Redirect is DEFLATE+base64) inside the try, so a malformed
+        # transport payload surfaces as StatusError too, rather than leaking a
+        # low-level UnicodeDecodeError/zlib.error/binascii.Error to the caller.
         try:
+            xml = self._decode_message(response, binding)
             parsed = _xml.parse_response(xml)
-        except Exception as e:  # malformed XML / not a Response
+        except Exception as e:  # malformed transport or XML / not a Response
             # eduID treats parse failures as a bad response.
             raise StatusError(f"could not parse SAML response: {e}") from e
 
@@ -356,6 +376,15 @@ class Saml2Client:
         sp_entity_id = self._require_entityid()
         xml = self._decode_message(request, binding)
         parsed = _xml.parse_logout_request(xml)
+        # Subject correlation: the LogoutRequest must target the same principal as
+        # the active session. Without this an IdP (or a replayed/forged request)
+        # could log the wrong user out, so fail closed on any mismatch.
+        expected_subject = _nameid_text(name_id)
+        request_subject = _nameid_text(parsed.name_id)
+        if expected_subject is None or request_subject != expected_subject:
+            raise ValueError(
+                "LogoutRequest NameID does not match the session NameID"
+            )
         issuer = parsed.issuer.value if parsed.issuer is not None else self.config.only_idp()
         slo_url = self.config.single_logout_service(issuer, BINDING_HTTP_REDIRECT)
         resp = _logout.create_logout_response_success(

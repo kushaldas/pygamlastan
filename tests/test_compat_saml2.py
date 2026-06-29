@@ -268,6 +268,14 @@ def test_handle_logout_request_redirects_to_idp(client):
     assert info["headers"][0][1].startswith(IDPSLO + "?SAMLResponse=")
 
 
+def test_handle_logout_request_rejects_mismatched_subject(client):
+    """A LogoutRequest for a different subject than the session must fail closed."""
+    other = NameID(text="someone-else", format=TRANSIENT, sp_name_qualifier=SP)
+    encoded = deflate_and_base64_encode(_logout_request("id-idp-logout-mismatch"))
+    with pytest.raises(ValueError, match="does not match the session NameID"):
+        client.handle_logout_request(encoded, other, BINDING_HTTP_REDIRECT)
+
+
 def test_entity_descriptor_parses_back():
     cfg = SPConfig().load(CONF)
     xml = entity_descriptor(cfg).to_xml()
