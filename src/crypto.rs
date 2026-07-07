@@ -1,6 +1,7 @@
 //! Bindings for `gamlastan::crypto` - keys, signing, verification, encryption,
 //! decryption, canonicalization, and PKCS#11/HSM signing via `kryptering`.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -275,11 +276,12 @@ fn signed_reference_ids_from_result(result: &gx::VerifyResult) -> Vec<String> {
 
 fn collect_verified_signed_ids(results: &[gx::VerifyResult]) -> PyResult<Vec<String>> {
     let mut ids = Vec::new();
+    let mut seen = HashSet::new();
     for result in results {
         match result {
             gx::VerifyResult::Valid { .. } => {
                 for id in signed_reference_ids_from_result(result) {
-                    if !ids.contains(&id) {
+                    if seen.insert(id.clone()) {
                         ids.push(id);
                     }
                 }

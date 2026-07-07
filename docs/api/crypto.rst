@@ -143,6 +143,8 @@ Verification
       verifier.set_allow_raw_inline_keyinfo_with_trust_anchors(False)
 
       results = verifier.verify_all_enveloped(response_xml)
+      if not results or any(not result for result in results):
+          raise ValueError("SAML signature verification failed")
       signed_ids = [
           signed_id
           for result in results

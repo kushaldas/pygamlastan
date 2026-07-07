@@ -88,6 +88,8 @@ same bytes:
 .. code-block:: python
 
    verify_results = verifier.verify_all_enveloped(response_xml)   # real XML-DSig checks
+   if not verify_results or any(not result for result in verify_results):
+       raise ValueError("SAML response signature verification failed")
    verified_signed_ids = [
        signed_id
        for verify_result in verify_results
@@ -147,6 +149,8 @@ signature:
 .. code-block:: python
 
    results = verifier.verify_all_enveloped(response_xml)
+   if not results or any(not result for result in results):
+       raise ValueError("SAML response signature verification failed")
    signed_ids = [
        signed_id
        for result in results
