@@ -326,9 +326,10 @@ onto pygamlastan's :doc:`safe entry points <security>`:
   raised as ``AssertionError`` (the exception pysaml2 SP code already catches as
   "response is not verified"), while a *verified* Response carrying a non-Success
   status is raised as ``StatusError`` for pysaml2 parity. The validation profile
-  is ``SecurityConfig.strict()`` with ``require_encrypted_assertions`` disabled -
-  SPs that sign but do not encrypt assertions (the common case, including eduID)
-  verify correctly, while signed encryption is not mandated.
+  uses production defaults with ``require_signed_responses=True`` and
+  ``require_signed_assertions=False``: this matches pysaml2's
+  ``want_response_signed`` switch, where a signed Response envelope is enough
+  unless the deployment separately requires direct Assertion signatures.
 
 * **``want_response_signed=False`` (development/testing only).** Responses are
   processed with ``profiles.process_response`` under

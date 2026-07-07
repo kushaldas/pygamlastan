@@ -31,7 +31,7 @@ RUN mkdir -p /app/wheels
 # Install dependencies. If a local pygamlastan wheel is present in ./wheels it will win via --find-links.
 RUN uv venv /app/.venv \
  && uv pip install --find-links /app/wheels \
-        "django==6.0.6" "pygamlastan>=0.1" "cryptography>=42" "gunicorn>=22" "whitenoise>=6"
+        "django==6.0.6" "pygamlastan>=0.3.0" "cryptography>=42" "gunicorn>=22" "whitenoise>=6"
 
 RUN chmod +x /app/entrypoint.sh
 

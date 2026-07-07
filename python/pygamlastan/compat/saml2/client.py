@@ -296,11 +296,12 @@ class Saml2Client:
             # performs XML-DSig verification over the EXACT bytes internally and
             # feeds only the cryptographically verified IDs into validation, so
             # there is no verified_signed_ids to thread (and no chance to mis-wire
-            # it). Strict posture (signed responses/assertions, time and recipient
-            # checks) but without mandating *encrypted* assertions: eduID, like
-            # most SAML SPs, signs but does not encrypt assertions.
+            # it). `want_response_signed` maps to a required Response-envelope
+            # signature; it does not imply direct Assertion signatures.
             verifier = SamlVerifier.from_cert(self.config.idp_signing_cert(expected_idp))
-            cfg = _security.SecurityConfig.strict()
+            cfg = _security.SecurityConfig()
+            cfg.require_signed_assertions = False
+            cfg.require_signed_responses = True
             cfg.require_encrypted_assertions = False
             try:
                 result = _profiles.process_response_verified(

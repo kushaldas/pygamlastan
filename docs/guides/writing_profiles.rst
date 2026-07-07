@@ -127,15 +127,33 @@ can express its exact policy without depending on the ``strict()`` /
    cfg = security.SecurityConfig()
    # Profile mandates encrypted, signed assertions and a tight window:
    cfg.require_signed_assertions = True
+   cfg.require_signed_responses = True
    cfg.require_encrypted_assertions = True       # e.g. a PEFIM-style profile
    cfg.max_assertion_age_seconds = 120
    cfg.clock_skew_seconds = 60
+   cfg.verify_destination = True
+   cfg.verify_recipient = True
    # Bind the assertion to the client's source address:
    cfg.check_client_address = True
    # Errata toggles (all default-on; shown for completeness):
    cfg.reject_signatures_with_ds_object = True   # E91
+   cfg.enforce_persistent_id_uniqueness = True   # E78
    cfg.sanitize_relay_state = True               # E90
    cfg.require_integrity_with_cbc = True         # E93
+
+Verifier policy is separate from response validation policy. Keep the verifier
+hardening defaults on unless your profile has a very specific non-SAML
+interoperability reason:
+
+.. code-block:: python
+
+   verifier = crypto.SamlVerifier.from_cert(idp_cert_pem)
+   verifier.set_skip_time_checks(False)
+   verifier.set_trusted_keys_only(True)
+   verifier.set_strict_verification(True)
+   verifier.set_hmac_min_out_len(160)
+   verifier.set_require_reference_digests(True)
+   verifier.set_allow_raw_inline_keyinfo_with_trust_anchors(False)
 
 Enforce persistent-ID uniqueness (E78)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

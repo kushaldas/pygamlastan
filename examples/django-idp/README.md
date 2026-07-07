@@ -185,7 +185,7 @@ compose) and [`docker-compose.yml`](docker-compose.yml).
 
 ```console
 uv venv
-uv pip install --find-links wheels django==6.0.6 pygamlastan cryptography gunicorn whitenoise
+uv pip install --find-links wheels django==6.0.6 "pygamlastan>=0.3.0" cryptography gunicorn whitenoise
 export DJANGO_DEBUG=1 SAML_IDP_BASE_URL=http://localhost:8000
 python manage.py idp_keys
 python manage.py migrate
@@ -245,7 +245,10 @@ This example optimises for a working demo. Before any real use:
   your threat model needs them (the SP signing certs are in the resolved metadata).
 - Review attribute release and NameID policy for your privacy requirements.
 - MDQ responses are signature-verified against `SAML_IDP_METADATA_CERT` (this is
-  enforced - the IdP refuses an SP whose signature fails). Local metadata files
-  are trusted as provided, so only place files you obtained from a trusted source.
+  enforced - the IdP refuses an SP whose signature fails). The MDQ verifier is
+  explicitly set to trusted keys only, strict XSW checks, a 160-bit minimum HMAC
+  output length, required reference digests, certificate time checks, and no raw
+  inline `KeyInfo` trust when a trust anchor exists. Local metadata files are
+  trusted as provided, so only place files you obtained from a trusted source.
 - Put it behind your real TLS hostname (`IDP_DOMAIN`) so Caddy issues a trusted
   certificate.

@@ -17,6 +17,9 @@ Prerequisites: Docker (with Compose), [`just`](https://github.com/casey/just),
 and [`mkcert`](https://github.com/FiloSottile/mkcert). Until `pygamlastan` is on
 PyPI, also Rust + `maturin` for the one-time wheel build.
 
+The example apps require `pygamlastan>=0.3.0`, the binding release aligned with
+`gamlastan` 0.7.0.
+
 ```console
 # 0. configure (.env is gitignored). Defaults use *.gamlastan.sverige.
 cp .env-example .env
@@ -66,6 +69,9 @@ just down             # stop everything
   SWAMID QA IdP from the SP instead of the local one, set `SAML_SP_MDQ_URL` +
   `SAML_SP_METADATA_CERT` and point `SAML_SP_IDP_ENTITYID` at a QA IdP. See
   [`django-sp/README.md`](django-sp/README.md) for registering the SP in SWAMID QA.
+  Both example MDQ clients configure the verifier in trusted-key, strict,
+  digest-required mode and reject raw inline `KeyInfo` trust when a federation
+  trust anchor is configured.
 
 > Built for learning and integration testing. The defaults (demo accounts,
 > self-signed keys, a dev secret key) are **not** production-ready.

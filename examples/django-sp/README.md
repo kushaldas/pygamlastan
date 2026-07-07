@@ -7,7 +7,8 @@ demonstrates the SP side of the Web Browser SSO profile: it builds and sends an
 every attribute the IdP released**.
 
 It has **no local IdP database**: the IdP is resolved at request time from a
-local metadata file or an MDQ service (signature-verified).
+local metadata file (trusted as placed on disk) or an MDQ service
+(signature-verified).
 
 > Built for learning and integration testing. The defaults (a self-signed key, a
 > dev secret key) are **not** production-ready.
@@ -25,9 +26,9 @@ local metadata file or an MDQ service (signature-verified).
   QA MDQ. (Set `SAML_SP_IDP_ENTITYID` to skip discovery and always use one IdP.)
   It then builds an `AuthnRequest` and redirects (HTTP-Redirect) to the IdP.
 - Consumes the `Response` at `/sp/acs/` (HTTP-POST) with the safe
-  **`profiles.process_response_verified`**: it verifies the XML-DSig over the
-  exact response bytes with the IdP's signing cert and feeds only the
-  cryptographically verified IDs into validation.
+  **`profiles.process_response_verified`**: it verifies every enveloped
+  XML-DSig over the exact response bytes with the IdP's signing cert and feeds
+  only the cryptographically verified IDs into validation.
 - Shows the `NameID`, issuing IdP, authn context, and the full released
   attribute set on `/sp/`.
 
@@ -110,14 +111,19 @@ metadata (`just sp-metadata > sp.xml`, then submit it again) so the
   billion-laughs and deep-nesting amplification. The SP never touches the raw
   parser, so this protection cannot be accidentally bypassed.
 - The SP trusts an IdP's assertion only after `process_response_verified`
-  succeeds against the signing cert in the **resolved IdP metadata**. Local
-  metadata files are trusted as provided; MDQ metadata is signature-verified.
+  succeeds against the signing cert in the **resolved IdP metadata**. The
+  response verifier is explicitly set to trusted keys only, strict XSW checks,
+  a 160-bit minimum HMAC output length, required reference digests, certificate
+  time checks, and no raw inline `KeyInfo` trust when a trust anchor exists.
+  Local metadata files are trusted as provided; MDQ metadata is
+  signature-verified with the same verifier policy.
 - `process_response_verified` is the *only* safe entry point: it performs the
-  XML-DSig verification internally over the exact received bytes and feeds only
-  the cryptographically verified reference IDs into validation. The lower-level
-  `process_response` / `security.validate_response` trust caller-supplied
-  `verified_signed_ids`, so passing those without real verification is an
-  authentication bypass - the example deliberately never does this.
+  XML-DSig verification internally over the exact received bytes, verifies all
+  enveloped signatures in document order, and feeds only the cryptographically
+  verified reference IDs into validation. The lower-level `process_response` /
+  `security.validate_response` trust caller-supplied `verified_signed_ids`, so
+  passing those without real verification is an authentication bypass - the
+  example deliberately never does this.
 - A replay cache and a persistent-NameID store are passed to
   `process_response_verified` (the hardened library requires the latter whenever
   a response carries a persistent NameID, to detect NameID reassignment). Both

@@ -358,7 +358,7 @@ impl EntityDescriptor {
 /// Parse a single `<md:EntityDescriptor>` document.
 ///
 /// SECURITY: remote/published metadata is attacker-influenced, so parsing goes
-/// through `parse_secure` (uppsala 0.5 resource limits + DTD/XXE rejection).
+/// through `parse_secure` (uppsala 0.9 resource limits + DTD/XXE rejection).
 #[pyfunction]
 fn parse_entity(xml: &str) -> PyResult<EntityDescriptor> {
     let doc = parse_secure(xml).map_err(xml_err)?;

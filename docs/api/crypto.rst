@@ -78,25 +78,78 @@ Verification
       trust anchor.
 
    .. py:method:: verify_enveloped(signed_xml: str) -> VerifyResult
+
+      Verify the first enveloped XML-DSig signature in ``signed_xml``.
+
+   .. py:method:: verify_all_enveloped(signed_xml: str) -> list[VerifyResult]
+
+      Verify every enveloped XML-DSig signature in document order. Use this when
+      a message may carry both Response-level and Assertion-level signatures and
+      you need all digest-verified reference IDs.
+
    .. py:method:: verify_redirect_query(query_string: bytes, signature: bytes, algorithm_uri: str, unsafe_allow_weak_sha1: bool = False) -> bool
 
       Verify a HTTP-Redirect query signature. SHA-1 algorithms are rejected
       unless ``unsafe_allow_weak_sha1=True`` is explicit.
+
    .. py:method:: set_skip_time_checks(skip: bool, unsafe_allow_skip_time_checks: bool = False) -> None
 
       ``skip=True`` raises unless ``unsafe_allow_skip_time_checks=True`` is
-      explicit.
+      explicit. Disabling this check skips X.509 ``NotBefore``/``NotAfter``
+      enforcement.
 
    .. py:method:: set_trusted_keys_only(trusted: bool, unsafe_allow_untrusted_keys: bool = False) -> None
 
       ``trusted=False`` raises unless ``unsafe_allow_untrusted_keys=True`` is
-      explicit.
+      explicit. Keep this enabled for SAML so attacker-supplied ``KeyInfo``
+      certificates are not blindly trusted.
 
    .. py:method:: set_strict_verification(strict: bool, unsafe_allow_non_strict: bool = False) -> None
 
       ``strict=False`` raises unless ``unsafe_allow_non_strict=True`` is
-      explicit.
-   .. py:method:: set_hmac_min_out_len(bits: int) -> None
+      explicit. Keep this enabled to enforce XML Signature Wrapping reference
+      position checks.
+
+   .. py:method:: set_hmac_min_out_len(bits: int, unsafe_allow_short_hmac: bool = False) -> None
+
+      Set the minimum accepted HMAC output length in bits. Values below 160
+      raise unless ``unsafe_allow_short_hmac=True`` is explicit.
+
+   .. py:method:: set_require_reference_digests(require: bool, unsafe_allow_missing_reference_digests: bool = False) -> None
+
+      Require every XML-DSig reference digest to be verified locally. Setting
+      ``require=False`` raises unless
+      ``unsafe_allow_missing_reference_digests=True`` is explicit. Keep this
+      enabled for SAML.
+
+   .. py:method:: set_allow_raw_inline_keyinfo_with_trust_anchors(allow: bool, unsafe_allow_raw_inline_keyinfo: bool = False) -> None
+
+      Allow raw inline ``KeyValue`` / ``DEREncodedKeyValue`` signatures to
+      satisfy verification even when trust anchors are configured. Setting
+      ``allow=True`` raises unless ``unsafe_allow_raw_inline_keyinfo=True`` is
+      explicit. Keep this disabled for SAML.
+
+   Example: hardened verifier setup with all default-on policy controls made
+   explicit:
+
+   .. code-block:: python
+
+      verifier = crypto.SamlVerifier.from_cert(idp_signing_cert_pem)
+      verifier.set_skip_time_checks(False)
+      verifier.set_trusted_keys_only(True)
+      verifier.set_strict_verification(True)
+      verifier.set_hmac_min_out_len(160)
+      verifier.set_require_reference_digests(True)
+      verifier.set_allow_raw_inline_keyinfo_with_trust_anchors(False)
+
+      results = verifier.verify_all_enveloped(response_xml)
+      if not results or any(not result for result in results):
+          raise ValueError("SAML signature verification failed")
+      signed_ids = [
+          signed_id
+          for result in results
+          for signed_id in result.signed_reference_ids()
+      ]
 
 .. py:class:: VerifyResult
 
@@ -111,8 +164,10 @@ Verification
    .. py:method:: signed_reference_ids() -> list[str]
 
       The reference ids whose digest was actually verified (with a leading
-      ``#`` stripped). Pass these to
+      ``#`` stripped). For a single-signature document, pass these to
       :func:`pygamlastan.profiles.process_response` as ``verified_signed_ids``.
+      For multi-signature documents, collect IDs from
+      :py:meth:`SamlVerifier.verify_all_enveloped`.
 
    .. py:method:: signing_cert_chain() -> list[bytes]
 

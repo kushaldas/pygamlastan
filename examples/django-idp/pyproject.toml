@@ -5,7 +5,7 @@ description = "A minimal, self-contained SAML 2.0 Identity Provider built on Dja
 requires-python = ">=3.12"
 dependencies = [
     "django==6.0.6",
-    "pygamlastan>=0.1",
+    "pygamlastan>=0.3.0",
     "cryptography>=42",
     "gunicorn>=22",
     "whitenoise>=6",

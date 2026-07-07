@@ -66,6 +66,18 @@ class _InMemoryPersistentIdStore:
 _persistent_id_store = _InMemoryPersistentIdStore()
 
 
+def _hardened_verifier(cert_der: bytes) -> crypto.SamlVerifier:
+    """Verifier policy used for inbound SAML Responses from resolved IdP metadata."""
+    verifier = crypto.SamlVerifier.from_cert(cert_der)
+    verifier.set_skip_time_checks(False)
+    verifier.set_trusted_keys_only(True)
+    verifier.set_strict_verification(True)
+    verifier.set_hmac_min_out_len(160)
+    verifier.set_require_reference_digests(True)
+    verifier.set_allow_raw_inline_keyinfo_with_trust_anchors(False)
+    return verifier
+
+
 # --- SP metadata -----------------------------------------------------------
 
 def _contact(cfg: SpConfig, contact_type: str, email: str, extra: str = "") -> str:
@@ -240,7 +252,7 @@ def process_acs(cfg: SpConfig, form, idp, expected_request_id: str | None):
     signing_cert = idp_resolver.signing_cert_der(idp)
     if signing_cert is None:
         raise ValueError("the IdP metadata has no signing certificate")
-    verifier = crypto.SamlVerifier.from_cert(signing_cert)
+    verifier = _hardened_verifier(signing_cert)
     result = profiles.process_response_verified(
         decoded.saml_text,
         verifier,

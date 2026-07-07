@@ -1,6 +1,7 @@
 //! Bindings for `gamlastan::crypto` - keys, signing, verification, encryption,
 //! decryption, canonicalization, and PKCS#11/HSM signing via `kryptering`.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -8,7 +9,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyModule};
 
 use gamlastan::crypto as gx;
-use gx::{KeyUsage, KeysManager as GKeysManager};
+use gx::{Key as GKey, KeyUsage, KeysManager as GKeysManager};
 
 use crate::convert::new_submodule;
 use crate::errors::crypto_err;
@@ -53,8 +54,18 @@ impl KeysManager {
     /// Build an SP key manager: own signing key (PEM) + trusted IdP cert (PEM).
     #[staticmethod]
     fn build_sp(private_key_pem: &[u8], idp_certificate_pem: &[u8]) -> PyResult<Self> {
-        let inner = gx::keys::build_sp_keys_manager(private_key_pem, idp_certificate_pem)
-            .map_err(crypto_err)?;
+        let mut inner = GKeysManager::new();
+
+        let mut sp_key =
+            gx::keys::loader::load_pem_auto(private_key_pem, None).map_err(crypto_err)?;
+        sp_key.usage = KeyUsage::Sign;
+        inner.add_key(sp_key);
+
+        let (mut idp_key, idp_cert_der) = load_x509_cert_key_and_der(idp_certificate_pem)?;
+        idp_key.usage = KeyUsage::Verify;
+        inner.add_key(idp_key);
+        inner.add_trusted_cert(idp_cert_der);
+
         Ok(KeysManager { inner })
     }
 
@@ -80,8 +91,10 @@ impl KeysManager {
     }
 
     /// Add a trusted certificate (PEM or DER bytes) used to verify signatures.
-    fn add_trusted_cert(&mut self, cert: Vec<u8>) {
-        self.inner.add_trusted_cert(cert);
+    fn add_trusted_cert(&mut self, cert: &[u8]) -> PyResult<()> {
+        let (_, cert_der) = load_x509_cert_key_and_der(cert)?;
+        self.inner.add_trusted_cert(cert_der);
+        Ok(())
     }
 
     fn __len__(&self) -> usize {
@@ -104,6 +117,27 @@ fn parse_key_usage(s: &str) -> PyResult<KeyUsage> {
             return Err(crypto_err(format!("unknown key usage: {other}")));
         }
     })
+}
+
+fn looks_like_pem(cert: &[u8]) -> bool {
+    let Some(first_non_ws) = cert.iter().position(|b| !(*b).is_ascii_whitespace()) else {
+        return false;
+    };
+    cert[first_non_ws..].starts_with(b"-----BEGIN")
+}
+
+fn load_x509_cert_key_and_der(cert: &[u8]) -> PyResult<(GKey, Vec<u8>)> {
+    let key = if looks_like_pem(cert) {
+        gx::keys::loader::load_x509_cert_pem(cert)
+    } else {
+        gx::keys::loader::load_x509_cert_der(cert)
+    }
+    .map_err(crypto_err)?;
+    let der =
+        key.x509_chain.first().cloned().ok_or_else(|| {
+            crypto_err("certificate parser did not return DER-encoded certificate")
+        })?;
+    Ok((key, der))
 }
 
 // ---------------------------------------------------------------------------
@@ -220,14 +254,7 @@ impl VerifyResult {
     /// URIs of the verified references (with a leading '#' stripped) whose
     /// digest was actually checked. These are the cryptographically signed IDs.
     fn signed_reference_ids(&self) -> Vec<String> {
-        match &self.inner {
-            gx::VerifyResult::Valid { references, .. } => references
-                .iter()
-                .filter(|r| r.digest_verified)
-                .map(|r| r.uri.strip_prefix('#').unwrap_or(&r.uri).to_string())
-                .collect(),
-            _ => Vec::new(),
-        }
+        signed_reference_ids_from_result(&self.inner)
     }
     /// DER X.509 chain (leaf first) of the signing key, when valid.
     fn signing_cert_chain<'py>(&self, py: Python<'py>) -> Vec<Bound<'py, PyBytes>> {
@@ -240,6 +267,44 @@ impl VerifyResult {
             _ => Vec::new(),
         }
     }
+}
+
+fn signed_reference_ids_from_result(result: &gx::VerifyResult) -> Vec<String> {
+    match result {
+        gx::VerifyResult::Valid { references, .. } => references
+            .iter()
+            .filter(|r| r.digest_verified)
+            .map(|r| r.uri.strip_prefix('#').unwrap_or(&r.uri).to_string())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn collect_verified_signed_ids(results: &[gx::VerifyResult]) -> PyResult<Vec<String>> {
+    let mut ids = Vec::new();
+    let mut seen = HashSet::new();
+    for result in results {
+        match result {
+            gx::VerifyResult::Valid { .. } => {
+                for id in signed_reference_ids_from_result(result) {
+                    if seen.insert(id.clone()) {
+                        ids.push(id);
+                    }
+                }
+            }
+            gx::VerifyResult::Invalid { reason } => {
+                return Err(crypto_err(format!(
+                    "signature verification failed: {reason}"
+                )));
+            }
+        }
+    }
+    if ids.is_empty() {
+        return Err(crypto_err(
+            "signature verification produced no digest-verified references",
+        ));
+    }
+    Ok(ids)
 }
 
 #[pyclass(module = "pygamlastan.crypto", name = "SamlVerifier")]
@@ -263,20 +328,15 @@ impl SamlVerifier {
     /// `Verify` key - without it the verifier reports "no keys in manager") AND
     /// the cert as a trust anchor (so the default `trusted_keys_only` mode does
     /// not blindly trust a certificate embedded in the signature's `<KeyInfo>`).
-    /// PEM vs DER is detected by sniffing for the `-----BEGIN` armor.
+    /// PEM vs DER is detected by trimming leading ASCII whitespace and checking
+    /// for the `-----BEGIN` armor prefix.
     #[staticmethod]
     fn from_cert(cert: Vec<u8>) -> PyResult<Self> {
-        let is_pem = cert.windows(10).any(|w| w == b"-----BEGIN");
-        let mut key = if is_pem {
-            gx::keys::loader::load_x509_cert_pem(&cert)
-        } else {
-            gx::keys::loader::load_x509_cert_der(&cert)
-        }
-        .map_err(crypto_err)?;
+        let (mut key, cert_der) = load_x509_cert_key_and_der(&cert)?;
         key.usage = KeyUsage::Verify;
         let mut km = GKeysManager::new();
         km.add_key(key);
-        km.add_trusted_cert(cert);
+        km.add_trusted_cert(cert_der);
         Ok(SamlVerifier {
             inner: gx::SamlVerifier::new(km),
         })
@@ -354,8 +414,83 @@ impl SamlVerifier {
         self.inner.set_strict_verification(strict);
         Ok(())
     }
-    fn set_hmac_min_out_len(&mut self, bits: usize) {
+    #[pyo3(signature = (bits, unsafe_allow_short_hmac=false))]
+    fn set_hmac_min_out_len(
+        &mut self,
+        py: Python<'_>,
+        bits: usize,
+        unsafe_allow_short_hmac: bool,
+    ) -> PyResult<()> {
+        if bits < 160 {
+            if !unsafe_allow_short_hmac {
+                return Err(crypto_err(
+                    "HMAC output lengths below 160 bits are disabled by default; \
+                     pass unsafe_allow_short_hmac=True only for legacy unsafe processing",
+                ));
+            }
+            crate::convert::warn(
+                py,
+                "SamlVerifier.set_hmac_min_out_len below 160 bits weakens HMAC \
+                 truncation protection; do not use in production.",
+            );
+        }
         self.inner.set_hmac_min_out_len(bits);
+        Ok(())
+    }
+
+    #[pyo3(signature = (require, unsafe_allow_missing_reference_digests=false))]
+    fn set_require_reference_digests(
+        &mut self,
+        py: Python<'_>,
+        require: bool,
+        unsafe_allow_missing_reference_digests: bool,
+    ) -> PyResult<()> {
+        if !require {
+            if !unsafe_allow_missing_reference_digests {
+                return Err(crypto_err(
+                    "accepting XML signatures without locally verified reference \
+                     digests is disabled by default; pass \
+                     unsafe_allow_missing_reference_digests=True only for \
+                     non-SAML detached-content interoperability",
+                ));
+            }
+            crate::convert::warn(
+                py,
+                "SamlVerifier.set_require_reference_digests(False) allows signatures \
+                 whose referenced object digests were not locally verified; do not \
+                 use in production SAML flows.",
+            );
+        }
+        self.inner.set_require_reference_digests(require);
+        Ok(())
+    }
+
+    #[pyo3(signature = (allow, unsafe_allow_raw_inline_keyinfo=false))]
+    fn set_allow_raw_inline_keyinfo_with_trust_anchors(
+        &mut self,
+        py: Python<'_>,
+        allow: bool,
+        unsafe_allow_raw_inline_keyinfo: bool,
+    ) -> PyResult<()> {
+        if allow {
+            if !unsafe_allow_raw_inline_keyinfo {
+                return Err(crypto_err(
+                    "raw inline KeyValue / DEREncodedKeyValue signatures with \
+                     configured trust anchors are disabled by default; pass \
+                     unsafe_allow_raw_inline_keyinfo=True only for legacy unsafe \
+                     interoperability",
+                ));
+            }
+            crate::convert::warn(
+                py,
+                "SamlVerifier.set_allow_raw_inline_keyinfo_with_trust_anchors(True) \
+                 allows raw inline KeyInfo to satisfy verification despite configured \
+                 trust anchors; do not use in production.",
+            );
+        }
+        self.inner
+            .set_allow_raw_inline_keyinfo_with_trust_anchors(allow);
+        Ok(())
     }
 
     /// Verify an enveloped XML-DSig signature; returns a VerifyResult.
@@ -365,6 +500,18 @@ impl SamlVerifier {
             .verify_enveloped(signed_xml)
             .map_err(crypto_err)?;
         Ok(VerifyResult { inner: r })
+    }
+
+    /// Verify every enveloped XML-DSig signature in document order.
+    fn verify_all_enveloped(&self, signed_xml: &str) -> PyResult<Vec<VerifyResult>> {
+        let results = self
+            .inner
+            .verify_all_enveloped(signed_xml)
+            .map_err(crypto_err)?;
+        Ok(results
+            .into_iter()
+            .map(|inner| VerifyResult { inner })
+            .collect())
     }
 
     /// Verify a HTTP-Redirect query signature.
@@ -392,20 +539,11 @@ impl SamlVerifier {
     /// to real crypto: the IDs it returns are exactly what may be passed as
     /// `verified_signed_ids` to the validator.
     pub(crate) fn verified_signed_ids(&self, signed_xml: &str) -> PyResult<Vec<String>> {
-        match self
+        let results = self
             .inner
-            .verify_enveloped(signed_xml)
-            .map_err(crypto_err)?
-        {
-            gx::VerifyResult::Valid { references, .. } => Ok(references
-                .iter()
-                .filter(|r| r.digest_verified)
-                .map(|r| r.uri.strip_prefix('#').unwrap_or(&r.uri).to_string())
-                .collect()),
-            gx::VerifyResult::Invalid { reason } => Err(crypto_err(format!(
-                "signature verification failed: {reason}"
-            ))),
-        }
+            .verify_all_enveloped(signed_xml)
+            .map_err(crypto_err)?;
+        collect_verified_signed_ids(&results)
     }
 }
 
@@ -648,4 +786,27 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(canonicalize, &m)?)?;
     m.add_function(wrap_pyfunction!(exc_c14n, &m)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_pem;
+
+    #[test]
+    fn pem_detection_accepts_pem_after_ascii_whitespace() {
+        assert!(looks_like_pem(
+            b" \n\t\r-----BEGIN CERTIFICATE-----\nbase64\n-----END CERTIFICATE-----"
+        ));
+    }
+
+    #[test]
+    fn pem_detection_does_not_scan_der_payload() {
+        assert!(!looks_like_pem(b"\x30\x82\x01\x00payload-----BEGIN"));
+    }
+
+    #[test]
+    fn pem_detection_rejects_empty_or_whitespace_only_input() {
+        assert!(!looks_like_pem(b""));
+        assert!(!looks_like_pem(b" \n\t\r"));
+    }
 }

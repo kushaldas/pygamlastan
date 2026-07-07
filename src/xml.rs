@@ -7,7 +7,7 @@
 //! SECURITY: every entry point here parses *attacker-controlled* XML, so all of
 //! them go through `gamlastan::xml::parse_secure` rather than the raw
 //! `uppsala::parse`. `parse_secure` layers two defenses on top of the parse:
-//! (1) uppsala 0.5's fail-closed resource limits - element-nesting depth (128),
+//! (1) uppsala 0.9's fail-closed resource limits - element-nesting depth (128),
 //! entity-expansion byte budget (1 MiB), and entity-nesting depth (256), which
 //! bound billion-laughs / quadratic-blowup amplification and deep-nesting stack
 //! exhaustion; and (2) outright rejection of any document carrying a DTD
