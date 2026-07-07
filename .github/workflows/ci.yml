@@ -80,7 +80,7 @@ jobs:
     - name: Build and install the extension
       run: |
         uv venv
-        uv pip install "maturin==1.9.6" pytest
+        uv pip install "maturin==1.14.1" pytest
         .venv/bin/maturin develop
 
     - name: Run the test suite (incl. PKCS#11)
@@ -149,7 +149,7 @@ jobs:
         #python3 -m pip install --user "uv==${UV_VERSION}"
         #uv venv --python python3.14
         #source .venv/bin/activate
-        #uv pip install --upgrade "maturin==1.9.6" pytest
+        #uv pip install --upgrade "maturin==1.14.1" pytest
 
     #- name: Build wheel
       #run: |
@@ -195,7 +195,7 @@ jobs:
 
     #- name: Build environment
       #run: |
-        #python.exe -m pip install --upgrade pip "maturin==1.9.6" pytest
+        #python.exe -m pip install --upgrade pip "maturin==1.14.1" pytest
 
     #- name: Build wheel
       #run: |
@@ -243,7 +243,7 @@ jobs:
 
     #- name: Build environment
       #run: |
-        #python.exe -m pip install --upgrade pip "maturin==1.9.6" pytest
+        #python.exe -m pip install --upgrade pip "maturin==1.14.1" pytest
 
     #- name: Build wheel
       #run: |

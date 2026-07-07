@@ -8,7 +8,7 @@ security handling. `pygamlastan` is a thin PyO3 binding; most entries below
 reflect adopting a change made in `gamlastan` / `uppsala` / `bergshamra` and
 surfacing it correctly to Python.
 
-## [0.3.0] - unreleased
+## [0.3.0] - 2026-07-07
 
 ### Added
 
@@ -172,4 +172,5 @@ surfacing it correctly to Python.
 Initial released binding over `gamlastan` 0.5.0. See the Git history for the
 change set prior to this changelog.
 
-[0.2.0]: https://github.com/kushaldas/pygamlastan/compare/v0.1.1...v0.2.0
+[0.3.0]: https://github.com/kushaldas/pygamlastan/compare/ee774370e76d5dd422ddfbe59ed264ed4367918a...v0.3.0
+[0.2.0]: https://github.com/kushaldas/pygamlastan/compare/v0.1.1...ee774370e76d5dd422ddfbe59ed264ed4367918a
