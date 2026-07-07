@@ -119,9 +119,15 @@ fn parse_key_usage(s: &str) -> PyResult<KeyUsage> {
     })
 }
 
+fn looks_like_pem(cert: &[u8]) -> bool {
+    let Some(first_non_ws) = cert.iter().position(|b| !(*b).is_ascii_whitespace()) else {
+        return false;
+    };
+    cert[first_non_ws..].starts_with(b"-----BEGIN")
+}
+
 fn load_x509_cert_key_and_der(cert: &[u8]) -> PyResult<(GKey, Vec<u8>)> {
-    let is_pem = cert.windows(10).any(|w| w == b"-----BEGIN");
-    let key = if is_pem {
+    let key = if looks_like_pem(cert) {
         gx::keys::loader::load_x509_cert_pem(cert)
     } else {
         gx::keys::loader::load_x509_cert_der(cert)
@@ -322,7 +328,8 @@ impl SamlVerifier {
     /// `Verify` key - without it the verifier reports "no keys in manager") AND
     /// the cert as a trust anchor (so the default `trusted_keys_only` mode does
     /// not blindly trust a certificate embedded in the signature's `<KeyInfo>`).
-    /// PEM vs DER is detected by sniffing for the `-----BEGIN` armor.
+    /// PEM vs DER is detected by trimming leading ASCII whitespace and checking
+    /// for the `-----BEGIN` armor prefix.
     #[staticmethod]
     fn from_cert(cert: Vec<u8>) -> PyResult<Self> {
         let (mut key, cert_der) = load_x509_cert_key_and_der(&cert)?;
@@ -779,4 +786,27 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(canonicalize, &m)?)?;
     m.add_function(wrap_pyfunction!(exc_c14n, &m)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_pem;
+
+    #[test]
+    fn pem_detection_accepts_pem_after_ascii_whitespace() {
+        assert!(looks_like_pem(
+            b" \n\t\r-----BEGIN CERTIFICATE-----\nbase64\n-----END CERTIFICATE-----"
+        ));
+    }
+
+    #[test]
+    fn pem_detection_does_not_scan_der_payload() {
+        assert!(!looks_like_pem(b"\x30\x82\x01\x00payload-----BEGIN"));
+    }
+
+    #[test]
+    fn pem_detection_rejects_empty_or_whitespace_only_input() {
+        assert!(!looks_like_pem(b""));
+        assert!(!looks_like_pem(b" \n\t\r"));
+    }
 }
