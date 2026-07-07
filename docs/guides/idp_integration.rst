@@ -63,15 +63,25 @@ federation's signing certificate before you trust it:
    import urllib.parse, urllib.request
    from pygamlastan import crypto
 
+   def hardened_verifier(signer_cert: bytes) -> crypto.SamlVerifier:
+       verifier = crypto.SamlVerifier.from_cert(signer_cert)   # cert PEM/DER bytes
+       verifier.set_skip_time_checks(False)
+       verifier.set_trusted_keys_only(True)
+       verifier.set_strict_verification(True)
+       verifier.set_hmac_min_out_len(160)
+       verifier.set_require_reference_digests(True)
+       verifier.set_allow_raw_inline_keyinfo_with_trust_anchors(False)
+       return verifier
+
    def mdq_fetch(base_url: str, entity_id: str, signer_cert: bytes) -> str | None:
        # MDQ single-entity request: {base}/entities/{url-encoded entityID}
        url = f"{base_url.rstrip('/')}/entities/{urllib.parse.quote(entity_id, safe='')}"
        req = urllib.request.Request(url, headers={"Accept": "application/samlmetadata+xml"})
        with urllib.request.urlopen(req, timeout=10) as resp:
            xml_text = resp.read().decode()
-       # MANDATORY: reject metadata whose enveloped signature does not verify.
-       verifier = crypto.SamlVerifier.from_cert(signer_cert)   # cert PEM/DER bytes
-       if not verifier.verify_enveloped(xml_text).is_valid():
+       # MANDATORY: reject metadata whose enveloped signatures do not verify.
+       results = hardened_verifier(signer_cert).verify_all_enveloped(xml_text)
+       if not results or any(not result.is_valid() for result in results):
            return None
        return xml_text
 

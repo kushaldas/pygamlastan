@@ -87,16 +87,75 @@ same bytes:
 
 .. code-block:: python
 
-   verified = verifier.verify_enveloped(response_xml)   # real XML-DSig check
-   parsed = xml.parse_response(response_xml)            # same bytes
+   verify_results = verifier.verify_all_enveloped(response_xml)   # real XML-DSig checks
+   verified_signed_ids = [
+       signed_id
+       for verify_result in verify_results
+       for signed_id in verify_result.signed_reference_ids()
+   ]
+   parsed = xml.parse_response(response_xml)                     # same bytes
    result = profiles.process_response(
        parsed, security.SecurityConfig(), sp_entity_id, acs_url, idp_entity_id,
-       verified_signed_ids=verified.signed_reference_ids(),   # from the verifier, not hand-built
+       verified_signed_ids=verified_signed_ids,               # from the verifier, not hand-built
        replay_cache=security.InMemoryReplayCache(),
    )
 
 When in doubt, use ``process_response_verified`` and let the binding do the
 binding.
+
+
+Verifier policy knobs
+---------------------
+
+:class:`pygamlastan.crypto.SamlVerifier` exposes the 0.7 XML-DSig hardening
+knobs from gamlastan. The defaults are the SAML-safe values; the example below
+sets them explicitly so an audit can see the intended policy:
+
+.. code-block:: python
+
+   from pygamlastan import crypto
+
+   verifier = crypto.SamlVerifier.from_cert(idp_cert_pem)
+
+   # Keep X.509 NotBefore/NotAfter enforcement enabled.
+   verifier.set_skip_time_checks(False)
+
+   # Trust only keys/certificates you configured, never attacker-supplied KeyInfo.
+   verifier.set_trusted_keys_only(True)
+
+   # Enforce XML Signature Wrapping reference-position checks.
+   verifier.set_strict_verification(True)
+
+   # Reject HMAC truncation below CVE-2009-0217's 160-bit floor.
+   verifier.set_hmac_min_out_len(160)
+
+   # Require every signed reference digest to be checked locally.
+   verifier.set_require_reference_digests(True)
+
+   # Do not let raw inline KeyValue/DEREncodedKeyValue bypass trust anchors.
+   verifier.set_allow_raw_inline_keyinfo_with_trust_anchors(False)
+
+The unsafe directions are guarded: disabling trusted-key-only mode, non-strict
+verification, reference-digest enforcement, X.509 time checks, or the HMAC
+minimum raises unless the matching ``unsafe_*`` argument is explicit. Enabling
+raw inline KeyInfo with configured trust anchors is guarded the same way.
+
+For a document with more than one signature, use
+:meth:`pygamlastan.crypto.SamlVerifier.verify_all_enveloped` to inspect every
+signature:
+
+.. code-block:: python
+
+   results = verifier.verify_all_enveloped(response_xml)
+   signed_ids = [
+       signed_id
+       for result in results
+       for signed_id in result.signed_reference_ids()
+   ]
+
+``process_response_verified`` already does this internally. You only need this
+manual collection when you deliberately use the lower-level
+``process_response`` / ``validate_response`` APIs.
 
 
 XML input hardening (XXE, billion-laughs, deep nesting)
@@ -113,7 +172,7 @@ defenses are applied before any SAML-level processing:
   external entity is resolved and no internal entity is expanded into a parsed
   SAML tree.
 
-* **Fail-closed resource limits** (uppsala 0.5): element nesting depth (128),
+* **Fail-closed resource limits** (uppsala 0.9): element nesting depth (128),
   entity-expansion byte budget (1 MiB), and entity nesting depth (256). These
   bound **billion-laughs / quadratic-blowup** amplification and **deep-nesting
   stack exhaustion**. Exceeding a limit raises :class:`pygamlastan.SamlXmlError`.
@@ -278,6 +337,16 @@ The ``now`` parameter
    ``verified_signed_ids`` from a real :class:`~pygamlastan.crypto.SamlVerifier`
    result over the same bytes — or avoid them entirely by using
    ``process_response_verified``.
+
+Verifier downgrade methods
+   Methods such as ``set_trusted_keys_only(False)``,
+   ``set_strict_verification(False)``,
+   ``set_require_reference_digests(False)``,
+   ``set_allow_raw_inline_keyinfo_with_trust_anchors(True)``,
+   ``set_hmac_min_out_len(0)``, and ``set_skip_time_checks(True)`` are reachable
+   for legacy interop and negative tests. Each unsafe direction requires an
+   explicit ``unsafe_*`` argument and emits a warning. Do not use them in
+   production SAML flows.
 
 
 Checklist for a production SP

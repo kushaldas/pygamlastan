@@ -119,11 +119,11 @@ SAML_IDP_SUPPORT_EMAIL = os.environ.get("SAML_IDP_SUPPORT_EMAIL", "")
 SAML_IDP_SCOPE = os.environ.get("SAML_IDP_SCOPE", "")
 
 # --- Federation SP metadata (resolved at request time; no local SP database) ---
-# Two sources, both signature-verified against SAML_IDP_METADATA_CERT:
-#   1. local signed metadata XML files in SAML_IDP_METADATA_DIR (loaded at startup)
-#   2. an MDQ service in SAML_IDP_MDQ_URL (queried on demand)
+# Two sources, tried local-first:
+#   1. local metadata XML files in SAML_IDP_METADATA_DIR (trusted as provided)
+#   2. an MDQ service in SAML_IDP_MDQ_URL (queried on demand, signature-verified
+#      against SAML_IDP_METADATA_CERT - mandatory whenever MDQ is set)
 SAML_IDP_METADATA_DIR = os.environ.get("SAML_IDP_METADATA_DIR", str(DATA_DIR / "metadata"))
 SAML_IDP_MDQ_URL = os.environ.get("SAML_IDP_MDQ_URL", "")
-# PEM cert used to signature-verify all metadata before trust. Mandatory - the
-# IdP refuses any SP whose metadata signature does not verify against it.
+# PEM cert used to signature-verify MDQ metadata before trust.
 SAML_IDP_METADATA_CERT = os.environ.get("SAML_IDP_METADATA_CERT", "")

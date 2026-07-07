@@ -66,9 +66,10 @@ shim honours pysaml2's `want_response_signed`:
   first, a missing/invalid signature (`SamlCryptoError`) is surfaced as
   `AssertionError` before any status logic; a *verified* Response carrying a
   non-Success status is surfaced as `StatusError` for pysaml2 parity. The
-  validation config is `SecurityConfig.strict()` with
-  `require_encrypted_assertions` turned off (eduID, like most SPs, signs but does
-  not encrypt assertions).
+  validation config uses production defaults with `require_signed_responses =
+  true` and `require_signed_assertions = false`, matching pysaml2's
+  `want_response_signed` switch: a signed Response envelope is required, but
+  direct Assertion signatures are not implied by that setting.
 - `want_response_signed=False` (dev/test only, as eduID's test settings set it):
   responses go through `profiles.process_response` with
   `SecurityConfig.permissive()`. The unsigned path is reachable **only** when the

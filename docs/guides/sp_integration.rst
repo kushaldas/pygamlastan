@@ -36,15 +36,25 @@ and signature-verify it against the federation signing certificate before trust:
    import urllib.parse, urllib.request
    from pygamlastan import crypto
 
+   def hardened_verifier(signer_cert: bytes) -> crypto.SamlVerifier:
+       verifier = crypto.SamlVerifier.from_cert(signer_cert)   # cert PEM/DER bytes
+       verifier.set_skip_time_checks(False)
+       verifier.set_trusted_keys_only(True)
+       verifier.set_strict_verification(True)
+       verifier.set_hmac_min_out_len(160)
+       verifier.set_require_reference_digests(True)
+       verifier.set_allow_raw_inline_keyinfo_with_trust_anchors(False)
+       return verifier
+
    def mdq_fetch(base_url: str, entity_id: str, signer_cert: bytes) -> str | None:
        # MDQ single-entity request: {base}/entities/{url-encoded entityID}
        url = f"{base_url.rstrip('/')}/entities/{urllib.parse.quote(entity_id, safe='')}"
        req = urllib.request.Request(url, headers={"Accept": "application/samlmetadata+xml"})
        with urllib.request.urlopen(req, timeout=10) as resp:
            xml_text = resp.read().decode()
-       # MANDATORY: reject metadata whose enveloped signature does not verify.
-       verifier = crypto.SamlVerifier.from_cert(signer_cert)   # cert PEM/DER bytes
-       if not verifier.verify_enveloped(xml_text).is_valid():
+       # MANDATORY: reject metadata whose enveloped signatures do not verify.
+       results = hardened_verifier(signer_cert).verify_all_enveloped(xml_text)
+       if not results or any(not result.is_valid() for result in results):
            return None
        return xml_text
 
@@ -119,17 +129,44 @@ When the IdP posts the ``Response`` back to your ACS:
 
 .. code-block:: python
 
-   from pygamlastan import xml, crypto, security, profiles
+   from pygamlastan import crypto, security, profiles
 
-   # 1. Cryptographically verify the signature with the IdP's signing cert
-   #    (idp_signing_certs[0] from the resolved IdP metadata above).
+   # Cryptographically verify with the IdP's signing cert and validate the same bytes.
    verifier = crypto.SamlVerifier.from_cert(idp_certificate_pem)
-   verified = verifier.verify_enveloped(response_xml)
+   verifier.set_skip_time_checks(False)
+   verifier.set_trusted_keys_only(True)
+   verifier.set_strict_verification(True)
+   verifier.set_hmac_min_out_len(160)
+   verifier.set_require_reference_digests(True)
+   verifier.set_allow_raw_inline_keyinfo_with_trust_anchors(False)
+   result = profiles.process_response_verified(
+       response_xml,
+       verifier,
+       security.SecurityConfig(),
+       sp_entity_id="https://sp.example.org/sp",
+       acs_url="https://sp.example.org/acs",
+       expected_idp_entity_id="https://idp.example.org",
+       expected_request_id=session["request_id"],
+       replay_cache=replay_cache,   # see the validation guide
+   )
 
-   # 2. Parse.
+Use the lower-level ``parse_response`` + ``process_response`` path only when you
+must verify signatures yourself. In that case, verify every signature and pass
+only the digest-verified IDs returned by the verifier:
+
+.. code-block:: python
+
+   from pygamlastan import xml
+
+   verify_results = verifier.verify_all_enveloped(response_xml)
+   if not verify_results or any(not result.is_valid() for result in verify_results):
+       raise ValueError("SAML response signature verification failed")
+   signed_ids = [
+       signed_id
+       for verify_result in verify_results
+       for signed_id in verify_result.signed_reference_ids()
+   ]
    response = xml.parse_response(response_xml)
-
-   # 3. Validate and extract the identity.
    result = profiles.process_response(
        response,
        security.SecurityConfig(),
@@ -137,8 +174,8 @@ When the IdP posts the ``Response`` back to your ACS:
        acs_url="https://sp.example.org/acs",
        expected_idp_entity_id="https://idp.example.org",
        expected_request_id=session["request_id"],
-       verified_signed_ids=verified.signed_reference_ids(),
-       replay_cache=replay_cache,   # see the validation guide
+       verified_signed_ids=signed_ids,
+       replay_cache=replay_cache,
    )
 
 On success you get an :class:`pygamlastan.profiles.AuthnResult`:

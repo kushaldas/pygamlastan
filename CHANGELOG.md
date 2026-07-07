@@ -71,6 +71,12 @@ surfacing it correctly to Python.
   validated with `profiles.process_response_verified` (no xmlsec1 subprocess).
   See `docs/adr/0007-pysaml2-compat-shim.md` and the pysaml2 compatibility guide.
 
+### Changed
+
+- **Upgraded the upstream library baseline to the released `gamlastan` 0.7.0.**
+  The Rust dependency now tracks `kryptering` 0.4.1 and pulls the matching `uppsala` 0.9 /
+  `bergshamra` 0.7 XML-security stack.
+
 ## [0.2.0] - 2026-06-27
 
 ### Security

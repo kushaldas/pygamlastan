@@ -52,6 +52,15 @@ single certificate, or from a fully populated :class:`~pygamlastan.crypto.KeysMa
 .. code-block:: python
 
    verifier = crypto.SamlVerifier.from_cert(idp_certificate_pem)
+
+   # These are the secure defaults, shown explicitly for production config:
+   verifier.set_skip_time_checks(False)
+   verifier.set_trusted_keys_only(True)
+   verifier.set_strict_verification(True)
+   verifier.set_hmac_min_out_len(160)
+   verifier.set_require_reference_digests(True)
+   verifier.set_allow_raw_inline_keyinfo_with_trust_anchors(False)
+
    result = verifier.verify_enveloped(signed_xml)
 
    if result.is_valid():
@@ -63,6 +72,33 @@ as a verification key and as a trust anchor. By default the verifier runs in
 ``<KeyInfo>`` is not blindly trusted. ``signed_reference_ids()`` is exactly what
 you feed to :func:`pygamlastan.profiles.process_response` as
 ``verified_signed_ids``.
+
+When a SAML message can contain more than one signature (for example a Response
+signature plus an Assertion signature), verify all signatures and collect all
+digest-verified IDs:
+
+.. code-block:: python
+
+   from pygamlastan import profiles, security, xml
+
+   results = verifier.verify_all_enveloped(response_xml)
+   signed_ids = []
+   for result in results:
+       if not result:
+           raise ValueError(result.reason)
+       signed_ids.extend(result.signed_reference_ids())
+
+   parsed = xml.parse_response(response_xml)
+   authn = profiles.process_response(
+       parsed, security.SecurityConfig(),
+       sp_entity_id=SP, acs_url=ACS, expected_idp_entity_id=IDP,
+       verified_signed_ids=signed_ids,
+       replay_cache=security.InMemoryReplayCache(),
+   )
+
+Prefer :func:`pygamlastan.profiles.process_response_verified` for normal SP
+flows; it performs this all-signature verification internally over the exact
+bytes it then validates.
 
 PKCS#11 / HSM signing
 ---------------------

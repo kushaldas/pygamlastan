@@ -108,6 +108,26 @@ and the replay cache. See the :doc:`../guides/validation` guide.
    .. py:attribute:: checks
       :type: list[ValidationCheck]
    .. py:method:: failures() -> list[ValidationCheck]
+   .. py:method:: passed_checks() -> list[ValidationCheck]
+   .. py:method:: get(check_number: int) -> ValidationCheck | None
+
+      Return the check with this checklist number, or ``None``.
+
+   .. py:method:: by_name(name: str) -> ValidationCheck | None
+
+      Return the first check whose name matches case-insensitively, or ``None``.
+
+   Example:
+
+   .. code-block:: python
+
+      result = security.validate_response(...)
+      if not result:
+          for failed in result.failures():
+              print(failed.check_number, failed.check_name, failed.detail)
+
+      audience = result.by_name("Audience restriction")
+      age = result.get(0)
 
 .. py:class:: ValidationCheck
 
@@ -153,3 +173,18 @@ Replay cache
    Redis-backed cache) wherever a ``replay_cache`` is accepted. gamlastan calls
    into it and fails closed if a call raises. See
    :doc:`../guides/validation`.
+
+Persistent ID store protocol
+----------------------------
+
+When :attr:`SecurityConfig.enforce_persistent_id_uniqueness` is enabled and a
+response contains a persistent ``NameID``, pass any object implementing:
+
+.. code-block:: python
+
+   def check_and_record(name_id: str, sp_entity_id: str, principal: str) -> bool: ...
+
+Return ``True`` when the assignment is new or already belongs to the same
+principal. Return ``False`` when the persistent identifier is already bound to a
+different principal. If the method raises, pygamlastan treats it as ``False`` and
+the validation check fails closed.

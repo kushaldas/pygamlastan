@@ -23,7 +23,7 @@ WORKDIR /app
 COPY wheels/ /app/wheels/
 RUN uv venv /app/.venv \
  && uv pip install --find-links /app/wheels \
-        "django==6.0.6" "pygamlastan>=0.1" "cryptography>=42" "gunicorn>=22" "whitenoise>=6"
+        "django==6.0.6" "pygamlastan>=0.3.0" "cryptography>=42" "gunicorn>=22" "whitenoise>=6"
 
 COPY . /app
 RUN chmod +x /app/entrypoint.sh

@@ -254,7 +254,7 @@ def test_parse_rejects_doctype_dtd():
 
 
 def test_parse_rejects_billion_laughs():
-    """uppsala 0.5's entity-expansion budget (inherited via `parse_secure`)
+    """uppsala 0.9's entity-expansion budget (inherited via `parse_secure`)
     bounds quadratic / billion-laughs amplification before validation runs. The
     document is rejected at the DTD guard regardless, but this asserts that a
     classic amplification payload never expands unbounded."""
@@ -349,6 +349,9 @@ def test_enveloped_sign_and_verify(rsa_keypair):
     assert result.is_valid()
     assert bool(result) is True  # VerifyResult is truthy when valid
     assert "_resp1" in result.signed_reference_ids()
+    all_results = verifier.verify_all_enveloped(signed)
+    assert len(all_results) == 1
+    assert "_resp1" in all_results[0].signed_reference_ids()
 
 
 def test_verify_rejects_tampered(rsa_keypair):
@@ -1348,6 +1351,12 @@ def test_verifier_downgrade_setters_warn():
         verifier.set_strict_verification(False)
     with pytest.raises(pygamlastan.SamlCryptoError):
         verifier.set_skip_time_checks(True)
+    with pytest.raises(pygamlastan.SamlCryptoError):
+        verifier.set_hmac_min_out_len(0)
+    with pytest.raises(pygamlastan.SamlCryptoError):
+        verifier.set_require_reference_digests(False)
+    with pytest.raises(pygamlastan.SamlCryptoError):
+        verifier.set_allow_raw_inline_keyinfo_with_trust_anchors(True)
 
     with pytest.warns(UserWarning, match="trusted_keys_only"):
         verifier.set_trusted_keys_only(False, unsafe_allow_untrusted_keys=True)
@@ -1355,12 +1364,23 @@ def test_verifier_downgrade_setters_warn():
         verifier.set_strict_verification(False, unsafe_allow_non_strict=True)
     with pytest.warns(UserWarning, match="skip_time_checks"):
         verifier.set_skip_time_checks(True, unsafe_allow_skip_time_checks=True)
+    with pytest.warns(UserWarning, match="HMAC"):
+        verifier.set_hmac_min_out_len(0, unsafe_allow_short_hmac=True)
+    with pytest.warns(UserWarning, match="reference_digests"):
+        verifier.set_require_reference_digests(False, unsafe_allow_missing_reference_digests=True)
+    with pytest.warns(UserWarning, match="raw inline KeyInfo"):
+        verifier.set_allow_raw_inline_keyinfo_with_trust_anchors(
+            True, unsafe_allow_raw_inline_keyinfo=True,
+        )
     # Secure direction: no warning.
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         verifier.set_trusted_keys_only(True)
         verifier.set_strict_verification(True)
         verifier.set_skip_time_checks(False)
+        verifier.set_hmac_min_out_len(160)
+        verifier.set_require_reference_digests(True)
+        verifier.set_allow_raw_inline_keyinfo_with_trust_anchors(False)
 
 
 def test_redirect_decode_rejects_duplicate_params():
@@ -1403,16 +1423,24 @@ def test_security_config_all_fields_tunable():
     presets."""
     cfg = security.SecurityConfig()
     for field in [
+        "require_signed_assertions",
+        "require_signed_responses",
         "require_encrypted_assertions",
+        "verify_destination",
+        "verify_recipient",
+        "check_client_address",
         "reject_signatures_with_ds_object",
         "enforce_persistent_id_uniqueness",
         "sanitize_relay_state",
         "require_integrity_with_cbc",
-        "check_client_address",
     ]:
         before = getattr(cfg, field)
         setattr(cfg, field, not before)
         assert getattr(cfg, field) is (not before), field
+    for field in ["clock_skew_seconds", "max_assertion_age_seconds"]:
+        before = getattr(cfg, field)
+        setattr(cfg, field, before + 1)
+        assert getattr(cfg, field) == before + 1, field
 
 
 def test_persistent_id_store_detects_reassignment():

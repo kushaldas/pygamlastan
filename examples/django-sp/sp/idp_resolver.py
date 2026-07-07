@@ -40,16 +40,31 @@ def _verifier():
             "SAML_SP_METADATA_CERT is required to use MDQ: remote metadata "
             "signature verification is mandatory."
         )
-    return crypto.SamlVerifier.from_cert(Path(cert_path).read_bytes())
+    verifier = crypto.SamlVerifier.from_cert(Path(cert_path).read_bytes())
+    verifier.set_skip_time_checks(False)
+    verifier.set_trusted_keys_only(True)
+    verifier.set_strict_verification(True)
+    verifier.set_hmac_min_out_len(160)
+    verifier.set_require_reference_digests(True)
+    verifier.set_allow_raw_inline_keyinfo_with_trust_anchors(False)
+    return verifier
 
 
 def _verify(xml_text: str) -> bool:
-    """True only if the metadata's enveloped signature verifies against the cert."""
+    """True only if all metadata enveloped signatures verify against the cert."""
     try:
-        return _verifier().verify_enveloped(xml_text).is_valid()
+        results = _verifier().verify_all_enveloped(xml_text)
     except Exception as exc:  # noqa: BLE001
         log.warning("metadata signature verification error: %s", exc)
         return False
+    if not results:
+        log.warning("metadata contains no enveloped XML signatures")
+        return False
+    failures = [r.reason or "invalid signature" for r in results if not r.is_valid()]
+    if failures:
+        log.warning("metadata signature verification failed: %s", "; ".join(failures))
+        return False
+    return True
 
 
 @lru_cache(maxsize=1)
