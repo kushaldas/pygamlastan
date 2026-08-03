@@ -10,7 +10,7 @@ use gamlastan::metadata::types::{
     EntityDescriptor as GEntityDescriptor, KeyDescriptor, UiInfo as GUiInfo, UiLogo as GUiLogo,
 };
 use gamlastan::metadata::{EntitiesDescriptorRef, EntityDescriptorRef};
-use gamlastan::xml::{parse_saml, parse_secure, SamlSerialize};
+use gamlastan::xml::{parse_saml, parse_secure_metadata, SamlSerialize};
 
 use crate::convert::new_submodule;
 use crate::core::Attribute;
@@ -358,10 +358,13 @@ impl EntityDescriptor {
 /// Parse a single `<md:EntityDescriptor>` document.
 ///
 /// SECURITY: remote/published metadata is attacker-influenced, so parsing goes
-/// through `parse_secure` (uppsala 0.9 resource limits + DTD/XXE rejection).
+/// through `parse_secure_metadata` (uppsala resource limits + DTD/XXE
+/// rejection). Unlike `parse_secure`, it accepts the structural comments and
+/// processing instructions real federation aggregates carry, while still
+/// rejecting a comment or PI that splits a signed text value.
 #[pyfunction]
 fn parse_entity(xml: &str) -> PyResult<EntityDescriptor> {
-    let doc = parse_secure(xml).map_err(xml_err)?;
+    let doc = parse_secure_metadata(xml).map_err(xml_err)?;
     let r = parse_saml::<EntityDescriptorRef<'_>>(&doc).map_err(xml_err)?;
     Ok(EntityDescriptor::wrap(r.to_owned()))
 }
@@ -369,7 +372,7 @@ fn parse_entity(xml: &str) -> PyResult<EntityDescriptor> {
 /// Parse a `<md:EntitiesDescriptor>` aggregate into a list of EntityDescriptors.
 #[pyfunction]
 fn parse_entities(xml: &str) -> PyResult<Vec<EntityDescriptor>> {
-    let doc = parse_secure(xml).map_err(xml_err)?;
+    let doc = parse_secure_metadata(xml).map_err(xml_err)?;
     let r = parse_saml::<EntitiesDescriptorRef<'_>>(&doc).map_err(xml_err)?;
     let owned = r.to_owned();
     Ok(owned

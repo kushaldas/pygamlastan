@@ -422,13 +422,21 @@ fn require_persistent_id_store(
 /// structured `ValidationResult` (does not raise on validation failure).
 ///
 /// `replay_cache` may be an `InMemoryReplayCache` or any object implementing
-/// `check_and_insert(id, expiry)` / `cleanup()`.
+/// `check_and_insert(id, expiry)` / `cleanup()`. gamlastan fails check 20
+/// closed when no replay cache is configured, so `unsafe_no_replay_cache=True`
+/// merely moves the failure from this call's precondition into the returned
+/// `ValidationResult` - it no longer disables replay enforcement.
 ///
 /// `persistent_id_store` (optional) enables the E78 persistent-identifier
 /// uniqueness check: any object with
 /// `check_and_record(name_id, sp_entity_id, principal) -> bool` (returning False
-/// when the id was already bound to a different principal). It only has effect
-/// when `config.enforce_persistent_id_uniqueness` is True.
+/// when the id was already bound to a different principal). It must be
+/// accompanied by `persistent_id_principal` - the local account identifier your
+/// application established independently of the asserted NameID; gamlastan no
+/// longer keys the uniqueness check by the NameID itself, which could never
+/// detect reassignment. Both only have effect when
+/// `config.enforce_persistent_id_uniqueness` is True (now default False; when
+/// True without a store and principal, check 26 fails closed).
 ///
 /// SECURITY: `now` exists only for test determinism and defaults to the real
 /// system clock. Production callers must NOT pass `now` - supplying a fixed or
@@ -442,7 +450,8 @@ fn require_persistent_id_store(
     expected_request_id=None, client_address=None, relay_state=None,
     response_signature_verified=None, verified_signed_ids=None,
     current_proxy_depth=0, now=None, replay_cache=None, persistent_id_store=None,
-    unsafe_no_replay_cache=false, unsafe_no_persistent_id_store=false,
+    persistent_id_principal=None, unsafe_no_replay_cache=false,
+    unsafe_no_persistent_id_store=false,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn validate_response(
@@ -461,6 +470,7 @@ fn validate_response(
     now: Option<DateTime<Utc>>,
     replay_cache: Option<Py<PyAny>>,
     persistent_id_store: Option<Py<PyAny>>,
+    persistent_id_principal: Option<String>,
     unsafe_no_replay_cache: bool,
     unsafe_no_persistent_id_store: bool,
 ) -> PyResult<ValidationResult> {
@@ -510,18 +520,29 @@ fn validate_response(
         validator = validator.with_replay_cache(c);
     }
     if let Some(s) = &py_pid {
-        validator = validator.with_persistent_id_store(s);
+        // gamlastan requires an application-supplied principal identifying the
+        // local account *independently* of the asserted NameID; keying the
+        // uniqueness check by the NameID itself could never detect reassignment.
+        let principal = persistent_id_principal.as_deref().ok_or_else(|| {
+            security_err(
+                "persistent_id_store requires persistent_id_principal: the local \
+                 account identifier established independently of the asserted NameID",
+            )
+        })?;
+        validator = validator.with_persistent_id_store(s, principal);
     }
     let result = validator.validate_response(&response.inner, &params);
     Ok(ValidationResult { inner: result })
 }
 
-/// Run a single check standalone: the assertion-age check (checklist #0).
+/// Run a single check standalone: the assertion-age check (checklist #35).
 ///
-/// gamlastan's validator runs the full 32-check suite as a unit; this is the one
-/// check it also exposes individually, useful for a profile that wants to gate
-/// on assertion freshness on its own. For the other checks, run
-/// `validate_response` and read the per-check outcomes from the result
+/// gamlastan's validator runs the full 35-check suite as a unit (and since
+/// gamlastan 0.8 enforces assertion age as check 35 during every
+/// `validate_response`); this is the one check it also exposes individually,
+/// useful for a profile that wants to gate on assertion freshness on its own.
+/// For the other checks, run `validate_response` and read the per-check
+/// outcomes from the result
 /// (`ValidationResult.get(n)` / `.by_name(...)` / `.failures()`).
 #[pyfunction]
 fn check_assertion_age(

@@ -135,7 +135,7 @@ def test_version_and_submodules():
     Guards the mixed Rust+Python layout: the `_native` extension must register
     each area (core, xml, ...) as an attribute of the `pygamlastan` package.
     """
-    assert pygamlastan.__version__ == "0.3.0"
+    assert pygamlastan.__version__ == "0.4.0"
     for name in ("core", "xml", "crypto", "bindings", "metadata", "security",
                  "profiles", "attribute_map", "idp", "logout"):
         assert hasattr(pygamlastan, name)
@@ -758,17 +758,30 @@ def test_validate_response_structured():
 
 
 def test_validate_response_requires_replay_cache_by_default():
-    """Validation requires replay protection unless the unsafe legacy mode is explicit."""
+    """Validation requires a real replay cache: the binding refuses to run
+    without one, and gamlastan itself now fails check 20 closed when none is
+    configured, so ``unsafe_no_replay_cache`` cannot buy a valid result."""
     parsed = xml.parse_response(_built_response_xml())
     cfg = security.SecurityConfig.permissive()
     with pytest.raises(pygamlastan.SamlSecurityError):
         security.validate_response(parsed, cfg, ACS, IDP, SP, ACS,
                                    expected_request_id="_req123", now=NOW)
 
+    # The unsafe flag only skips the binding precondition; gamlastan then fails
+    # the replay check (20) closed rather than silently passing it.
     res = security.validate_response(
         parsed, cfg, ACS, IDP, SP, ACS,
         expected_request_id="_req123", now=NOW,
         unsafe_no_replay_cache=True,
+    )
+    assert not res.is_valid()
+    assert any(c.check_number == 20 for c in res.failures())
+
+    # A real replay cache is the supported path and validates cleanly.
+    res = security.validate_response(
+        parsed, cfg, ACS, IDP, SP, ACS,
+        expected_request_id="_req123", now=NOW,
+        replay_cache=security.InMemoryReplayCache(),
     )
     assert res.is_valid()
 
@@ -827,7 +840,9 @@ def test_python_replay_cache_protocol():
 
 
 def test_process_response_requires_replay_cache_by_default():
-    """SP response processing requires a replay cache unless explicitly waived."""
+    """SP response processing requires a real replay cache. The binding refuses
+    without one; even ``unsafe_no_replay_cache`` cannot succeed because
+    gamlastan now fails the replay check closed with no cache configured."""
     parsed = xml.parse_response(_built_response_xml())
     cfg = security.SecurityConfig.permissive()
     with pytest.raises(pygamlastan.SamlProfileError,
@@ -835,10 +850,20 @@ def test_process_response_requires_replay_cache_by_default():
         profiles.process_response(parsed, cfg, SP, ACS, IDP,
                                   expected_request_id="_req123", now=NOW)
 
+    # The unsafe flag skips the precondition but validation then fails closed on
+    # the replay check, surfacing as a profile error rather than a valid result.
+    with pytest.raises(pygamlastan.SamlProfileError, match="replay"):
+        profiles.process_response(
+            parsed, cfg, SP, ACS, IDP,
+            expected_request_id="_req123", now=NOW,
+            unsafe_no_replay_cache=True,
+        )
+
+    # A real replay cache is the supported path.
     result = profiles.process_response(
         parsed, cfg, SP, ACS, IDP,
         expected_request_id="_req123", now=NOW,
-        unsafe_no_replay_cache=True,
+        replay_cache=security.InMemoryReplayCache(),
     )
     assert result.name_id == "alice@example.org"
 
@@ -887,18 +912,18 @@ def test_idp_process_authn_request():
     build its Response.
     """
     req = xml.parse_authn_request(AUTHN_REQUEST)
-    with pytest.raises(pygamlastan.SamlProfileError):
-        profiles.process_authn_request(req)
 
-    unsafe_processed = profiles.process_authn_request(req, unsafe_allow_missing_metadata=True)
-    assert unsafe_processed.acs_url == ACS
-
+    # SP metadata is required: gamlastan only accepts an ACS location together
+    # with its registered binding, so a request cannot steer assertions to an
+    # unregistered endpoint. There is no "missing metadata" escape hatch.
     sp_md = metadata.parse_entity(SAMPLE_SP_METADATA)
-    processed = profiles.process_authn_request(req, sp_metadata=sp_md)
+    processed = profiles.process_authn_request(req, sp_md)
     assert processed.request_id == "_req1"
     assert processed.sp_entity_id == SP
     assert processed.acs_url == ACS
     assert processed.requested_name_id_format == core.NAMEID_TRANSIENT
+    # This fixture carries no RequestedAuthnContext, so no comparison is set.
+    assert processed.authn_context_comparison is None
 
 
 def test_full_sso_roundtrip():
@@ -1467,6 +1492,7 @@ def test_persistent_id_store_detects_reassignment():
         name_id_format=core.NAMEID_PERSISTENT,
     ))
 
+    # With enforcement on but no store, the check fails closed.
     with pytest.raises(pygamlastan.SamlSecurityError):
         security.validate_response(
             parsed, cfg, ACS, IDP, SP, ACS,
@@ -1474,23 +1500,38 @@ def test_persistent_id_store_detects_reassignment():
             replay_cache=security.InMemoryReplayCache(),
         )
 
+    # E78 is keyed by an application principal established independently of the
+    # asserted NameID; supplying a store without one is rejected.
+    with pytest.raises(pygamlastan.SamlSecurityError, match="persistent_id_principal"):
+        security.validate_response(
+            parsed, cfg, ACS, IDP, SP, ACS,
+            expected_request_id="_req123", now=NOW,
+            replay_cache=security.InMemoryReplayCache(),
+            persistent_id_store=store,
+        )
+
+    # First login: NameID p-alice bound to local principal "alice".
     res = security.validate_response(
         parsed, cfg, ACS, IDP, SP, ACS,
         expected_request_id="_req123", now=NOW,
         replay_cache=security.InMemoryReplayCache(),
         persistent_id_store=store,
+        persistent_id_principal="alice",
     )
     assert res.is_valid()
-    store.seen[("p-alice", SP)] = "mallory"
 
+    # The same persistent NameID presented for a different local principal is a
+    # reassignment and must be rejected.
     conflict = security.validate_response(
         parsed, cfg, ACS, IDP, SP, ACS,
         expected_request_id="_req123", now=NOW,
         replay_cache=security.InMemoryReplayCache(),
         persistent_id_store=store,
+        persistent_id_principal="mallory",
     )
     assert not conflict.is_valid()
 
+    # process_response threads the same principal through to the validator.
     with pytest.raises(pygamlastan.SamlProfileError):
         profiles.process_response(
             parsed, cfg, SP, ACS, IDP,
@@ -1503,6 +1544,7 @@ def test_persistent_id_store_detects_reassignment():
         expected_request_id="_req123", now=NOW,
         replay_cache=security.InMemoryReplayCache(),
         persistent_id_store=DictPidStore(),
+        persistent_id_principal="alice",
     )
     assert result.name_id == "p-alice"
 
@@ -1579,18 +1621,30 @@ def test_logout_response_builders():
 
 
 def test_validate_logout_request():
-    """`validate_logout_request` accepts a fresh request and rejects an expired
-    one (raising SamlProfileError)."""
+    """`validate_logout_request` accepts a fresh, verified, correctly-attributed
+    request and rejects expired, unverified, or misattributed ones (raising
+    SamlProfileError)."""
     opts = logout.SpLogoutRequestOptions(SP, _slo_name_id())
     req = logout.create_sp_logout_request(opts)
-    logout.validate_logout_request(req, datetime.now(timezone.utc), 180)  # no raise
+    now = datetime.now(timezone.utc)
+    # Issuer matches SP, signature verified by the (test) transport layer.
+    logout.validate_logout_request(req, SP, True, now, 180)  # no raise
+
+    # An unverified request is rejected even when otherwise well-formed: SLO must
+    # never destroy sessions on the strength of an unauthenticated message.
+    with pytest.raises(pygamlastan.SamlProfileError):
+        logout.validate_logout_request(req, SP, False, now, 180)
+
+    # A request whose Issuer is not the expected peer is rejected.
+    with pytest.raises(pygamlastan.SamlProfileError):
+        logout.validate_logout_request(req, "https://other.example.org", True, now, 180)
 
     # An expired request (NotOnOrAfter in the past) is rejected.
-    past = datetime.now(timezone.utc) - timedelta(minutes=10)
+    past = now - timedelta(minutes=10)
     expired_opts = logout.SpLogoutRequestOptions(SP, _slo_name_id(), not_on_or_after=past)
     expired = logout.create_sp_logout_request(expired_opts)
     with pytest.raises(pygamlastan.SamlProfileError):
-        logout.validate_logout_request(expired, datetime.now(timezone.utc), 180)
+        logout.validate_logout_request(expired, SP, True, now, 180)
 
 
 def test_orchestrator_full_success():
@@ -1612,7 +1666,7 @@ def test_orchestrator_full_success():
         assert pending.request.issuer.value == SP
         resp = logout.create_logout_response_success(
             pending.entity_id, pending.request.id, f"{SP}/slo")
-        outcome = orch.handle_response(resp)
+        outcome = orch.handle_response(resp, True)
         assert outcome.success and not outcome.partial
 
     assert orch.is_complete()
@@ -1636,7 +1690,7 @@ def test_orchestrator_partial_and_failure():
 
     p1 = orch.next_request()
     partial = logout.create_logout_response_partial("https://idp1.example.org", p1.request.id)
-    out1 = orch.handle_response(partial)
+    out1 = orch.handle_response(partial, True)
     assert out1.success and out1.partial
     state1 = orch.target_state("https://idp1.example.org")
     assert state1.kind == "failed"  # partial logout is not a clean success
@@ -1661,4 +1715,18 @@ def test_orchestrator_rejects_issuer_mismatch():
     spoofed = logout.create_logout_response_success(
         "https://evil.example.org", pending.request.id)
     with pytest.raises(pygamlastan.SamlProfileError):
-        orch.handle_response(spoofed)
+        orch.handle_response(spoofed, True)
+
+
+def test_orchestrator_rejects_unverified_response():
+    """Correlation alone cannot authenticate a LogoutResponse: an unverified
+    response is rejected even when its InResponseTo and issuer match."""
+    orch = logout.SpLogoutOrchestrator(SP)
+    orch.add_target(
+        logout.LogoutTarget("https://idp1.example.org", _slo_name_id(),
+                            "https://idp1.example.org/slo", core.BINDING_SOAP))
+    pending = orch.next_request()
+    resp = logout.create_logout_response_success(
+        "https://idp1.example.org", pending.request.id)
+    with pytest.raises(pygamlastan.SamlProfileError):
+        orch.handle_response(resp, False)

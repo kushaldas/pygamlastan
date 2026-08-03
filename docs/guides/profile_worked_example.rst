@@ -116,6 +116,7 @@ result in one call.
            expected_request_id=expected_request_id,
            replay_cache=self.replay_cache,
            persistent_id_store=self.id_store,
+           persistent_id_principal=self.local_account_id,
        )
        return result                                 # a profiles.AuthnResult
 
@@ -128,9 +129,12 @@ Three deliberate choices, each a profile rule:
 * **Use** :func:`~pygamlastan.profiles.process_response_verified`, not
   ``process_response`` with a hand-passed ``verified_signed_ids`` - the former
   cannot be tricked into "trusting" an unverified response.
-* **Supply a** ``persistent_id_store``. Because the request asked for a
-  persistent ``NameID``, validation requires a store so a persistent identifier
-  cannot be silently re-bound to a different principal.
+* **Supply a** ``persistent_id_store`` **and** ``persistent_id_principal`` when
+  you enable persistent-``NameID`` uniqueness (``enforce_persistent_id_uniqueness``,
+  off by default). The principal is your local account id, resolved
+  *independently* of the asserted NameID, so a persistent identifier cannot be
+  silently re-bound to a different principal. gamlastan will not enforce E78 from
+  the SAML input alone, which is why both are required.
 
 The persistent-ID store is the one piece of state you must implement. Any backend
 works; it fails closed, so a raised exception is treated as a conflict:
@@ -175,10 +179,11 @@ Map the wire attribute names to friendly local names with
 Adding a profile rule
 ----------------------
 
-The 32-check suite ran inside ``process_response_verified``. To enforce a *33rd*
-rule specific to your profile, inspect the typed ``AuthnResult`` you already
-hold - no need to re-parse. For example, require a step-up authentication
-context:
+The full validation suite (the 32-item Section 7.2 checklist plus
+response-envelope checks 33-34 and the per-assertion age check 35) ran inside
+``process_response_verified``. To enforce a further rule specific to your
+profile, inspect the typed ``AuthnResult`` you already hold - no need to
+re-parse. For example, require a step-up authentication context:
 
 .. code-block:: python
 

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "pygamlastan"
-version = "0.3.0"
+version = "0.4.0"
 description = "Python bindings for the gamlastan SAML 2.0 library"
 requires-python = ">=3.10"
 license = "BSD-2-Clause"
@@ -27,7 +27,7 @@ Documentation = "https://pygamlastan.readthedocs.io/en/latest/"
 
 [dependency-groups]
 dev = [
-    "pytest>=8.0",
+    "pytest>=9.0",
 ]
 docs = [
     "sphinx==9.1.0",

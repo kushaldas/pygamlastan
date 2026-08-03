@@ -4,11 +4,11 @@ version = "0.1.0"
 description = "A minimal, self-contained SAML 2.0 Service Provider built on Django and pygamlastan"
 requires-python = ">=3.12"
 dependencies = [
-    "django==6.0.6",
-    "pygamlastan>=0.3.0",
-    "cryptography>=42",
-    "gunicorn>=22",
-    "whitenoise>=6",
+    "django==6.0.7",
+    "pygamlastan>=0.4.0",
+    "cryptography>=50",
+    "gunicorn>=26",
+    "whitenoise>=6.12",
 ]
 
 # This project is run, not packaged/installed. uv uses the dependency list above

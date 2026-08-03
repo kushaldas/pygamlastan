@@ -127,6 +127,7 @@ fn process_response_with_stores(
     config: &SecurityConfig,
     replay_cache: Option<&dyn gs::ReplayCache>,
     persistent_id_store: Option<&dyn gs::name_id::PersistentIdStore>,
+    persistent_id_principal: Option<&str>,
     sp_entity_id: &str,
     acs_url: &str,
     expected_request_id: Option<&str>,
@@ -156,7 +157,16 @@ fn process_response_with_stores(
         validator = validator.with_replay_cache(cache);
     }
     if let Some(store) = persistent_id_store {
-        validator = validator.with_persistent_id_store(store);
+        // gamlastan requires an application-supplied principal identifying the
+        // local account *independently* of the asserted NameID; keying the
+        // uniqueness check by the NameID itself could never detect reassignment.
+        let principal = persistent_id_principal.ok_or_else(|| {
+            profile_err(
+                "persistent_id_store requires persistent_id_principal: the local \
+                 account identifier established independently of the asserted NameID",
+            )
+        })?;
+        validator = validator.with_persistent_id_store(store, principal);
     }
 
     let params = gs::ValidationParams {
@@ -397,7 +407,16 @@ impl AuthnResult {
 
 /// Validate and extract identity from a SAML Response (SP side). Pass
 /// `verified_signed_ids` (from a trusted SamlVerifier) to enforce signed
-/// assertions. `replay_cache` is optional (InMemoryReplayCache or a protocol).
+/// assertions. `replay_cache` is an InMemoryReplayCache or a protocol
+/// implementation; gamlastan now fails validation check 20 closed when no
+/// replay cache is configured, so `unsafe_no_replay_cache=True` merely moves
+/// the failure from this call's precondition into the validation result - it
+/// no longer disables replay enforcement.
+///
+/// `persistent_id_store` must be accompanied by `persistent_id_principal`: the
+/// local account identifier your application established independently of the
+/// asserted NameID (E78 uniqueness cannot be checked against the NameID
+/// itself).
 ///
 /// SECURITY: `verified_signed_ids` MUST be the IDs a real `crypto.SamlVerifier`
 /// returned for THIS exact response - never hand-built. If you can hand the raw
@@ -408,8 +427,8 @@ impl AuthnResult {
 #[pyo3(signature = (
     response, config, sp_entity_id, acs_url, expected_idp_entity_id,
     expected_request_id=None, verified_signed_ids=None, now=None, replay_cache=None,
-    persistent_id_store=None, unsafe_no_replay_cache=false,
-    unsafe_no_persistent_id_store=false,
+    persistent_id_store=None, persistent_id_principal=None,
+    unsafe_no_replay_cache=false, unsafe_no_persistent_id_store=false,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn process_response(
@@ -423,6 +442,7 @@ fn process_response(
     now: Option<DateTime<Utc>>,
     replay_cache: Option<Py<PyAny>>,
     persistent_id_store: Option<Py<PyAny>>,
+    persistent_id_principal: Option<String>,
     unsafe_no_replay_cache: bool,
     unsafe_no_persistent_id_store: bool,
 ) -> PyResult<AuthnResult> {
@@ -463,6 +483,7 @@ fn process_response(
         config,
         cache_ref,
         pid_ref,
+        persistent_id_principal.as_deref(),
         sp_entity_id,
         acs_url,
         expected_request_id.as_deref(),
@@ -491,7 +512,8 @@ fn process_response(
 #[pyo3(signature = (
     response_xml, verifier, config, sp_entity_id, acs_url, expected_idp_entity_id,
     expected_request_id=None, now=None, replay_cache=None, persistent_id_store=None,
-    unsafe_no_replay_cache=false, unsafe_no_persistent_id_store=false,
+    persistent_id_principal=None, unsafe_no_replay_cache=false,
+    unsafe_no_persistent_id_store=false,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn process_response_verified(
@@ -505,6 +527,7 @@ fn process_response_verified(
     now: Option<DateTime<Utc>>,
     replay_cache: Option<Py<PyAny>>,
     persistent_id_store: Option<Py<PyAny>>,
+    persistent_id_principal: Option<String>,
     unsafe_no_replay_cache: bool,
     unsafe_no_persistent_id_store: bool,
 ) -> PyResult<AuthnResult> {
@@ -541,6 +564,7 @@ fn process_response_verified(
         config,
         cache_ref,
         pid_ref,
+        persistent_id_principal.as_deref(),
         sp_entity_id,
         acs_url,
         expected_request_id.as_deref(),
@@ -602,35 +626,47 @@ impl ProcessedAuthnRequest {
     fn requested_authn_context_class_refs(&self) -> Vec<String> {
         self.inner.requested_authn_context_class_refs.clone()
     }
+    /// RequestedAuthnContext Comparison as its SAML string
+    /// ("exact" | "minimum" | "maximum" | "better"), or None if absent.
+    #[getter]
+    fn authn_context_comparison(&self) -> Option<&'static str> {
+        self.inner.authn_context_comparison.map(|c| c.as_str())
+    }
     #[getter]
     fn attribute_consuming_service_index(&self) -> Option<u16> {
         self.inner.attribute_consuming_service_index
     }
 }
 
-/// Process an incoming AuthnRequest (IdP side), requiring SP metadata by default.
+/// Process an incoming AuthnRequest (IdP side).
+///
+/// `sp_metadata` (the requesting SP's EntityDescriptor) is required: gamlastan
+/// only accepts an ACS location together with its registered binding from that
+/// metadata, so a request cannot steer assertions to an unregistered endpoint
+/// or flip a registered URL to a different binding. (The previous
+/// `unsafe_allow_missing_metadata` escape hatch no longer exists upstream.)
+///
+/// SECURITY: `request_signature_verified` must reflect cryptographic
+/// verification of THIS exact request performed by your transport layer (a
+/// Redirect-binding query signature and/or an enveloped XML-DSig checked with
+/// a real `crypto.SamlVerifier` against the SP's metadata keys) - never be
+/// hand-asserted. If the request carries signature markup, or the SP metadata
+/// declares `AuthnRequestsSigned`, processing fails unless it is True; markup
+/// alone is never trusted.
 #[pyfunction]
-#[pyo3(signature = (request, sp_metadata=None, unsafe_allow_missing_metadata=false))]
+#[pyo3(signature = (request, sp_metadata, request_signature_verified=false))]
 fn process_authn_request(
     request: &AuthnRequest,
-    sp_metadata: Option<&EntityDescriptor>,
-    unsafe_allow_missing_metadata: bool,
+    sp_metadata: &EntityDescriptor,
+    request_signature_verified: bool,
 ) -> PyResult<ProcessedAuthnRequest> {
-    if sp_metadata.is_none() && !unsafe_allow_missing_metadata {
-        return Err(profile_err(
-            "process_authn_request requires SP metadata by default; pass \
-             sp_metadata or explicitly set unsafe_allow_missing_metadata=True \
-             for legacy unsafe processing",
-        ));
-    }
-
-    let sp_desc = sp_metadata.and_then(|m| m.inner.sp_sso_descriptors().first());
-    if sp_metadata.is_some() && sp_desc.is_none() && !unsafe_allow_missing_metadata {
-        return Err(profile_err(
-            "SP metadata does not contain an SPSSODescriptor",
-        ));
-    }
-    let processed = gidp::process_authn_request(&request.inner, sp_desc).map_err(profile_err)?;
+    let sp_descs = sp_metadata.inner.sp_sso_descriptors();
+    let sp_desc = sp_descs
+        .first()
+        .ok_or_else(|| profile_err("SP metadata does not contain an SPSSODescriptor"))?;
+    let processed =
+        gidp::process_authn_request(&request.inner, sp_desc, request_signature_verified)
+            .map_err(profile_err)?;
     Ok(ProcessedAuthnRequest { inner: processed })
 }
 

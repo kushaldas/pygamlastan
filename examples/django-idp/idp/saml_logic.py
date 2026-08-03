@@ -51,24 +51,84 @@ def _duplicate_preserving_form_pairs(form) -> list[tuple[str, str]]:
     return list(form)
 
 
-def decode_authn_request(method: str, query_string: str, form) -> tuple[str, str | None]:
-    """Return (saml_xml_text, relay_state) from a Redirect (GET) or POST request."""
+def decode_authn_request(method: str, query_string: str, form):
+    """Return the decoded binding message from a Redirect (GET) or POST request.
+
+    The returned object carries the SAML text and relay state, and, for the
+    Redirect binding, the detached signature (``sig_alg`` / ``signature`` /
+    ``signature_input``) needed to authenticate the request.
+    """
     if method == "POST":
-        decoded = bindings.post_decode(_duplicate_preserving_form_pairs(form))
-    else:
-        # The raw, still-percent-encoded query string (do NOT pre-decode it).
-        decoded = bindings.redirect_decode(query_string)
-    return decoded.saml_text, decoded.relay_state
+        return bindings.post_decode(_duplicate_preserving_form_pairs(form))
+    # The raw, still-percent-encoded query string (do NOT pre-decode it).
+    return bindings.redirect_decode(query_string)
 
 
 def parse_authn(saml_text: str):
     return xml.parse_authn_request(saml_text)
 
 
-def process_authn(authn, sp_metadata_xml: str):
-    """Validate the request against the SP metadata and resolve the ACS to use."""
+def _sp_verifier(entity):
+    """Build a verifier over the SP's metadata signing certificates, or None if
+    the SP publishes no signing key."""
+    for cert_der in entity.signing_certificates("sp"):
+        return crypto.SamlVerifier.from_cert(cert_der)
+    return None
+
+
+def _verify_authn_request_signature(authn, saml_text, decoded, entity) -> bool:
+    """Cryptographically verify every signature representation present on the
+    AuthnRequest against the SP's metadata keys.
+
+    Returns True when at least one representation is present and every present
+    representation verifies. Raises ValueError on an invalid signature so a
+    forgery can never be downgraded to "unsigned". Returns False when the request
+    carries no signature at all, letting ``process_authn_request`` enforce the
+    SP's ``AuthnRequestsSigned`` policy and fail closed when signing is required.
+    """
+    verifier = _sp_verifier(entity)
+    verified = False
+
+    # HTTP-Redirect binding: detached signature over the exact query string.
+    sig_alg = getattr(decoded, "sig_alg", None)
+    signature = getattr(decoded, "signature", None)
+    signature_input = getattr(decoded, "signature_input", None)
+    if sig_alg and signature and signature_input:
+        if verifier is None:
+            raise ValueError("AuthnRequest is signed but the SP publishes no signing key")
+        if not verifier.verify_redirect_query(
+            signature_input.encode("utf-8"), signature, sig_alg
+        ):
+            raise ValueError("AuthnRequest redirect signature is invalid")
+        verified = True
+
+    # Enveloped XML-DSig, bound to the request element so a wrapped signature
+    # over a sibling object cannot authenticate this request.
+    if authn.has_signature:
+        if verifier is None:
+            raise ValueError("AuthnRequest is signed but the SP publishes no signing key")
+        signed_ids: list[str] = []
+        for result in verifier.verify_all_enveloped(saml_text):
+            signed_ids.extend(result.signed_reference_ids())
+        if authn.id not in signed_ids:
+            raise ValueError("AuthnRequest signature does not cover the request element")
+        verified = True
+
+    return verified
+
+
+def process_authn(authn, saml_text: str, decoded, sp_metadata_xml: str):
+    """Verify the request signature against the SP metadata, then resolve the ACS.
+
+    Passing verified provenance (not signature markup) into
+    ``process_authn_request`` is what lets it enforce the SP's
+    ``AuthnRequestsSigned`` policy safely.
+    """
     entity = metadata.parse_entity(sp_metadata_xml)
-    return profiles.process_authn_request(authn, sp_metadata=entity)
+    signature_verified = _verify_authn_request_signature(authn, saml_text, decoded, entity)
+    return profiles.process_authn_request(
+        authn, entity, request_signature_verified=signature_verified
+    )
 
 
 # --- Outbound --------------------------------------------------------------

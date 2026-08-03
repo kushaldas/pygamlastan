@@ -8,6 +8,65 @@ security handling. `pygamlastan` is a thin PyO3 binding; most entries below
 reflect adopting a change made in `gamlastan` / `uppsala` / `bergshamra` and
 surfacing it correctly to Python.
 
+## [0.4.0] - 2026-08-03
+
+Adopts the upstream `gamlastan` 0.8 hardening release. This is an API-breaking
+release for the IdP request-processing, Single Logout, and persistent-NameID
+surfaces; see the migration notes inline.
+
+### Changed
+
+- **Upgraded the upstream library baseline to the released `gamlastan` 0.8.0.**
+  The Rust dependency now tracks `kryptering` 0.5 and pulls the matching `uppsala` 0.9 /
+  `bergshamra` 0.8 XML-security stack, all consumed from crates.io.
+- **`profiles.process_authn_request(request, sp_metadata, request_signature_verified=False)`**
+  — `sp_metadata` is now a required positional argument (the
+  `unsafe_allow_missing_metadata` escape hatch is gone) and a new
+  `request_signature_verified` argument carries transport-verified signature
+  provenance. gamlastan resolves the ACS location together with its registered
+  binding, and enforces the SP's `AuthnRequestsSigned` policy. `ProcessedAuthnRequest`
+  gains an `authn_context_comparison` getter.
+- **`logout.validate_logout_request(request, expected_issuer, signature_verified, now, clock_skew_seconds=180)`**
+  — now takes the trusted `expected_issuer` and a `signature_verified` proof;
+  the Issuer must match and an unverified request is rejected.
+- **`SpLogoutOrchestrator.handle_response(response, signature_verified)`** — now
+  requires a `signature_verified` proof; correlation alone can no longer
+  authenticate a LogoutResponse.
+- **`profiles.process_response` / `process_response_verified` / `security.validate_response`**
+  gain a `persistent_id_principal` argument. Enabling persistent-NameID
+  uniqueness (E78) now requires both a `persistent_id_store` and this independent
+  local principal; `LogoutRequest` gains a `has_signature` getter.
+- Metadata parsing (`metadata.parse_entity` / `parse_entities`) now uses
+  gamlastan's `parse_secure_metadata`, which keeps every hardening guard while
+  accepting the structural comments and processing instructions real federation
+  aggregates carry (a comment/PI that splits a signed text value is still
+  rejected).
+- Refreshed the Python dependencies of the `examples/django-idp` and
+  `examples/django-sp` apps (Django 6.0.7, cryptography >=50, gunicorn >=26,
+  whitenoise >=6.12) and the dev tooling (pytest >=9). The bundled example
+  wheels were rebuilt for `pygamlastan` 0.4.0.
+
+### Security
+
+- **Replay protection is now effectively mandatory.** gamlastan fails the
+  replay check (20) closed when no replay cache is configured, so
+  `unsafe_no_replay_cache=True` can no longer produce a valid result — it only
+  relocates the failure from the binding precondition into the validation
+  output. Supply an `InMemoryReplayCache` or a protocol implementation. The
+  pysaml2 compat SP shim now holds a process-lifetime replay cache.
+- **Persistent-NameID uniqueness (E78) is now opt-in and correctly keyed.** It
+  defaults off and, when enabled, is keyed by an application-supplied
+  `persistent_id_principal` established independently of the asserted NameID
+  (the previous behavior keyed it by the NameID itself and could never detect a
+  reassignment).
+- **The pysaml2 compat SP now cryptographically verifies inbound LogoutRequests**
+  (`Saml2Client.handle_logout_request`) against the IdP's metadata signing
+  certificate before destroying any session. When no signing certificate is
+  configured for the IdP it warns and accepts unsigned requests (dev /
+  transport-authenticated parity); configure IdP metadata with a signing
+  certificate to enforce signatures. The Redirect binding accepts the detached
+  signature via `sig_alg` / `signature` / `signed_query` keyword arguments.
+
 ## [0.3.0] - 2026-07-07
 
 ### Added
@@ -172,5 +231,4 @@ surfacing it correctly to Python.
 Initial released binding over `gamlastan` 0.5.0. See the Git history for the
 change set prior to this changelog.
 
-[0.3.0]: https://github.com/kushaldas/pygamlastan/compare/ee774370e76d5dd422ddfbe59ed264ed4367918a...v0.3.0
-[0.2.0]: https://github.com/kushaldas/pygamlastan/compare/v0.1.1...ee774370e76d5dd422ddfbe59ed264ed4367918a
+[0.2.0]: https://github.com/kushaldas/pygamlastan/compare/v0.1.1...v0.2.0

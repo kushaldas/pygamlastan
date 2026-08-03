@@ -43,12 +43,22 @@ _replay_cache = security.InMemoryReplayCache()
 class _InMemoryPersistentIdStore:
     """A minimal PersistentIdStoreProtocol implementation (demo, single process).
 
-    process_response_verified requires a store whenever the assertion carries a
-    persistent NameID: it binds (NameID, SP) to a principal and flags a *different*
-    principal later presenting the same persistent NameID (a reassignment attack).
-    Returns True if the binding is new or unchanged, False on conflict. It fails
-    closed: any error here is treated by the binding as a conflict. In-memory only
-    (not shared across gunicorn workers); back it with a database for real use.
+    Persistent-NameID uniqueness (E78) binds (NameID, SP) to a *local principal*
+    and flags a different principal later presenting the same persistent NameID
+    (a reassignment attack). Returns True if the binding is new or unchanged,
+    False on conflict, and fails closed (any error is treated as a conflict).
+    In-memory only (not shared across gunicorn workers); back it with a database
+    for real use.
+
+    This check is opt-in and is NOT wired into ``process_acs`` below, because it
+    can only be enforced correctly with a principal the SP establishes
+    *independently* of the asserted NameID (its own local account id). gamlastan
+    no longer keys the check by the NameID itself, which could never detect
+    reassignment. To enable it: set
+    ``config.enforce_persistent_id_uniqueness = True``, resolve the local account
+    for the response, and pass ``persistent_id_store=...`` together with
+    ``persistent_id_principal=<local account id>`` to
+    ``process_response_verified``.
     """
 
     def __init__(self):
@@ -253,6 +263,10 @@ def process_acs(cfg: SpConfig, form, idp, expected_request_id: str | None):
     if signing_cert is None:
         raise ValueError("the IdP metadata has no signing certificate")
     verifier = _hardened_verifier(signing_cert)
+    # Persistent-NameID uniqueness (E78) is opt-in and needs a local principal
+    # resolved independently of the asserted NameID; see _InMemoryPersistentIdStore
+    # for how to wire it. The default SecurityConfig leaves it disabled, so no
+    # store/principal is passed here.
     result = profiles.process_response_verified(
         decoded.saml_text,
         verifier,
@@ -262,7 +276,6 @@ def process_acs(cfg: SpConfig, form, idp, expected_request_id: str | None):
         expected_idp_entity_id=idp.entity_id,
         expected_request_id=expected_request_id,
         replay_cache=_replay_cache,
-        persistent_id_store=_persistent_id_store,
     )
     return result, decoded.relay_state
 

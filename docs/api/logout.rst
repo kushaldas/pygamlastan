@@ -46,11 +46,20 @@ Building responses
 Validating requests
 --------------------
 
-.. py:function:: validate_logout_request(request: pygamlastan.core.LogoutRequest, now: datetime.datetime, clock_skew_seconds: int = 180) -> None
+.. py:function:: validate_logout_request(request: pygamlastan.core.LogoutRequest, expected_issuer: str, signature_verified: bool, now: datetime.datetime, clock_skew_seconds: int = 180) -> None
 
-   Check that the NameID is present and (if set) ``NotOnOrAfter`` has not
-   expired, allowing ``clock_skew_seconds`` of skew. Raises
+   Check that the ``Issuer`` exactly matches ``expected_issuer`` (the trusted
+   peer's entity ID), the NameID is present, and (if set) ``NotOnOrAfter`` has
+   not expired, allowing ``clock_skew_seconds`` of skew. Raises
    :class:`pygamlastan.SamlProfileError` if invalid.
+
+   ``signature_verified`` must reflect cryptographic verification of *this exact
+   message* performed by your transport layer (a Redirect-binding query
+   signature and/or an enveloped XML-DSig checked with a real
+   :class:`pygamlastan.crypto.SamlVerifier` against the peer's metadata keys).
+   SLO destroys the session keyed by the request-supplied NameID, so passing a
+   hard-coded ``True`` would let anyone who guesses a NameID force-log a victim
+   out; the check fails closed when ``signature_verified`` is ``False``.
 
 SP-side orchestration
 ---------------------
@@ -69,12 +78,16 @@ SP-side orchestration
       The next request to deliver (marking that target in-progress), or ``None``
       when no target is pending.
 
-   .. py:method:: handle_response(response: pygamlastan.core.LogoutResponse) -> LogoutResponseOutcome
+   .. py:method:: handle_response(response: pygamlastan.core.LogoutResponse, signature_verified: bool) -> LogoutResponseOutcome
 
       Correlate a response with its outstanding request by ``InResponseTo`` and
-      record the outcome. Raises :class:`pygamlastan.SamlProfileError` if the
-      response matches no outstanding request, has no issuer, or its issuer does
-      not match the target (anti-spoofing).
+      record the outcome. ``signature_verified`` must reflect cryptographic
+      verification of *this exact response* by your transport layer; correlation
+      alone must not authenticate it, or a forged success would mark a
+      participant logged out while its session lives. Raises
+      :class:`pygamlastan.SamlProfileError` if the response was not verified,
+      matches no outstanding request, has no issuer, or its issuer does not match
+      the target (anti-spoofing).
 
    .. py:method:: mark_failed(entity_id: str, failure_reason: str) -> None
 

@@ -16,7 +16,11 @@ need with :func:`pygamlastan.profiles.process_authn_request`:
 
    request = xml.parse_authn_request(request_xml)
    sp_md = metadata.parse_entity(sp_metadata_xml)
-   processed = profiles.process_authn_request(request, sp_metadata=sp_md)
+   # request_signature_verified must come from verifying the request against the
+   # SP's metadata keys - see "Verifying the request signature" below.
+   processed = profiles.process_authn_request(
+       request, sp_md, request_signature_verified=signature_verified
+   )
 
    processed.request_id               # echo as InResponseTo
    processed.sp_entity_id             # who is asking
@@ -25,18 +29,48 @@ need with :func:`pygamlastan.profiles.process_authn_request`:
    processed.requested_name_id_format # the SP's preferred NameID format
    processed.force_authn              # must the user re-authenticate?
 
-SP metadata is required by default so the ACS URL/binding can be validated
-against the registered endpoints:
+SP metadata is **required**: gamlastan resolves the ACS location together with
+its registered binding from that metadata, so a request cannot steer the
+response to an unregistered endpoint or flip a registered URL to a different
+binding. There is no "missing metadata" escape hatch.
+
+Verifying the request signature
+-------------------------------
+
+``request_signature_verified`` must reflect cryptographic verification of the
+*exact* request you received, not the mere presence of a ``<ds:Signature>``.
+When the request carries signature markup, or the SP metadata declares
+``AuthnRequestsSigned``, ``process_authn_request`` fails unless it is ``True``.
+Verify the Redirect-binding query signature and/or the enveloped XML-DSig
+against the SP's metadata signing keys:
 
 .. code-block:: python
 
-   from pygamlastan import metadata
+   from pygamlastan import crypto
 
-   sp_md = metadata.parse_entity(sp_metadata_xml)
-   processed = profiles.process_authn_request(request, sp_metadata=sp_md)
+   verifier = None
+   for cert_der in sp_md.signing_certificates("sp"):
+       verifier = crypto.SamlVerifier.from_cert(cert_der)
+       break
 
-Only legacy compatibility code should use
-``unsafe_allow_missing_metadata=True``.
+   signature_verified = False
+   # HTTP-Redirect: detached signature over the exact signed query string.
+   if decoded.sig_alg and decoded.signature and decoded.signature_input:
+       if not verifier.verify_redirect_query(
+           decoded.signature_input.encode("utf-8"), decoded.signature, decoded.sig_alg
+       ):
+           raise ValueError("AuthnRequest redirect signature is invalid")
+       signature_verified = True
+   # Enveloped XML-DSig, bound to the request element.
+   if request.has_signature:
+       signed_ids = []
+       for result in verifier.verify_all_enveloped(request_xml):
+           signed_ids.extend(result.signed_reference_ids())
+       if request.id not in signed_ids:
+           raise ValueError("AuthnRequest signature does not cover the request")
+       signature_verified = True
+
+The ``examples/django-idp`` app implements exactly this flow.
 
 Resolving the SP's metadata
 ---------------------------

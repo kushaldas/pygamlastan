@@ -789,6 +789,13 @@ impl LogoutRequest {
     fn session_indexes(&self) -> Vec<String> {
         self.inner.session_indexes.clone()
     }
+    /// Whether the parsed request carried a `<ds:Signature>` element. This
+    /// records only the *presence* of signature markup; it is never proof of a
+    /// valid signature - verify with a `crypto.SamlVerifier` before trusting it.
+    #[getter]
+    fn has_signature(&self) -> bool {
+        self.inner.has_signature
+    }
     fn to_xml(&self) -> PyResult<String> {
         use gamlastan::xml::SamlSerialize;
         self.inner.to_xml_string().map_err(crate::errors::xml_err)

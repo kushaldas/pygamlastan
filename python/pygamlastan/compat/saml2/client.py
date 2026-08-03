@@ -136,6 +136,12 @@ class Saml2Client:
         self.identity_cache = identity_cache
         self.state_cache = state_cache
         self._signer: SamlSigner | None = None
+        # gamlastan now enforces assertion-replay protection unconditionally
+        # (validation check 20 fails closed without a cache), so the SP holds a
+        # process-lifetime replay cache. A single-process in-memory cache is
+        # sufficient for this shim; a multi-process deployment should supply a
+        # shared implementation.
+        self._replay_cache = _security.InMemoryReplayCache()
 
     # -- signing helper ---------------------------------------------------
 
@@ -312,7 +318,7 @@ class Saml2Client:
                     acs_url,
                     expected_idp,
                     expected_request_id=in_response_to,
-                    unsafe_no_replay_cache=True,
+                    replay_cache=self._replay_cache,
                     unsafe_no_persistent_id_store=True,
                 )
             except SamlCryptoError as e:
@@ -344,7 +350,7 @@ class Saml2Client:
                     expected_idp,
                     expected_request_id=in_response_to,
                     verified_signed_ids=[],
-                    unsafe_no_replay_cache=True,
+                    replay_cache=self._replay_cache,
                     unsafe_no_persistent_id_store=True,
                 )
             except Exception as e:
@@ -423,18 +429,50 @@ class Saml2Client:
         relay_state: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """Respond to an IdP-initiated LogoutRequest with a success response."""
+        """Respond to an IdP-initiated LogoutRequest with a success response.
+
+        SLO destroys the session keyed by the request-supplied NameID, so an
+        unauthenticated request would let anyone who guesses a NameID force-log
+        a victim out. The request is therefore cryptographically verified
+        against the trusted IdP's metadata signing certificate before any
+        session state is touched. For the HTTP-Redirect binding the signature is
+        detached over the query string; pass ``sig_alg`` and ``signature``
+        (the ``SigAlg``/``Signature`` query parameters) plus the exact
+        ``signed_query`` string (the ``SAMLRequest``/``RelayState``/``SigAlg``
+        portion the IdP signed) as keyword arguments. For POST the enveloped
+        XML-DSig is verified directly.
+        """
         sp_entity_id = self._require_entityid()
-        # Decode, parse, and validate inside one guard so transport/XML failures
-        # (bad base64/DEFLATE/UTF-8, non-XML) and validation failures all surface
-        # uniformly as ValueError("invalid LogoutRequest: ..."). validate_logout_
-        # request rejects stale/malformed requests (NameID present, NotOnOrAfter
-        # not expired, default 180s skew), so an old LogoutRequest cannot be
-        # replayed to force-log out a session.
+        # The expected IdP must be trusted, never taken from the unverified
+        # request Issuer: with several IdPs that would let a signed request from
+        # an unintended (but known) IdP authorize a logout. Use an explicit
+        # caller hint or the unambiguous configured IdP; otherwise refuse.
+        expected_idp = kwargs.get("expected_idp") or self.config.only_idp()
+        if expected_idp is None:
+            raise ValueError(
+                "Cannot determine the expected IdP for LogoutRequest processing: "
+                "more than one IdP is configured/known. Pass expected_idp=<entity id>."
+            )
+        # Decode, parse, verify, and validate inside one guard so transport/XML
+        # failures (bad base64/DEFLATE/UTF-8, non-XML), signature failures, and
+        # validation failures all surface uniformly as
+        # ValueError("invalid LogoutRequest: ..."). validate_logout_request
+        # requires the Issuer to equal the trusted IdP, proof of signature
+        # verification, a present NameID, and an unexpired NotOnOrAfter (default
+        # 180s skew), so an unsigned, misattributed, or stale LogoutRequest
+        # cannot force-log out a session.
         try:
             xml = self._decode_message(request, binding)
             parsed = _xml.parse_logout_request(xml)
-            _logout.validate_logout_request(parsed, datetime.now(timezone.utc))
+            signature_verified = self._verify_logout_request_signature(
+                xml, binding, expected_idp, parsed, kwargs
+            )
+            _logout.validate_logout_request(
+                parsed,
+                expected_idp,
+                signature_verified,
+                datetime.now(timezone.utc),
+            )
         except Exception as e:
             raise ValueError(f"invalid LogoutRequest: {e}") from e
         # Subject correlation: the LogoutRequest must target the same principal as
@@ -466,6 +504,77 @@ class Saml2Client:
         return _redirect_http_info(url)
 
     # -- helpers ----------------------------------------------------------
+
+    def _verify_logout_request_signature(
+        self,
+        xml: str,
+        binding: str,
+        expected_idp: str,
+        parsed: Any,
+        kwargs: dict[str, Any],
+    ) -> bool:
+        """Cryptographically verify an inbound LogoutRequest.
+
+        Returns True only when a signature representation is present and every
+        representation present verifies against the trusted IdP's metadata
+        signing certificate. Returns False when a trust anchor is configured but
+        no signature is available, so the caller's ``validate_logout_request``
+        fails closed. Raises on an invalid signature so a forged one cannot be
+        silently downgraded to "unsigned".
+
+        When the IdP has no signing certificate configured (metadata-less dev
+        setups, or deployments that authenticate the SLO channel at the
+        transport layer) there is no trust anchor to verify against. This mirrors
+        pysaml2's behavior and the ready IdP's ``allow_unauthenticated_backchannel``
+        escape hatch: the request is accepted with a warning rather than
+        verified. Configure IdP metadata with a signing certificate to enforce
+        LogoutRequest signatures.
+        """
+        try:
+            cert = self.config.idp_signing_cert(expected_idp)
+        except ValueError:
+            import warnings
+
+            warnings.warn(
+                "No signing certificate configured for IdP "
+                f"{expected_idp!r}; accepting the LogoutRequest without "
+                "signature verification. Configure IdP metadata with a signing "
+                "certificate to enforce LogoutRequest signatures.",
+                stacklevel=2,
+            )
+            return True
+        verifier = SamlVerifier.from_cert(cert)
+        verified = False
+
+        # HTTP-Redirect binding: detached signature over the query string. The
+        # web handler must forward the SigAlg/Signature parameters and the exact
+        # signed portion of the query it received.
+        sig_alg = kwargs.get("sig_alg")
+        signature = kwargs.get("signature")
+        signed_query = kwargs.get("signed_query")
+        if binding == BINDING_HTTP_REDIRECT and sig_alg and signature and signed_query:
+            if not verifier.verify_redirect_query(
+                signed_query.encode("utf-8"),
+                base64.b64decode(signature),
+                sig_alg,
+            ):
+                raise ValueError("LogoutRequest redirect signature is invalid")
+            verified = True
+
+        # Enveloped XML-DSig (POST binding, or a redirect request that also
+        # carries an enveloped signature). Bind the verified reference to the
+        # request ID so a wrapped signature over a sibling object cannot count.
+        if parsed.has_signature:
+            signed_ids: list[str] = []
+            for result in verifier.verify_all_enveloped(xml):
+                signed_ids.extend(result.signed_reference_ids())
+            if parsed.id not in signed_ids:
+                raise ValueError(
+                    "LogoutRequest XML signature does not cover the request element"
+                )
+            verified = True
+
+        return verified
 
     @staticmethod
     def _decode_message(message: str, binding: str) -> str:

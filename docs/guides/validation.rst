@@ -194,7 +194,12 @@ identifier from being rebound to a different local principal:
        acs_url="https://sp.example.org/acs",
        replay_cache=security.InMemoryReplayCache(),
        persistent_id_store=PersistentIdStore({}),
+       # The local account id resolved independently of the asserted NameID.
+       persistent_id_principal="local-account-42",
    )
 
 The object needs ``check_and_record(name_id, sp_entity_id, principal) -> bool``.
 Returning ``False`` or raising fails the validation check closed.
+``persistent_id_principal`` is required alongside the store: gamlastan keys the
+uniqueness check by this independent local principal, never by the asserted
+NameID (which could never detect a reassignment).

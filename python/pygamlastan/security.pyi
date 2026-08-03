@@ -72,6 +72,7 @@ def validate_response(
     now: datetime | None = ...,
     replay_cache: ReplayCacheProtocol | None = ...,
     persistent_id_store: PersistentIdStoreProtocol | None = ...,
+    persistent_id_principal: str | None = ...,
     unsafe_no_replay_cache: bool = ...,
     unsafe_no_persistent_id_store: bool = ...,
 ) -> ValidationResult: ...
