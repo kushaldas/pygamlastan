@@ -35,7 +35,8 @@ surfaces; see the migration notes inline.
 - **`profiles.process_response` / `process_response_verified` / `security.validate_response`**
   gain a `persistent_id_principal` argument. Enabling persistent-NameID
   uniqueness (E78) now requires both a `persistent_id_store` and this independent
-  local principal; `LogoutRequest` gains a `has_signature` getter.
+  local principal; `LogoutRequest` gains `has_signature` and `not_on_or_after`
+  getters.
 - Metadata parsing (`metadata.parse_entity` / `parse_entities`) now uses
   gamlastan's `parse_secure_metadata`, which keeps every hardening guard while
   accepting the structural comments and processing instructions real federation
@@ -73,7 +74,19 @@ surfaces; see the migration notes inline.
   counts: the `SAMLRequest` it carries must decode to the exact LogoutRequest
   XML under validation and its `SigAlg` must be the algorithm used for
   verification, so a valid signed query captured from another request cannot
-  vouch for a substituted one.
+  vouch for a substituted one. Verified LogoutRequests are also **one-time
+  use**: the request ID is recorded atomically in the shared replay cache
+  before the success response authorizes session destruction (retained through
+  the request's `NotOnOrAfter` window when declared, otherwise for a bounded
+  24h default), and the no-certificate development fallback applies only to an
+  IdP actually present in the SP configuration or metadata - an arbitrary
+  caller-supplied `expected_idp` is rejected instead of becoming a trusted
+  unsigned issuer.
+- **Binding output is decoded strictly before verification** in the example
+  apps and guides: the exact `saml_xml` bytes are decoded as strict UTF-8
+  instead of the lossy, display-only `saml_text` projection, so malformed
+  input is rejected rather than silently transformed into different XML than
+  the bytes the binding authenticated.
 - **Signature verification is key-rollover aware.** The compat SP (Response and
   LogoutRequest verification, via the new `SPConfig.idp_signing_certs`) and the
   django-idp example (AuthnRequest verification) now try every signing

@@ -120,11 +120,11 @@ def _logout_response(req_id: str) -> str:
 </samlp:LogoutResponse>"""
 
 
-def _logout_request(req_id: str) -> str:
+def _logout_request(req_id: str, issuer: str = IDP) -> str:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return f"""<?xml version='1.0' encoding='UTF-8'?>
 <samlp:LogoutRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="{req_id}" IssueInstant="{ts}" Version="2.0" Destination="{SLO}">
-  <saml:Issuer>{IDP}</saml:Issuer>
+  <saml:Issuer>{issuer}</saml:Issuer>
   <saml:NameID Format="{TRANSIENT}" SPNameQualifier="{SP}">abc123hash</saml:NameID>
   <samlp:SessionIndex>session-1</samlp:SessionIndex>
 </samlp:LogoutRequest>"""
@@ -1199,6 +1199,39 @@ def test_handle_logout_request_enveloped_wrong_key_rejected(rsa_keypair, rsa_key
     raw = base64.b64encode(signed_xml.encode("utf-8")).decode("ascii")
     with pytest.raises(ValueError, match="invalid LogoutRequest"):
         client.handle_logout_request(raw, _session_nameid(), BINDING_HTTP_POST)
+
+
+def test_handle_logout_request_unknown_expected_idp_rejected(client):
+    """A caller-supplied expected_idp that is neither configured nor present in
+    metadata must not reach the no-certificate development fallback: an
+    arbitrary entity ID would otherwise become a trusted unsigned issuer."""
+    unknown = "https://unknown.example/idp"
+    encoded = deflate_and_base64_encode(_logout_request("id-lr-unknown-idp", issuer=unknown))
+    with pytest.raises(ValueError, match="unknown IdP"):
+        client.handle_logout_request(
+            encoded, _session_nameid(), BINDING_HTTP_REDIRECT, expected_idp=unknown
+        )
+
+
+def test_handle_logout_request_replay_rejected(rsa_keypair, tmp_path):
+    """A captured, validly signed LogoutRequest is one-time use: a second
+    submission - even through a freshly constructed client instance - is
+    rejected as a replay instead of destroying the session again."""
+    priv, _cert_pem, cert_der_b64 = rsa_keypair
+    client1 = _signed_client(tmp_path, cert_der_b64)
+    encoded, sig_alg, signature, signed_query = _redirect_signed_logout(
+        "id-lr-replayed", priv
+    )
+    kwargs = dict(sig_alg=sig_alg, signature=signature, signed_query=signed_query)
+    info = client1.handle_logout_request(
+        encoded, _session_nameid(), BINDING_HTTP_REDIRECT, **kwargs
+    )
+    assert info["headers"][0][1].startswith(IDPSLO + "?SAMLResponse=")
+    client2 = _signed_client(tmp_path, cert_der_b64)
+    with pytest.raises(ValueError, match="replay"):
+        client2.handle_logout_request(
+            encoded, _session_nameid(), BINDING_HTTP_REDIRECT, **kwargs
+        )
 
 
 def test_handle_logout_request_no_cert_warns_and_accepts(client):

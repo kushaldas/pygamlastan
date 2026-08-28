@@ -105,11 +105,14 @@ result in one call.
 
    def complete_login(self, form_pairs, expected_request_id):
        decoded = bindings.post_decode(form_pairs)   # list[(name, value)]
+       # Strict UTF-8: `saml_text` is a lossy, display-only projection - base
+       # every security decision on the exact bytes (`saml_xml`).
+       response_xml = decoded.saml_xml.decode("utf-8")
        verifier = crypto.SamlVerifier.from_cert(self.idp_signing_cert())
        cfg = security.SecurityConfig()              # production-safe defaults
        cfg.enforce_persistent_id_uniqueness = True  # E78 is opt-in; see below
        result = profiles.process_response_verified(
-           decoded.saml_text,
+           response_xml,
            verifier,
            cfg,
            sp_entity_id=self.entity_id,

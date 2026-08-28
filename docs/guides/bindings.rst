@@ -34,7 +34,9 @@ is computed over the raw encoded parameters.
    query = urlparse(request_url).query          # "SAMLRequest=...&RelayState=..."
    decoded = bindings.redirect_decode(query)
    decoded.is_request        # bool
-   decoded.saml_text         # the message as text
+   decoded.saml_xml          # the message bytes - parse/verify THESE
+   decoded.saml_text         # lossy text projection (invalid UTF-8 becomes
+                             # U+FFFD): display/logging only, never security
    decoded.relay_state       # echoed RelayState
    decoded.sig_alg           # signature algorithm, if signed
    decoded.signature         # raw signature bytes, if signed

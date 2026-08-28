@@ -242,7 +242,7 @@ def issuer_from_post(form) -> str | None:
     """
     try:
         decoded = bindings.post_decode(_duplicate_preserving_form_pairs(form))
-        return xml.parse_response(decoded.saml_text).issuer.value
+        return xml.parse_response(decoded.saml_xml.decode("utf-8")).issuer.value
     except Exception:  # noqa: BLE001
         return None
 
@@ -259,6 +259,10 @@ def process_acs(cfg: SpConfig, form, idp, expected_request_id: str | None):
     from . import idp_resolver
 
     decoded = bindings.post_decode(_duplicate_preserving_form_pairs(form))
+    # Strict UTF-8, never decoded.saml_text: that projection is lossy (invalid
+    # bytes become U+FFFD, display/logging only). Verification must run over
+    # exactly the bytes the binding decoded; malformed input is rejected.
+    response_xml = decoded.saml_xml.decode("utf-8")
     signing_cert = idp_resolver.signing_cert_der(idp)
     if signing_cert is None:
         raise ValueError("the IdP metadata has no signing certificate")
@@ -268,7 +272,7 @@ def process_acs(cfg: SpConfig, form, idp, expected_request_id: str | None):
     # for how to wire it. The default SecurityConfig leaves it disabled, so no
     # store/principal is passed here.
     result = profiles.process_response_verified(
-        decoded.saml_text,
+        response_xml,
         verifier,
         security.SecurityConfig(),
         sp_entity_id=cfg.entity_id,

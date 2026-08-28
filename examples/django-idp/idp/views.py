@@ -73,7 +73,11 @@ def sso(request):
         decoded = sl.decode_authn_request(
             request.method, request.META.get("QUERY_STRING", ""), request.POST
         )
-        saml_text = decoded.saml_text
+        # Strict UTF-8, never decoded.saml_text: that projection is lossy
+        # (invalid bytes become U+FFFD, display/logging only), so the bytes the
+        # binding authenticated could differ from the XML parsed and verified
+        # below. Malformed input must be rejected, not transformed.
+        saml_text = decoded.saml_xml.decode("utf-8")
         relay_state = decoded.relay_state
         authn = sl.parse_authn(saml_text)
     except Exception as exc:  # noqa: BLE001

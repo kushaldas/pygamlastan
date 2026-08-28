@@ -778,6 +778,13 @@ impl LogoutRequest {
     fn reason(&self) -> Option<&str> {
         self.inner.reason.as_deref()
     }
+    /// Time at which the logout must complete (`NotOnOrAfter`), if present.
+    /// `logout.validate_logout_request` rejects the request once this has
+    /// passed; SPs also use it to bound replay-cache retention.
+    #[getter]
+    fn not_on_or_after(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.inner.not_on_or_after
+    }
     #[getter]
     fn name_id(&self) -> Option<NameId> {
         match &self.inner.name_id {

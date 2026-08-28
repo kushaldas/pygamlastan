@@ -17,7 +17,7 @@ from __future__ import annotations
 import base64
 import binascii
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from pygamlastan import bindings as _bindings
@@ -518,6 +518,24 @@ class Saml2Client:
             raise ValueError(
                 "LogoutRequest NameID does not match the session NameID"
             )
+        # One-time use: signature verification alone does not stop a captured,
+        # validly signed LogoutRequest from being submitted again - including
+        # after the user logs in anew - to force-log out the fresh session.
+        # Record the request ID atomically in the shared replay cache before
+        # the success response authorizes any session destruction; a repeat
+        # fails closed as a replay. The entry is retained through the request's
+        # own NotOnOrAfter window (plus validation skew) when it declares one;
+        # without NotOnOrAfter validation never expires the request, so a
+        # bounded 24h retention is used - IdPs should send NotOnOrAfter.
+        now = datetime.now(timezone.utc)
+        if parsed.not_on_or_after is not None:
+            replay_expiry = parsed.not_on_or_after + timedelta(seconds=180)
+        else:
+            replay_expiry = now + timedelta(hours=24)
+        if not self._replay_cache.check_and_insert(parsed.id, replay_expiry):
+            raise ValueError(
+                "LogoutRequest replay detected: this request ID was already processed"
+            )
         issuer = parsed.issuer.value if parsed.issuer is not None else self.config.only_idp()
         slo_url = self.config.single_logout_service(issuer, BINDING_HTTP_REDIRECT)
         resp = _logout.create_logout_response_success(
@@ -569,6 +587,20 @@ class Saml2Client:
         try:
             certs = self.config.idp_signing_certs(expected_idp)
         except ValueError:
+            # The development fallback below is only for an IdP this SP
+            # actually knows (configured or present in metadata) that merely
+            # lacks a signing certificate. idp_signing_certs also raises for a
+            # completely unknown entity ID, and letting that reach the
+            # fallback would turn an arbitrary caller-supplied expected_idp
+            # into a trusted unsigned issuer.
+            if (
+                expected_idp not in self.config.idp
+                and expected_idp not in self.config.metadata
+            ):
+                raise ValueError(
+                    f"unknown IdP {expected_idp!r}: not present in the SP "
+                    "configuration or metadata"
+                ) from None
             import warnings
 
             warnings.warn(
