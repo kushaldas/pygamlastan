@@ -111,13 +111,25 @@ def _verify_authn_request_signature(authn, saml_text, decoded, entity) -> bool:
     if sig_alg and signature and signature_input:
         if not verifiers:
             raise ValueError("AuthnRequest is signed but the SP publishes no signing key")
-        if not any(
-            verifier.verify_redirect_query(
-                signature_input.encode("utf-8"), signature, sig_alg
-            )
-            for verifier in verifiers
-        ):
-            raise ValueError("AuthnRequest redirect signature is invalid")
+        # verify_redirect_query can RAISE for a particular certificate (e.g. a
+        # key-type/algorithm mismatch on a retired rollover key) instead of
+        # returning False, so a plain any() would abort at the first such
+        # certificate. Try every published certificate; fail only after all
+        # were attempted.
+        input_bytes = signature_input.encode("utf-8")
+        redirect_ok = False
+        redirect_error: Exception | None = None
+        for verifier in verifiers:
+            try:
+                if verifier.verify_redirect_query(input_bytes, signature, sig_alg):
+                    redirect_ok = True
+                    break
+            except Exception as e:
+                redirect_error = e
+        if not redirect_ok:
+            raise ValueError(
+                "AuthnRequest redirect signature is invalid"
+            ) from redirect_error
         verified = True
 
     # Enveloped XML-DSig, bound to the request element so a wrapped signature

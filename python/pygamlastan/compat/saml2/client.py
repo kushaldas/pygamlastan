@@ -131,12 +131,6 @@ def _maybe_b64_to_xml(raw: str | bytes) -> str:
 # ``Saml2Client(config, replay_cache=...)``.
 _PROCESS_REPLAY_CACHE = _security.InMemoryReplayCache()
 
-# Evict expired replay entries periodically. gamlastan's check_and_insert only
-# ever replaces the SAME expired ID and validation never calls cleanup(), so
-# without this every accepted assertion/LogoutRequest ID would stay in the
-# process-lifetime cache forever and a long-running SP would grow without
-# bound. Cleanup is throttled process-wide: at most once per interval, run by
-# whichever processing path comes along next.
 # Maximum accepted age (from IssueInstant) for a LogoutRequest that declares
 # no NotOnOrAfter. validate_logout_request only bounds requests that DECLARE
 # NotOnOrAfter, so without this limit a captured request would stay valid
@@ -145,18 +139,33 @@ _PROCESS_REPLAY_CACHE = _security.InMemoryReplayCache()
 # never outlive its replay entry.
 _LOGOUT_REQUEST_MAX_AGE = timedelta(hours=24)
 
+# Evict expired replay entries periodically. gamlastan's check_and_insert only
+# ever replaces the SAME expired ID and validation never calls cleanup(), so
+# without this every accepted assertion/LogoutRequest ID would stay in the
+# process-lifetime cache forever and a long-running SP would grow without
+# bound. Cleanup is throttled PER CACHE (keyed by id()): a single process-wide
+# timestamp would let traffic on one injected cache consume every cleanup slot
+# while another cache is never cleaned. Entries are tiny and the table is
+# pruned, so churning cache instances cannot grow it without bound; an id()
+# reused after a cache is garbage-collected can at worst delay the new cache's
+# first cleanup by one interval.
 _REPLAY_CLEANUP_INTERVAL_SECONDS = 300.0
 _replay_cleanup_lock = threading.Lock()
-_last_replay_cleanup = 0.0
+_replay_cleanup_times: dict[int, float] = {}
 
 
 def _maybe_cleanup_replay_cache(cache: Any) -> None:
-    global _last_replay_cleanup
     now = time.monotonic()
+    key = id(cache)
     with _replay_cleanup_lock:
-        if now - _last_replay_cleanup < _REPLAY_CLEANUP_INTERVAL_SECONDS:
+        last = _replay_cleanup_times.get(key)
+        if last is not None and now - last < _REPLAY_CLEANUP_INTERVAL_SECONDS:
             return
-        _last_replay_cleanup = now
+        _replay_cleanup_times[key] = now
+        if len(_replay_cleanup_times) > 128:
+            cutoff = now - _REPLAY_CLEANUP_INTERVAL_SECONDS
+            for k in [k for k, t in _replay_cleanup_times.items() if t < cutoff]:
+                del _replay_cleanup_times[k]
     try:
         cache.cleanup()
     except Exception:
@@ -737,13 +746,27 @@ class Saml2Client:
                     "being processed"
                 )
             raw_signature = base64.b64decode(signature)
-            if not any(
-                verifier.verify_redirect_query(
-                    signed_query.encode("utf-8"), raw_signature, sig_alg
-                )
-                for verifier in verifiers
-            ):
-                raise ValueError("LogoutRequest redirect signature is invalid")
+            query_bytes = signed_query.encode("utf-8")
+            # verify_redirect_query can RAISE for a particular certificate
+            # (e.g. a key-type/algorithm mismatch on a retired rollover key)
+            # instead of returning False, so a plain any() would abort at the
+            # first such certificate and never reach a later valid one. Try
+            # every published certificate; fail only after all were attempted.
+            redirect_ok = False
+            redirect_error: Exception | None = None
+            for verifier in verifiers:
+                try:
+                    if verifier.verify_redirect_query(
+                        query_bytes, raw_signature, sig_alg
+                    ):
+                        redirect_ok = True
+                        break
+                except Exception as e:
+                    redirect_error = e
+            if not redirect_ok:
+                raise ValueError(
+                    "LogoutRequest redirect signature is invalid"
+                ) from redirect_error
             verified = True
 
         # Enveloped XML-DSig (POST binding, or a redirect request that also

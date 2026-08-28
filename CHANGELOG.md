@@ -65,7 +65,9 @@ surfaces; see the migration notes inline.
   The shim also evicts expired entries by scheduling a throttled
   `cleanup()` from its processing paths - gamlastan's `check_and_insert`
   never removes other entries on its own, so a long-running SP would
-  otherwise grow the cache without bound.
+  otherwise grow the cache without bound. The throttle is tracked per cache,
+  so several injected caches each receive periodic maintenance instead of one
+  cache's traffic starving the others.
 - **Persistent-NameID uniqueness (E78) is now opt-in and correctly keyed.** It
   defaults off and, when enabled, is keyed by an application-supplied
   `persistent_id_principal` established independently of the asserted NameID
@@ -114,6 +116,9 @@ surfaces; see the migration notes inline.
   django-idp example (AuthnRequest verification) now try every signing
   certificate published in metadata instead of only the first, so a signature
   produced with either the old or the new key during a rollover still verifies.
+  The Redirect loops tolerate a certificate that makes verification *raise*
+  (e.g. a key-type/algorithm mismatch on a retired key) and keep trying the
+  remaining certificates, failing only after all were attempted.
 
 ## [0.3.0] - 2026-07-07
 

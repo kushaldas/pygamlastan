@@ -69,13 +69,21 @@ against the SP's metadata signing keys:
    if any(present) and not all(present):
        raise ValueError("AuthnRequest redirect signature is incomplete")
    if decoded.sig_alg and decoded.signature and decoded.signature_input:
-       if not any(
-           v.verify_redirect_query(
-               decoded.signature_input.encode("utf-8"), decoded.signature, decoded.sig_alg
-           )
-           for v in verifiers
-       ):
-           raise ValueError("AuthnRequest redirect signature is invalid")
+       # verify_redirect_query can RAISE for a particular certificate (e.g. a
+       # key-type/algorithm mismatch on a retired rollover key) instead of
+       # returning False - try every published certificate before failing.
+       redirect_ok, redirect_error = False, None
+       for v in verifiers:
+           try:
+               if v.verify_redirect_query(
+                   decoded.signature_input.encode("utf-8"), decoded.signature, decoded.sig_alg
+               ):
+                   redirect_ok = True
+                   break
+           except Exception as e:
+               redirect_error = e
+       if not redirect_ok:
+           raise ValueError("AuthnRequest redirect signature is invalid") from redirect_error
        signature_verified = True
    # Enveloped XML-DSig, bound to the request element; accept when any single
    # trusted certificate validates it and it covers the request ID.

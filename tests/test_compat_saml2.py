@@ -1341,6 +1341,25 @@ def test_signed_response_accepted_with_rollover_cert(rsa_keypair, rsa_keypair2, 
     assert resp.session_info()["issuer"] == IDP
 
 
+def test_logout_redirect_rollover_survives_raising_verifier(ec_keypair, rsa_keypair, tmp_path):
+    """A retired certificate whose key type mismatches the signature algorithm
+    makes verify_redirect_query RAISE (SamlCryptoError, not a False return);
+    rollover verification must try the remaining published certificates
+    instead of aborting at the first one."""
+    _ec_priv, _ec_pem, ec_cert_b64 = ec_keypair
+    priv, _cert_pem, rsa_cert_b64 = rsa_keypair
+    # The EC certificate is published FIRST; the RSA signer's cert second.
+    client = _signed_client(tmp_path, ec_cert_b64, rsa_cert_b64)
+    encoded, sig_alg, signature, signed_query = _redirect_signed_logout(
+        "id-lr-ec-first", priv
+    )
+    info = client.handle_logout_request(
+        encoded, _session_nameid(), BINDING_HTTP_REDIRECT,
+        sig_alg=sig_alg, signature=signature, signed_query=signed_query,
+    )
+    assert info["headers"][0][1].startswith(IDPSLO + "?SAMLResponse=")
+
+
 def test_logout_request_verified_with_rollover_cert(rsa_keypair, rsa_keypair2, tmp_path):
     """A LogoutRequest signed with the second published rollover certificate is
     accepted, over both the Redirect and enveloped representations."""
@@ -1404,18 +1423,11 @@ def test_replay_cache_periodic_cleanup(monkeypatch):
     entries are evicted: gamlastan's check_and_insert never removes other
     entries and validation never calls cleanup(), so without this the
     process-lifetime cache would grow without bound."""
-    import time
-
     from pygamlastan.compat.saml2 import client as client_mod
 
     def force_next_cleanup():
-        # A marker safely older than the throttle interval (0.0 would be
-        # unreliable: time.monotonic() itself can be < interval after boot).
-        monkeypatch.setattr(
-            client_mod,
-            "_last_replay_cleanup",
-            time.monotonic() - 2 * client_mod._REPLAY_CLEANUP_INTERVAL_SECONDS,
-        )
+        # Clearing the per-cache table makes every cache due for cleanup.
+        monkeypatch.setattr(client_mod, "_replay_cleanup_times", {})
 
     class RecordingCache:
         def __init__(self):
@@ -1430,17 +1442,26 @@ def test_replay_cache_periodic_cleanup(monkeypatch):
     cache = RecordingCache()
     c = Saml2Client(SPConfig().load(CONF), replay_cache=cache)
 
-    def parse_once():
-        session_id, _ = c.prepare_for_authenticate(entityid=IDP, binding=BINDING_HTTP_REDIRECT)
+    def parse_once(client_obj):
+        session_id, _ = client_obj.prepare_for_authenticate(
+            entityid=IDP, binding=BINDING_HTTP_REDIRECT
+        )
         raw = base64.b64encode(_auth_response(session_id).encode("utf-8")).decode("ascii")
-        c.parse_authn_request_response(raw, BINDING_HTTP_POST, {session_id: "r"})
+        client_obj.parse_authn_request_response(raw, BINDING_HTTP_POST, {session_id: "r"})
 
-    # Response path: an expired throttle window triggers exactly one cleanup.
+    # Response path: a cache with no recorded cleanup gets exactly one.
     force_next_cleanup()
-    parse_once()
+    parse_once(c)
     assert cache.cleanups == 1
-    # Within the throttle interval, no further cleanup runs.
-    parse_once()
+    # Within the throttle interval, no further cleanup runs for this cache.
+    parse_once(c)
+    assert cache.cleanups == 1
+    # The throttle is PER CACHE: a second, independent cache is cleaned right
+    # away even though the first cache just consumed its own slot.
+    cache2 = RecordingCache()
+    c2 = Saml2Client(SPConfig().load(CONF), replay_cache=cache2)
+    parse_once(c2)
+    assert cache2.cleanups == 1
     assert cache.cleanups == 1
     # Logout path schedules cleanup too (throttle reset to force it).
     force_next_cleanup()
