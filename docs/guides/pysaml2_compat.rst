@@ -317,8 +317,10 @@ onto pygamlastan's :doc:`safe entry points <security>`:
 * **``want_response_signed=True`` (production).** The shim calls
   ``profiles.process_response_verified``, the safe-by-construction entry point
   that verifies the XML-DSig over the exact received bytes *internally* (with a
-  ``SamlVerifier`` built from the IdP's signing certificate, read from the parsed
-  metadata) and feeds only the cryptographically verified reference IDs into
+  ``SamlVerifier`` built from the IdP's signing certificates read from the parsed
+  metadata - every published certificate is tried, so a key rollover that
+  publishes the old and new certificates simultaneously keeps verifying) and
+  feeds only the cryptographically verified reference IDs into
   validation - so the shim never threads ``verified_signed_ids`` by hand and
   cannot mis-wire it. Because verification runs first, an unsigned or
   invalidly-signed Response cannot use the status path to bypass the
@@ -343,10 +345,15 @@ one is configured - an explicit ``expected_idp=<entity id>`` keyword to
 issuer, so a signed response from an unintended (but known) IdP cannot be
 accepted in a multi-IdP deployment.
 
-Replay / solicited-response protection mirrors pysaml2's SP model: the response's
+Replay / solicited-response protection is two-layered. The response's
 ``InResponseTo`` must be present in the ``outstanding`` set you pass in (an
-unknown one raises ``UnsolicitedResponse``), and you remove it once consumed. The
-binding-level replay cache is therefore not engaged by the shim; deployments that
+unknown one raises ``UnsolicitedResponse``), and you remove it once consumed -
+mirroring pysaml2's SP model. Independently, gamlastan's assertion-replay check
+(check 20) runs against a replay cache with process lifetime that is shared by
+every ``Saml2Client`` instance, so rebuilding the client per request does not
+reset replay state. A multi-process deployment should inject a shared
+implementation via ``Saml2Client(config, replay_cache=...)`` (any object with
+``check_and_insert(id, expiry) -> bool`` and ``cleanup()``). Deployments that
 need cross-request ``persistent`` NameID uniqueness can layer a persistent-id
 store separately.
 
@@ -368,6 +375,7 @@ integration depends on any of these, address it before migrating.
 
 **Deliberate divergences from pysaml2:** ``decode`` is strict (raises on foreign
 input); the signed/unsigned response path is gated entirely on
-``want_response_signed``; and there is no binding-level replay cache (the
-outstanding-query check provides solicited-response protection). These are pinned
-by the shim's test suite (``tests/test_compat_saml2.py``).
+``want_response_signed``; and assertion replay is enforced through a
+process-lifetime replay cache in addition to the outstanding-query
+solicited-response check. These are pinned by the shim's test suite
+(``tests/test_compat_saml2.py``).

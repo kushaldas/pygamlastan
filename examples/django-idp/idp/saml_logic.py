@@ -68,12 +68,15 @@ def parse_authn(saml_text: str):
     return xml.parse_authn_request(saml_text)
 
 
-def _sp_verifier(entity):
-    """Build a verifier over the SP's metadata signing certificates, or None if
-    the SP publishes no signing key."""
-    for cert_der in entity.signing_certificates("sp"):
-        return crypto.SamlVerifier.from_cert(cert_der)
-    return None
+def _sp_verifiers(entity) -> list:
+    """One verifier per SP metadata signing certificate (empty if the SP
+    publishes no signing key). During key rollover metadata publishes the old
+    and new certificates simultaneously, and a request signed by any published
+    certificate is trusted - so never verify against just the first one."""
+    return [
+        crypto.SamlVerifier.from_cert(cert_der)
+        for cert_der in entity.signing_certificates("sp")
+    ]
 
 
 def _verify_authn_request_signature(authn, saml_text, decoded, entity) -> bool:
@@ -81,12 +84,13 @@ def _verify_authn_request_signature(authn, saml_text, decoded, entity) -> bool:
     AuthnRequest against the SP's metadata keys.
 
     Returns True when at least one representation is present and every present
-    representation verifies. Raises ValueError on an invalid signature so a
-    forgery can never be downgraded to "unsigned". Returns False when the request
-    carries no signature at all, letting ``process_authn_request`` enforce the
-    SP's ``AuthnRequestsSigned`` policy and fail closed when signing is required.
+    representation verifies against one of the SP's published certificates.
+    Raises ValueError on an invalid signature so a forgery can never be
+    downgraded to "unsigned". Returns False when the request carries no
+    signature at all, letting ``process_authn_request`` enforce the SP's
+    ``AuthnRequestsSigned`` policy and fail closed when signing is required.
     """
-    verifier = _sp_verifier(entity)
+    verifiers = _sp_verifiers(entity)
     verified = False
 
     # HTTP-Redirect binding: detached signature over the exact query string.
@@ -94,10 +98,13 @@ def _verify_authn_request_signature(authn, saml_text, decoded, entity) -> bool:
     signature = getattr(decoded, "signature", None)
     signature_input = getattr(decoded, "signature_input", None)
     if sig_alg and signature and signature_input:
-        if verifier is None:
+        if not verifiers:
             raise ValueError("AuthnRequest is signed but the SP publishes no signing key")
-        if not verifier.verify_redirect_query(
-            signature_input.encode("utf-8"), signature, sig_alg
+        if not any(
+            verifier.verify_redirect_query(
+                signature_input.encode("utf-8"), signature, sig_alg
+            )
+            for verifier in verifiers
         ):
             raise ValueError("AuthnRequest redirect signature is invalid")
         verified = True
@@ -105,13 +112,30 @@ def _verify_authn_request_signature(authn, saml_text, decoded, entity) -> bool:
     # Enveloped XML-DSig, bound to the request element so a wrapped signature
     # over a sibling object cannot authenticate this request.
     if authn.has_signature:
-        if verifier is None:
+        if not verifiers:
             raise ValueError("AuthnRequest is signed but the SP publishes no signing key")
-        signed_ids: list[str] = []
-        for result in verifier.verify_all_enveloped(saml_text):
-            signed_ids.extend(result.signed_reference_ids())
-        if authn.id not in signed_ids:
-            raise ValueError("AuthnRequest signature does not cover the request element")
+        last_error: Exception | None = None
+        for verifier in verifiers:
+            try:
+                signed_ids = [
+                    ref
+                    for result in verifier.verify_all_enveloped(saml_text)
+                    for ref in result.signed_reference_ids()
+                ]
+            except Exception as e:
+                # Not signed by this (rollover) certificate; try the next.
+                last_error = e
+                continue
+            if authn.id in signed_ids:
+                break
+            last_error = ValueError(
+                "AuthnRequest signature does not cover the request element"
+            )
+        else:
+            raise ValueError(
+                "AuthnRequest signature did not verify against any published "
+                f"SP signing certificate: {last_error}"
+            ) from last_error
         verified = True
 
     return verified

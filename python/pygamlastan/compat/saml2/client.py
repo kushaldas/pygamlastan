@@ -118,6 +118,17 @@ def _maybe_b64_to_xml(raw: str | bytes) -> str:
     return text if text.lstrip().startswith("<") else candidate
 
 
+# gamlastan enforces assertion-replay protection unconditionally (validation
+# check 20 fails closed without a cache), so the SP holds a replay cache with
+# process lifetime. It must be shared by every Saml2Client instance: a
+# per-instance cache would reset whenever the client is rebuilt (e.g. one
+# client per request), letting an already-accepted assertion replay against
+# the fresh instance. A single-process in-memory cache is sufficient for this
+# shim; a multi-process deployment should inject a shared implementation via
+# ``Saml2Client(config, replay_cache=...)``.
+_PROCESS_REPLAY_CACHE = _security.InMemoryReplayCache()
+
+
 class Saml2Client:
     """pysaml2-compatible SP client backed by pygamlastan."""
 
@@ -128,6 +139,8 @@ class Saml2Client:
         state_cache: Any = None,
         virtual_organization: Any = None,
         config_loader: Any = None,
+        *,
+        replay_cache: Any = None,
     ) -> None:
         self.config = config
         # Caches are accepted for API parity; the pygamlastan SP flow derives
@@ -136,12 +149,10 @@ class Saml2Client:
         self.identity_cache = identity_cache
         self.state_cache = state_cache
         self._signer: SamlSigner | None = None
-        # gamlastan now enforces assertion-replay protection unconditionally
-        # (validation check 20 fails closed without a cache), so the SP holds a
-        # process-lifetime replay cache. A single-process in-memory cache is
-        # sufficient for this shim; a multi-process deployment should supply a
-        # shared implementation.
-        self._replay_cache = _security.InMemoryReplayCache()
+        # Default to the shared process-lifetime cache; ``replay_cache`` lets a
+        # multi-process deployment supply a shared implementation (any object
+        # with ``check_and_insert(id, expiry) -> bool`` and ``cleanup()``).
+        self._replay_cache = replay_cache if replay_cache is not None else _PROCESS_REPLAY_CACHE
 
     # -- signing helper ---------------------------------------------------
 
@@ -304,38 +315,54 @@ class Saml2Client:
             # there is no verified_signed_ids to thread (and no chance to mis-wire
             # it). `want_response_signed` maps to a required Response-envelope
             # signature; it does not imply direct Assertion signatures.
-            verifier = SamlVerifier.from_cert(self.config.idp_signing_cert(expected_idp))
             cfg = _security.SecurityConfig()
             cfg.require_signed_assertions = False
             cfg.require_signed_responses = True
             cfg.require_encrypted_assertions = False
-            try:
-                result = _profiles.process_response_verified(
-                    xml,
-                    verifier,
-                    cfg,
-                    sp_entity_id,
-                    acs_url,
-                    expected_idp,
-                    expected_request_id=in_response_to,
-                    replay_cache=self._replay_cache,
-                    unsafe_no_persistent_id_store=True,
-                )
-            except SamlCryptoError as e:
-                # Missing or invalid signature is checked first, before any
-                # status/validation logic; eduID's get_authn_response catches
-                # AssertionError as "SAML response is not verified".
-                raise AssertionError(f"SAML response is not verified: {e}") from e
-            except Exception as e:
-                # Signature verified, but validation failed. A non-Success Status
-                # surfaces as StatusError for pysaml2 parity (only after the
-                # signature has been verified); anything else stays AssertionError.
-                if not parsed.is_success():
-                    raise StatusError(
-                        "SAML response status not Success: "
-                        f"{parsed.status.status_code.value}"
-                    ) from e
-                raise AssertionError(f"SAML response validation failed: {e}") from e
+            # During key rollover the IdP metadata publishes the old and new
+            # signing certificates simultaneously, so try each until one
+            # verifies cryptographically. A post-verification validation
+            # failure is raised immediately: the signature already checked out
+            # under that trusted certificate, and another certificate cannot
+            # change the validation outcome.
+            result = None
+            crypto_error: SamlCryptoError | None = None
+            for cert in self.config.idp_signing_certs(expected_idp):
+                verifier = SamlVerifier.from_cert(cert)
+                try:
+                    result = _profiles.process_response_verified(
+                        xml,
+                        verifier,
+                        cfg,
+                        sp_entity_id,
+                        acs_url,
+                        expected_idp,
+                        expected_request_id=in_response_to,
+                        replay_cache=self._replay_cache,
+                        unsafe_no_persistent_id_store=True,
+                    )
+                    break
+                except SamlCryptoError as e:
+                    # Missing signature, or not signed by this certificate:
+                    # remember the failure and try the next published one.
+                    crypto_error = e
+                except Exception as e:
+                    # Signature verified, but validation failed. A non-Success Status
+                    # surfaces as StatusError for pysaml2 parity (only after the
+                    # signature has been verified); anything else stays AssertionError.
+                    if not parsed.is_success():
+                        raise StatusError(
+                            "SAML response status not Success: "
+                            f"{parsed.status.status_code.value}"
+                        ) from e
+                    raise AssertionError(f"SAML response validation failed: {e}") from e
+            if result is None:
+                # No published certificate verified the signature; eduID's
+                # get_authn_response catches AssertionError as "SAML response
+                # is not verified".
+                raise AssertionError(
+                    f"SAML response is not verified: {crypto_error}"
+                ) from crypto_error
         else:
             # Unsigned responses are only acceptable in dev/test, where the
             # settings explicitly set want_response_signed=False.
@@ -516,9 +543,11 @@ class Saml2Client:
         """Cryptographically verify an inbound LogoutRequest.
 
         Returns True only when a signature representation is present and every
-        representation present verifies against the trusted IdP's metadata
-        signing certificate. Returns False when a trust anchor is configured but
-        no signature is available, so the caller's ``validate_logout_request``
+        representation present verifies against one of the trusted IdP's
+        metadata signing certificates (rollover metadata publishes the old and
+        new certificates simultaneously, and any published certificate is
+        trusted). Returns False when a trust anchor is configured but no
+        signature is available, so the caller's ``validate_logout_request``
         fails closed. Raises on an invalid signature so a forged one cannot be
         silently downgraded to "unsigned".
 
@@ -531,7 +560,7 @@ class Saml2Client:
         LogoutRequest signatures.
         """
         try:
-            cert = self.config.idp_signing_cert(expected_idp)
+            certs = self.config.idp_signing_certs(expected_idp)
         except ValueError:
             import warnings
 
@@ -543,20 +572,23 @@ class Saml2Client:
                 stacklevel=2,
             )
             return True
-        verifier = SamlVerifier.from_cert(cert)
+        verifiers = [SamlVerifier.from_cert(cert) for cert in certs]
         verified = False
 
         # HTTP-Redirect binding: detached signature over the query string. The
         # web handler must forward the SigAlg/Signature parameters and the exact
-        # signed portion of the query it received.
+        # signed portion of the query it received. Any published (rollover)
+        # certificate may have produced the signature.
         sig_alg = kwargs.get("sig_alg")
         signature = kwargs.get("signature")
         signed_query = kwargs.get("signed_query")
         if binding == BINDING_HTTP_REDIRECT and sig_alg and signature and signed_query:
-            if not verifier.verify_redirect_query(
-                signed_query.encode("utf-8"),
-                base64.b64decode(signature),
-                sig_alg,
+            raw_signature = base64.b64decode(signature)
+            if not any(
+                verifier.verify_redirect_query(
+                    signed_query.encode("utf-8"), raw_signature, sig_alg
+                )
+                for verifier in verifiers
             ):
                 raise ValueError("LogoutRequest redirect signature is invalid")
             verified = True
@@ -565,13 +597,28 @@ class Saml2Client:
         # carries an enveloped signature). Bind the verified reference to the
         # request ID so a wrapped signature over a sibling object cannot count.
         if parsed.has_signature:
-            signed_ids: list[str] = []
-            for result in verifier.verify_all_enveloped(xml):
-                signed_ids.extend(result.signed_reference_ids())
-            if parsed.id not in signed_ids:
-                raise ValueError(
+            last_error: Exception | None = None
+            for verifier in verifiers:
+                try:
+                    signed_ids = [
+                        ref
+                        for result in verifier.verify_all_enveloped(xml)
+                        for ref in result.signed_reference_ids()
+                    ]
+                except Exception as e:
+                    # Not signed by this (rollover) certificate; try the next.
+                    last_error = e
+                    continue
+                if parsed.id in signed_ids:
+                    break
+                last_error = ValueError(
                     "LogoutRequest XML signature does not cover the request element"
                 )
+            else:
+                raise ValueError(
+                    "LogoutRequest XML signature did not verify against any "
+                    f"published IdP signing certificate: {last_error}"
+                ) from last_error
             verified = True
 
         return verified

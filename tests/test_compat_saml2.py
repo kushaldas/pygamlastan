@@ -9,6 +9,7 @@ eduID integration is verified separately in the eduid-developer env.
 """
 
 import base64
+import itertools
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 
@@ -64,16 +65,31 @@ CONF = {
 }
 
 
-def _auth_response(req_id: str) -> str:
+# The compat SP's replay cache is deliberately process-scoped (shared across
+# Saml2Client instances), so every generated Response/Assertion needs unique
+# IDs or later tests would be rejected as replays of earlier ones.
+_id_counter = itertools.count(1)
+
+
+def _fresh_ids() -> tuple[str, str]:
+    n = next(_id_counter)
+    return f"id-resp-{n}", f"id-assert-{n}"
+
+
+def _auth_response(req_id: str, resp_id: str | None = None, assert_id: str | None = None) -> str:
+    if resp_id is None or assert_id is None:
+        fresh_resp, fresh_assert = _fresh_ids()
+        resp_id = resp_id or fresh_resp
+        assert_id = assert_id or fresh_assert
     now = datetime.now(timezone.utc)
     ts = (now - timedelta(seconds=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
     tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     return f"""<?xml version='1.0' encoding='UTF-8'?>
-<samlp:Response xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" Destination="{ACS}" ID="id-resp-1" InResponseTo="{req_id}" IssueInstant="{ts}" Version="2.0">
+<samlp:Response xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" Destination="{ACS}" ID="{resp_id}" InResponseTo="{req_id}" IssueInstant="{ts}" Version="2.0">
   <saml:Issuer Format="urn:oasis:names:tc:SAML:2.0:nameid-format:entity">{IDP}</saml:Issuer>
   <samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>
-  <saml:Assertion ID="id-assert-1" IssueInstant="{ts}" Version="2.0">
+  <saml:Assertion ID="{assert_id}" IssueInstant="{ts}" Version="2.0">
     <saml:Issuer Format="urn:oasis:names:tc:SAML:2.0:nameid-format:entity">{IDP}</saml:Issuer>
     <saml:Subject>
       <saml:NameID Format="{TRANSIENT}" SPNameQualifier="{SP}">abc123hash</saml:NameID>
@@ -114,10 +130,12 @@ def _logout_request(req_id: str) -> str:
 </samlp:LogoutRequest>"""
 
 
-def _failed_response(req_id: str) -> str:
+def _failed_response(req_id: str, resp_id: str | None = None) -> str:
+    if resp_id is None:
+        resp_id = "fail-" + _fresh_ids()[0]
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return f"""<?xml version='1.0' encoding='UTF-8'?>
-<samlp:Response xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" Destination="{ACS}" ID="id-resp-fail" InResponseTo="{req_id}" IssueInstant="{ts}" Version="2.0">
+<samlp:Response xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" Destination="{ACS}" ID="{resp_id}" InResponseTo="{req_id}" IssueInstant="{ts}" Version="2.0">
   <saml:Issuer Format="urn:oasis:names:tc:SAML:2.0:nameid-format:entity">{IDP}</saml:Issuer>
   <samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Responder"/></samlp:Status>
 </samlp:Response>"""
@@ -141,23 +159,30 @@ def _signature_template(elem_id: str, cert_b64: str) -> str:
 
 def _signed_auth_response(req_id: str, cert_b64: str, priv: bytes) -> str:
     """The test AuthnResponse with an enveloped signature over the Response root."""
-    unsigned = _auth_response(req_id)
-    template = _signature_template("id-resp-1", cert_b64)
+    resp_id, assert_id = _fresh_ids()
+    unsigned = _auth_response(req_id, resp_id=resp_id, assert_id=assert_id)
+    template = _signature_template(resp_id, cert_b64)
     marker = "</saml:Issuer>"  # the Response's Issuer is the first in the doc
     idx = unsigned.index(marker) + len(marker)
     spliced = unsigned[:idx] + template + unsigned[idx:]
     return crypto.SamlSigner.from_pem(priv).sign_enveloped(spliced)
 
 
-def _idp_metadata(cert_der_b64: str) -> str:
+def _idp_metadata(*cert_der_b64s: str) -> str:
+    """IdP metadata publishing one signing KeyDescriptor per certificate (key
+    rollover publishes several simultaneously)."""
+    key_descriptors = "".join(
+        f"""<md:KeyDescriptor use="signing">
+      <ds:KeyInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+        <ds:X509Data><ds:X509Certificate>{cert}</ds:X509Certificate></ds:X509Data>
+      </ds:KeyInfo>
+    </md:KeyDescriptor>"""
+        for cert in cert_der_b64s
+    )
     return f"""<?xml version="1.0"?>
 <md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="{IDP}">
   <md:IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
-    <md:KeyDescriptor use="signing">
-      <ds:KeyInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
-        <ds:X509Data><ds:X509Certificate>{cert_der_b64}</ds:X509Certificate></ds:X509Data>
-      </ds:KeyInfo>
-    </md:KeyDescriptor>
+    {key_descriptors}
     <md:SingleLogoutService Binding="{BINDING_HTTP_REDIRECT}" Location="{IDPSLO}"/>
     <md:SingleSignOnService Binding="{BINDING_HTTP_REDIRECT}" Location="{SSO}"/>
   </md:IDPSSODescriptor>
@@ -428,9 +453,9 @@ def test_ava_multivalue_and_extra_attributes():
 # Signed-response path (what real eduID deployments use)
 # --------------------------------------------------------------------------- #
 
-def _signed_client(tmp_path, cert_der_b64):
+def _signed_client(tmp_path, *cert_der_b64s):
     md_path = tmp_path / "idp_metadata.xml"
-    md_path.write_text(_idp_metadata(cert_der_b64), encoding="utf-8")
+    md_path.write_text(_idp_metadata(*cert_der_b64s), encoding="utf-8")
     conf = {
         "entityid": SP,
         "service": {
@@ -828,8 +853,9 @@ def test_handle_logout_request_missing_entityid_raises():
 # --------------------------------------------------------------------------- #
 
 def _signed_failed_response(req_id: str, cert_b64: str, priv: bytes) -> str:
-    unsigned = _failed_response(req_id)
-    template = _signature_template("id-resp-fail", cert_b64)
+    resp_id = "fail-" + _fresh_ids()[0]
+    unsigned = _failed_response(req_id, resp_id=resp_id)
+    template = _signature_template(resp_id, cert_b64)
     marker = "</saml:Issuer>"
     idx = unsigned.index(marker) + len(marker)
     spliced = unsigned[:idx] + template + unsigned[idx:]
@@ -1022,3 +1048,206 @@ def test_metadata_signing_flags_reflect_config(rsa_keypair, tmp_path):
     xml2 = entity_descriptor(SPConfig().load(conf2)).to_xml()
     assert 'AuthnRequestsSigned="false"' in xml2
     assert 'WantAssertionsSigned="false"' in xml2
+
+
+# --------------------------------------------------------------------------- #
+# LogoutRequest signature verification (session-destroying path)
+# --------------------------------------------------------------------------- #
+
+def _session_nameid() -> NameID:
+    return NameID(text="abc123hash", format=TRANSIENT, sp_name_qualifier=SP)
+
+
+def _redirect_signed_logout(req_id: str, priv: bytes) -> tuple[str, str, str, str]:
+    """A LogoutRequest over HTTP-Redirect with a valid detached signature.
+
+    Returns (encoded_request, sig_alg, signature_b64, signed_query) - the
+    values a web handler would forward from the query string.
+    """
+    signer = crypto.SamlSigner.from_pem(priv)
+    sig_alg = signer.signature_method_uri()
+    encoded = deflate_and_base64_encode(_logout_request(req_id))
+    signed_query = (
+        "SAMLRequest=" + urllib.parse.quote(encoded, safe="")
+        + "&SigAlg=" + urllib.parse.quote(sig_alg, safe="")
+    )
+    signature = signer.sign_redirect_query(signed_query.encode("utf-8"), sig_alg)
+    return encoded, sig_alg, base64.b64encode(signature).decode("ascii"), signed_query
+
+
+def _enveloped_signed_logout(req_id: str, cert_b64: str, priv: bytes) -> str:
+    """A LogoutRequest carrying an enveloped XML-DSig over the request element."""
+    unsigned = _logout_request(req_id)
+    template = _signature_template(req_id, cert_b64)
+    marker = "</saml:Issuer>"
+    idx = unsigned.index(marker) + len(marker)
+    return crypto.SamlSigner.from_pem(priv).sign_enveloped(
+        unsigned[:idx] + template + unsigned[idx:]
+    )
+
+
+def test_handle_logout_request_valid_redirect_signature(rsa_keypair, tmp_path):
+    """A LogoutRequest whose detached Redirect signature verifies against the
+    IdP metadata certificate destroys the session (returns the response)."""
+    priv, _cert_pem, cert_der_b64 = rsa_keypair
+    client = _signed_client(tmp_path, cert_der_b64)
+    encoded, sig_alg, signature, signed_query = _redirect_signed_logout(
+        "id-lr-redirect-ok", priv
+    )
+    info = client.handle_logout_request(
+        encoded, _session_nameid(), BINDING_HTTP_REDIRECT,
+        sig_alg=sig_alg, signature=signature, signed_query=signed_query,
+    )
+    assert info["headers"][0][1].startswith(IDPSLO + "?SAMLResponse=")
+
+
+def test_handle_logout_request_invalid_redirect_signature(rsa_keypair, tmp_path):
+    """A forged/garbage Redirect signature is rejected, not downgraded to
+    'unsigned'."""
+    priv, _cert_pem, cert_der_b64 = rsa_keypair
+    client = _signed_client(tmp_path, cert_der_b64)
+    encoded, sig_alg, _signature, signed_query = _redirect_signed_logout(
+        "id-lr-redirect-bad", priv
+    )
+    forged = base64.b64encode(b"\x00" * 256).decode("ascii")
+    with pytest.raises(ValueError, match="invalid LogoutRequest"):
+        client.handle_logout_request(
+            encoded, _session_nameid(), BINDING_HTTP_REDIRECT,
+            sig_alg=sig_alg, signature=forged, signed_query=signed_query,
+        )
+
+
+def test_handle_logout_request_tampered_signed_query_rejected(rsa_keypair, tmp_path):
+    """A valid signature over a DIFFERENT query (e.g. another request spliced in)
+    does not verify."""
+    priv, _cert_pem, cert_der_b64 = rsa_keypair
+    client = _signed_client(tmp_path, cert_der_b64)
+    _enc, sig_alg, signature, _query = _redirect_signed_logout("id-lr-original", priv)
+    other = deflate_and_base64_encode(_logout_request("id-lr-substituted"))
+    other_query = (
+        "SAMLRequest=" + urllib.parse.quote(other, safe="")
+        + "&SigAlg=" + urllib.parse.quote(sig_alg, safe="")
+    )
+    with pytest.raises(ValueError, match="invalid LogoutRequest"):
+        client.handle_logout_request(
+            other, _session_nameid(), BINDING_HTTP_REDIRECT,
+            sig_alg=sig_alg, signature=signature, signed_query=other_query,
+        )
+
+
+def test_handle_logout_request_unsigned_rejected_when_cert_configured(rsa_keypair, tmp_path):
+    """With an IdP signing certificate configured, an unsigned LogoutRequest
+    fails closed instead of destroying the session."""
+    _priv, _cert_pem, cert_der_b64 = rsa_keypair
+    client = _signed_client(tmp_path, cert_der_b64)
+    encoded = deflate_and_base64_encode(_logout_request("id-lr-unsigned"))
+    with pytest.raises(ValueError, match="invalid LogoutRequest"):
+        client.handle_logout_request(encoded, _session_nameid(), BINDING_HTTP_REDIRECT)
+
+
+def test_handle_logout_request_enveloped_signature_post(rsa_keypair, tmp_path):
+    """A POST LogoutRequest with an enveloped XML-DSig bound to the request ID
+    verifies and is accepted."""
+    priv, _cert_pem, cert_der_b64 = rsa_keypair
+    client = _signed_client(tmp_path, cert_der_b64)
+    signed_xml = _enveloped_signed_logout("id-lr-enveloped-ok", cert_der_b64, priv)
+    raw = base64.b64encode(signed_xml.encode("utf-8")).decode("ascii")
+    info = client.handle_logout_request(raw, _session_nameid(), BINDING_HTTP_POST)
+    assert info["headers"][0][1].startswith(IDPSLO + "?SAMLResponse=")
+
+
+def test_handle_logout_request_enveloped_wrong_key_rejected(rsa_keypair, rsa_keypair2, tmp_path):
+    """An enveloped signature by a key NOT published in the IdP metadata is
+    rejected."""
+    _priv1, _pem1, cert1_der_b64 = rsa_keypair
+    priv2, _pem2, cert2_der_b64 = rsa_keypair2
+    client = _signed_client(tmp_path, cert1_der_b64)  # trusts only cert 1
+    signed_xml = _enveloped_signed_logout("id-lr-wrong-key", cert2_der_b64, priv2)
+    raw = base64.b64encode(signed_xml.encode("utf-8")).decode("ascii")
+    with pytest.raises(ValueError, match="invalid LogoutRequest"):
+        client.handle_logout_request(raw, _session_nameid(), BINDING_HTTP_POST)
+
+
+def test_handle_logout_request_no_cert_warns_and_accepts(client):
+    """The explicit development opt-out: with no signing certificate configured
+    for the IdP, an unsigned LogoutRequest is accepted with a warning."""
+    encoded = deflate_and_base64_encode(_logout_request("id-lr-no-cert"))
+    with pytest.warns(UserWarning, match="No signing certificate"):
+        info = client.handle_logout_request(encoded, _session_nameid(), BINDING_HTTP_REDIRECT)
+    assert info["headers"][0][1].startswith(IDPSLO + "?SAMLResponse=")
+
+
+# --------------------------------------------------------------------------- #
+# Key rollover: metadata publishing several signing certificates
+# --------------------------------------------------------------------------- #
+
+def test_signed_response_accepted_with_rollover_cert(rsa_keypair, rsa_keypair2, tmp_path):
+    """Metadata publishes two signing certificates (rollover); a Response signed
+    with the SECOND one still verifies (not just the first)."""
+    priv, _cert_pem, cert_der_b64 = rsa_keypair
+    _priv2, _pem2, other_cert_b64 = rsa_keypair2
+    # The signer's certificate is listed second in metadata.
+    client = _signed_client(tmp_path, other_cert_b64, cert_der_b64)
+    session_id, _ = client.prepare_for_authenticate(binding=BINDING_HTTP_REDIRECT)
+    signed = _signed_auth_response(session_id, cert_der_b64, priv)
+    raw = base64.b64encode(signed.encode("utf-8")).decode("ascii")
+    resp = client.parse_authn_request_response(raw, BINDING_HTTP_POST, {session_id: "r"})
+    assert resp.session_info()["issuer"] == IDP
+
+
+def test_logout_request_verified_with_rollover_cert(rsa_keypair, rsa_keypair2, tmp_path):
+    """A LogoutRequest signed with the second published rollover certificate is
+    accepted, over both the Redirect and enveloped representations."""
+    priv, _cert_pem, cert_der_b64 = rsa_keypair
+    _priv2, _pem2, other_cert_b64 = rsa_keypair2
+    client = _signed_client(tmp_path, other_cert_b64, cert_der_b64)
+    # Redirect: detached signature by the second cert's key.
+    encoded, sig_alg, signature, signed_query = _redirect_signed_logout(
+        "id-lr-rollover-redirect", priv
+    )
+    info = client.handle_logout_request(
+        encoded, _session_nameid(), BINDING_HTTP_REDIRECT,
+        sig_alg=sig_alg, signature=signature, signed_query=signed_query,
+    )
+    assert info["headers"][0][1].startswith(IDPSLO + "?SAMLResponse=")
+    # Enveloped: XML-DSig by the second cert's key.
+    signed_xml = _enveloped_signed_logout("id-lr-rollover-env", cert_der_b64, priv)
+    raw = base64.b64encode(signed_xml.encode("utf-8")).decode("ascii")
+    info = client.handle_logout_request(raw, _session_nameid(), BINDING_HTTP_POST)
+    assert info["headers"][0][1].startswith(IDPSLO + "?SAMLResponse=")
+
+
+# --------------------------------------------------------------------------- #
+# Replay-cache scoping
+# --------------------------------------------------------------------------- #
+
+def test_replay_rejected_across_client_instances():
+    """The replay cache is process-scoped: an assertion accepted through one
+    Saml2Client instance is rejected by a freshly constructed one (e.g. a
+    per-request client)."""
+    client1 = Saml2Client(SPConfig().load(CONF))
+    session_id, _ = client1.prepare_for_authenticate(entityid=IDP, binding=BINDING_HTTP_REDIRECT)
+    raw = base64.b64encode(_auth_response(session_id).encode("utf-8")).decode("ascii")
+    client1.parse_authn_request_response(raw, BINDING_HTTP_POST, {session_id: "r"})
+    client2 = Saml2Client(SPConfig().load(CONF))
+    with pytest.raises(AssertionError):
+        client2.parse_authn_request_response(raw, BINDING_HTTP_POST, {session_id: "r"})
+
+
+def test_replay_cache_injectable():
+    """A caller-supplied replay cache replaces the process-level one, so a
+    multi-process deployment can share replay state its own way."""
+    from pygamlastan import security
+
+    client1 = Saml2Client(SPConfig().load(CONF), replay_cache=security.InMemoryReplayCache())
+    session_id, _ = client1.prepare_for_authenticate(entityid=IDP, binding=BINDING_HTTP_REDIRECT)
+    raw = base64.b64encode(_auth_response(session_id).encode("utf-8")).decode("ascii")
+    client1.parse_authn_request_response(raw, BINDING_HTTP_POST, {session_id: "r"})
+    # The same response replays against the same injected cache...
+    with pytest.raises(AssertionError):
+        client1.parse_authn_request_response(raw, BINDING_HTTP_POST, {session_id: "r"})
+    # ...but a client with its own isolated cache accepts it: the injected
+    # cache, not the process cache, was consulted.
+    client2 = Saml2Client(SPConfig().load(CONF), replay_cache=security.InMemoryReplayCache())
+    resp = client2.parse_authn_request_response(raw, BINDING_HTTP_POST, {session_id: "r"})
+    assert resp.session_id() == session_id

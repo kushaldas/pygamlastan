@@ -53,7 +53,10 @@ surfaces; see the migration notes inline.
   `unsafe_no_replay_cache=True` can no longer produce a valid result — it only
   relocates the failure from the binding precondition into the validation
   output. Supply an `InMemoryReplayCache` or a protocol implementation. The
-  pysaml2 compat SP shim now holds a process-lifetime replay cache.
+  pysaml2 compat SP shim now holds a replay cache shared across every
+  `Saml2Client` instance for the lifetime of the process (rebuilding the client
+  per request no longer resets replay state); multi-process deployments can
+  inject a shared implementation via `Saml2Client(config, replay_cache=...)`.
 - **Persistent-NameID uniqueness (E78) is now opt-in and correctly keyed.** It
   defaults off and, when enabled, is keyed by an application-supplied
   `persistent_id_principal` established independently of the asserted NameID
@@ -61,11 +64,16 @@ surfaces; see the migration notes inline.
   reassignment).
 - **The pysaml2 compat SP now cryptographically verifies inbound LogoutRequests**
   (`Saml2Client.handle_logout_request`) against the IdP's metadata signing
-  certificate before destroying any session. When no signing certificate is
+  certificates before destroying any session. When no signing certificate is
   configured for the IdP it warns and accepts unsigned requests (dev /
   transport-authenticated parity); configure IdP metadata with a signing
   certificate to enforce signatures. The Redirect binding accepts the detached
   signature via `sig_alg` / `signature` / `signed_query` keyword arguments.
+- **Signature verification is key-rollover aware.** The compat SP (Response and
+  LogoutRequest verification, via the new `SPConfig.idp_signing_certs`) and the
+  django-idp example (AuthnRequest verification) now try every signing
+  certificate published in metadata instead of only the first, so a signature
+  produced with either the old or the new key during a rollover still verifies.
 
 ## [0.3.0] - 2026-07-07
 
@@ -231,4 +239,6 @@ surfaces; see the migration notes inline.
 Initial released binding over `gamlastan` 0.5.0. See the Git history for the
 change set prior to this changelog.
 
-[0.2.0]: https://github.com/kushaldas/pygamlastan/compare/v0.1.1...v0.2.0
+[0.4.0]: https://github.com/kushaldas/pygamlastan/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/kushaldas/pygamlastan/compare/ee774370e76d5dd422ddfbe59ed264ed4367918a...v0.3.0
+[0.2.0]: https://github.com/kushaldas/pygamlastan/compare/v0.1.1...ee774370e76d5dd422ddfbe59ed264ed4367918a

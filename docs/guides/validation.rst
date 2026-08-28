@@ -169,9 +169,11 @@ adapter fails closed: if your method raises, the id is treated as a replay.
 Persistent NameID store
 -----------------------
 
-With ``enforce_persistent_id_uniqueness`` enabled (the default), a response that
-carries a persistent ``NameID`` also needs a store that prevents the same
-identifier from being rebound to a different local principal:
+``enforce_persistent_id_uniqueness`` is opt-in (it defaults to off); enable it
+explicitly when your SP correlates persistent ``NameID`` values with local
+accounts. With it enabled, a response that carries a persistent ``NameID`` also
+needs a store that prevents the same identifier from being rebound to a
+different local principal:
 
 .. code-block:: python
 

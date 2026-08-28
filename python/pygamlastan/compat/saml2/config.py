@@ -130,8 +130,13 @@ class SPConfig:
                     return ep.location
         raise ValueError(f"no SingleLogoutService for {idp_entity_id!r} with binding {binding}")
 
-    def idp_signing_cert(self, idp_entity_id: str | None) -> bytes:
-        """First IdP signing certificate (DER) from parsed metadata."""
+    def idp_signing_certs(self, idp_entity_id: str | None) -> list[bytes]:
+        """All IdP signing certificates (DER) from parsed metadata.
+
+        During key rollover an IdP commonly publishes the old and new signing
+        certificates simultaneously, so callers must be prepared to verify a
+        signature against any of them - never just the first.
+        """
         idp_entity_id = idp_entity_id or self.only_idp()
         ed = self.metadata.get(idp_entity_id or "")
         if ed is None:
@@ -139,7 +144,15 @@ class SPConfig:
         certs = ed.signing_certificates("idp")
         if not certs:
             raise ValueError(f"IdP {idp_entity_id!r} metadata has no signing certificate")
-        return certs[0]
+        return list(certs)
+
+    def idp_signing_cert(self, idp_entity_id: str | None) -> bytes:
+        """First IdP signing certificate (DER) from parsed metadata.
+
+        Prefer :meth:`idp_signing_certs` for signature verification: verifying
+        against only the first certificate breaks during key rollover.
+        """
+        return self.idp_signing_certs(idp_entity_id)[0]
 
 
 # Acceptable alias: pysaml2 also exposes a generic Config.
