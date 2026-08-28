@@ -8,7 +8,7 @@ security handling. `pygamlastan` is a thin PyO3 binding; most entries below
 reflect adopting a change made in `gamlastan` / `uppsala` / `bergshamra` and
 surfacing it correctly to Python.
 
-## [0.4.0] - 2026-08-03
+## [0.4.0] - 2026-08-28
 
 Adopts the upstream `gamlastan` 0.8 hardening release. This is an API-breaking
 release for the IdP request-processing, Single Logout, and persistent-NameID
