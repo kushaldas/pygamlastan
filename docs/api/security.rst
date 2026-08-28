@@ -104,7 +104,12 @@ and the replay cache. See the :doc:`../guides/validation` guide.
    ``unsafe_no_replay_cache=True`` only relocates that failure into the returned
    result. If persistent NameID uniqueness is enabled and the response carries a
    persistent NameID, ``persistent_id_store`` **and** ``persistent_id_principal``
-   are also required unless ``unsafe_no_persistent_id_store=True`` is explicit.
+   are also required. ``unsafe_no_persistent_id_store=True`` is **not** a waiver:
+   it only skips this binding-level precondition, and gamlastan then fails the
+   uniqueness check (26) closed because no store/principal reaches it - the
+   failure moves from a raised error into the returned result, which can never
+   be valid. To process responses without a store, leave
+   ``enforce_persistent_id_uniqueness`` off instead.
 
 .. py:class:: ValidationResult
 

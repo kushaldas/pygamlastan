@@ -48,26 +48,44 @@ against the SP's metadata signing keys:
 
    from pygamlastan import crypto
 
-   verifier = None
-   for cert_der in sp_md.signing_certificates("sp"):
-       verifier = crypto.SamlVerifier.from_cert(cert_der)
-       break
+   # One verifier per published signing certificate: during key rollover the
+   # SP's metadata publishes the old and new certificates simultaneously, and
+   # a request signed with ANY published certificate is trusted - never verify
+   # against just the first one.
+   verifiers = [
+       crypto.SamlVerifier.from_cert(cert_der)
+       for cert_der in sp_md.signing_certificates("sp")
+   ]
 
    signature_verified = False
    # HTTP-Redirect: detached signature over the exact signed query string.
    if decoded.sig_alg and decoded.signature and decoded.signature_input:
-       if not verifier.verify_redirect_query(
-           decoded.signature_input.encode("utf-8"), decoded.signature, decoded.sig_alg
+       if not any(
+           v.verify_redirect_query(
+               decoded.signature_input.encode("utf-8"), decoded.signature, decoded.sig_alg
+           )
+           for v in verifiers
        ):
            raise ValueError("AuthnRequest redirect signature is invalid")
        signature_verified = True
-   # Enveloped XML-DSig, bound to the request element.
+   # Enveloped XML-DSig, bound to the request element; accept when any single
+   # trusted certificate validates it and it covers the request ID.
    if request.has_signature:
-       signed_ids = []
-       for result in verifier.verify_all_enveloped(request_xml):
-           signed_ids.extend(result.signed_reference_ids())
-       if request.id not in signed_ids:
-           raise ValueError("AuthnRequest signature does not cover the request")
+       for v in verifiers:
+           try:
+               signed_ids = [
+                   ref
+                   for result in v.verify_all_enveloped(request_xml)
+                   for ref in result.signed_reference_ids()
+               ]
+           except Exception:
+               continue    # not signed by this (rollover) certificate
+           if request.id in signed_ids:
+               break
+       else:
+           raise ValueError(
+               "AuthnRequest signature does not verify or does not cover the request"
+           )
        signature_verified = True
 
 The ``examples/django-idp`` app implements exactly this flow.

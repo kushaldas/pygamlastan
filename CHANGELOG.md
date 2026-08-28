@@ -68,7 +68,12 @@ surfaces; see the migration notes inline.
   configured for the IdP it warns and accepts unsigned requests (dev /
   transport-authenticated parity); configure IdP metadata with a signing
   certificate to enforce signatures. The Redirect binding accepts the detached
-  signature via `sig_alg` / `signature` / `signed_query` keyword arguments.
+  signature via `sig_alg` / `signature` / `signed_query` keyword arguments, and
+  the signed query is bound to the processed message before its signature
+  counts: the `SAMLRequest` it carries must decode to the exact LogoutRequest
+  XML under validation and its `SigAlg` must be the algorithm used for
+  verification, so a valid signed query captured from another request cannot
+  vouch for a substituted one.
 - **Signature verification is key-rollover aware.** The compat SP (Response and
   LogoutRequest verification, via the new `SPConfig.idp_signing_certs`) and the
   django-idp example (AuthnRequest verification) now try every signing

@@ -106,10 +106,12 @@ result in one call.
    def complete_login(self, form_pairs, expected_request_id):
        decoded = bindings.post_decode(form_pairs)   # list[(name, value)]
        verifier = crypto.SamlVerifier.from_cert(self.idp_signing_cert())
+       cfg = security.SecurityConfig()              # production-safe defaults
+       cfg.enforce_persistent_id_uniqueness = True  # E78 is opt-in; see below
        result = profiles.process_response_verified(
            decoded.saml_text,
            verifier,
-           security.SecurityConfig(),               # production-safe defaults
+           cfg,
            sp_entity_id=self.entity_id,
            acs_url=self.acs_url,
            expected_idp_entity_id=self.idp.entity_id,

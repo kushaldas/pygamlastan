@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import urllib.parse
 from datetime import datetime, timezone
 from typing import Any
 
@@ -551,6 +552,12 @@ class Saml2Client:
         fails closed. Raises on an invalid signature so a forged one cannot be
         silently downgraded to "unsigned".
 
+        For the Redirect binding the detached signature only counts after the
+        signed query has been bound to this exact message: its ``SAMLRequest``
+        must decode to the XML being validated and its ``SigAlg`` must be the
+        algorithm used for verification, so a valid signed query from some
+        other request cannot vouch for a substituted LogoutRequest.
+
         When the IdP has no signing certificate configured (metadata-less dev
         setups, or deployments that authenticate the SLO channel at the
         transport layer) there is no trust anchor to verify against. This mirrors
@@ -583,6 +590,40 @@ class Saml2Client:
         signature = kwargs.get("signature")
         signed_query = kwargs.get("signed_query")
         if binding == BINDING_HTTP_REDIRECT and sig_alg and signature and signed_query:
+            # Bind the signed query to THIS message before trusting its
+            # signature: a valid signed query captured from a different
+            # (legitimate) LogoutRequest must not lend its signature to the
+            # unsigned `request` being processed. The SAMLRequest inside the
+            # signed query must decode to exactly the XML under validation,
+            # and the SigAlg it carries must be the algorithm actually used
+            # for verification.
+            params: dict[str, str] = {}
+            for part in signed_query.split("&"):
+                key, _, value = part.partition("=")
+                # unquote, not unquote_plus: the signed portion is the raw
+                # percent-encoded query, where '+' is a literal plus
+                # (base64), never an encoded space.
+                params.setdefault(
+                    urllib.parse.unquote(key), urllib.parse.unquote(value)
+                )
+            if params.get("SigAlg") != sig_alg:
+                raise ValueError(
+                    "SigAlg does not match the SigAlg inside the signed query"
+                )
+            query_request = params.get("SAMLRequest")
+            if not query_request:
+                raise ValueError("signed query carries no SAMLRequest")
+            try:
+                query_xml = self._decode_message(query_request, BINDING_HTTP_REDIRECT)
+            except Exception as e:
+                raise ValueError(
+                    f"signed query SAMLRequest cannot be decoded: {e}"
+                ) from e
+            if query_xml != xml:
+                raise ValueError(
+                    "signed query SAMLRequest does not match the LogoutRequest "
+                    "being processed"
+                )
             raw_signature = base64.b64decode(signature)
             if not any(
                 verifier.verify_redirect_query(

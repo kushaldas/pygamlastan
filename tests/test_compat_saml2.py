@@ -1135,6 +1135,39 @@ def test_handle_logout_request_tampered_signed_query_rejected(rsa_keypair, tmp_p
         )
 
 
+def test_handle_logout_request_substituted_request_rejected(rsa_keypair, tmp_path):
+    """A VALID signed query from one LogoutRequest cannot vouch for a different
+    (unsigned) LogoutRequest passed as the request argument: the SAMLRequest
+    inside the signed query must decode to the exact message being processed."""
+    priv, _cert_pem, cert_der_b64 = rsa_keypair
+    client = _signed_client(tmp_path, cert_der_b64)
+    _legit, sig_alg, signature, signed_query = _redirect_signed_logout(
+        "id-lr-legit-signed", priv
+    )
+    substituted = deflate_and_base64_encode(_logout_request("id-lr-substituted-req"))
+    with pytest.raises(ValueError, match="invalid LogoutRequest"):
+        client.handle_logout_request(
+            substituted, _session_nameid(), BINDING_HTTP_REDIRECT,
+            sig_alg=sig_alg, signature=signature, signed_query=signed_query,
+        )
+
+
+def test_handle_logout_request_sig_alg_mismatch_rejected(rsa_keypair, tmp_path):
+    """The SigAlg used for verification must be the SigAlg inside the signed
+    query, so the algorithm cannot be swapped out from under the signature."""
+    priv, _cert_pem, cert_der_b64 = rsa_keypair
+    client = _signed_client(tmp_path, cert_der_b64)
+    encoded, _sig_alg, signature, signed_query = _redirect_signed_logout(
+        "id-lr-alg-swap", priv
+    )
+    with pytest.raises(ValueError, match="invalid LogoutRequest"):
+        client.handle_logout_request(
+            encoded, _session_nameid(), BINDING_HTTP_REDIRECT,
+            sig_alg="http://www.w3.org/2001/04/xmldsig-more#rsa-sha512",
+            signature=signature, signed_query=signed_query,
+        )
+
+
 def test_handle_logout_request_unsigned_rejected_when_cert_configured(rsa_keypair, tmp_path):
     """With an IdP signing certificate configured, an unsigned LogoutRequest
     fails closed instead of destroying the session."""
