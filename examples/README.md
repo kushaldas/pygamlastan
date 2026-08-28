@@ -17,8 +17,8 @@ Prerequisites: Docker (with Compose), [`just`](https://github.com/casey/just),
 and [`mkcert`](https://github.com/FiloSottile/mkcert). Until `pygamlastan` is on
 PyPI, also Rust + `maturin` for the one-time wheel build.
 
-The example apps require `pygamlastan>=0.3.0`, the binding release aligned with
-`gamlastan` 0.7.0.
+The example apps require `pygamlastan>=0.4.0`, the binding release aligned with
+`gamlastan` 0.8.0.
 
 ```console
 # 0. configure (.env is gitignored). Defaults use *.gamlastan.sverige.

@@ -185,7 +185,7 @@ compose) and [`docker-compose.yml`](docker-compose.yml).
 
 ```console
 uv venv
-uv pip install --find-links wheels django==6.0.6 "pygamlastan>=0.3.0" cryptography gunicorn whitenoise
+uv pip install --find-links wheels django==6.0.7 "pygamlastan>=0.4.0" cryptography gunicorn whitenoise
 export DJANGO_DEBUG=1 SAML_IDP_BASE_URL=http://localhost:8000
 python manage.py idp_keys
 python manage.py migrate

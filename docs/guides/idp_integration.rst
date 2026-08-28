@@ -62,6 +62,12 @@ against the SP's metadata signing keys:
 
    signature_verified = False
    # HTTP-Redirect: detached signature over the exact signed query string.
+   # Reject an INCOMPLETE tuple instead of treating it as unsigned: the
+   # decoder permits SigAlg without Signature, so a stripped Signature
+   # parameter must not downgrade a signed request to an unsigned one.
+   present = (decoded.sig_alg, decoded.signature, decoded.signature_input)
+   if any(present) and not all(present):
+       raise ValueError("AuthnRequest redirect signature is incomplete")
    if decoded.sig_alg and decoded.signature and decoded.signature_input:
        if not any(
            v.verify_redirect_query(

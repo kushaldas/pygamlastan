@@ -1607,6 +1607,54 @@ def test_persistent_id_store_detects_reassignment():
     assert result.name_id == "p-alice"
 
 
+def test_dormant_persistent_id_store_ignored():
+    """A supplied store is only bound to E78 when the check actually applies.
+    E78 is opt-in, so a caller that always injects a store (with no principal)
+    must not fail while uniqueness is disabled or the response carries no
+    persistent NameID - the dormant store is ignored."""
+    class DictPidStore:
+        def check_and_record(self, name_id, sp_entity_id, principal):
+            return True
+
+    store = DictPidStore()
+    replay = security.InMemoryReplayCache
+
+    # E78 disabled (the default): a persistent-NameID response with a dormant
+    # store and no principal validates.
+    cfg = security.SecurityConfig.permissive()
+    assert cfg.enforce_persistent_id_uniqueness is False
+    parsed_p = xml.parse_response(_built_response_xml(
+        name_id_value="p-alice", name_id_format=core.NAMEID_PERSISTENT,
+    ))
+    res = security.validate_response(
+        parsed_p, cfg, ACS, IDP, SP, ACS,
+        expected_request_id="_req123", now=NOW,
+        replay_cache=replay(), persistent_id_store=store,
+    )
+    assert res.is_valid()
+
+    # E78 enabled but the response carries no persistent NameID: same.
+    cfg_on = security.SecurityConfig.permissive()
+    cfg_on.enforce_persistent_id_uniqueness = True
+    parsed_t = xml.parse_response(_built_response_xml(
+        name_id_value="t-alice", name_id_format=core.NAMEID_TRANSIENT,
+    ))
+    res = security.validate_response(
+        parsed_t, cfg_on, ACS, IDP, SP, ACS,
+        expected_request_id="_req123", now=NOW,
+        replay_cache=replay(), persistent_id_store=store,
+    )
+    assert res.is_valid()
+
+    # process_response applies the same gating.
+    result = profiles.process_response(
+        parsed_p, cfg, SP, ACS, IDP,
+        expected_request_id="_req123", now=NOW,
+        replay_cache=replay(), persistent_id_store=store,
+    )
+    assert result.name_id == "p-alice"
+
+
 def test_individual_check_assertion_age():
     """`check_assertion_age` runs one check standalone; `ValidationResult.get` /
     `.by_name` pull a specific outcome out of a full run (Task 3)."""

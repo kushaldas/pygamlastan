@@ -1206,6 +1206,21 @@ def test_handle_logout_request_enveloped_wrong_key_rejected(rsa_keypair, rsa_key
         client.handle_logout_request(raw, _session_nameid(), BINDING_HTTP_POST)
 
 
+def test_handle_logout_request_incomplete_redirect_signature_rejected(rsa_keypair, tmp_path):
+    """A partial signature tuple (e.g. SigAlg present, Signature stripped) is a
+    hard error - it must never be downgraded to unsigned handling."""
+    priv, _cert_pem, cert_der_b64 = rsa_keypair
+    client = _signed_client(tmp_path, cert_der_b64)
+    encoded, sig_alg, _signature, signed_query = _redirect_signed_logout(
+        "id-lr-partial-sig", priv
+    )
+    with pytest.raises(ValueError, match="incomplete redirect signature"):
+        client.handle_logout_request(
+            encoded, _session_nameid(), BINDING_HTTP_REDIRECT,
+            sig_alg=sig_alg, signed_query=signed_query,  # no signature
+        )
+
+
 def test_handle_logout_request_relay_state_bound(rsa_keypair, tmp_path):
     """RelayState is part of the signed query: a matching echo is accepted (and
     carried on the response redirect); a substituted one is rejected."""

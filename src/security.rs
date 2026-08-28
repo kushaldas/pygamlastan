@@ -523,13 +523,23 @@ fn validate_response(
         // gamlastan requires an application-supplied principal identifying the
         // local account *independently* of the asserted NameID; keying the
         // uniqueness check by the NameID itself could never detect reassignment.
-        let principal = persistent_id_principal.as_deref().ok_or_else(|| {
-            security_err(
-                "persistent_id_store requires persistent_id_principal: the local \
-                 account identifier established independently of the asserted NameID",
-            )
-        })?;
-        validator = validator.with_persistent_id_store(s, principal);
+        match persistent_id_principal.as_deref() {
+            Some(principal) => {
+                validator = validator.with_persistent_id_store(s, principal);
+            }
+            // Only fail on a missing principal when the E78 check actually
+            // applies to this response (uniqueness enabled AND a persistent
+            // NameID present). E78 is opt-in, so a caller that always injects
+            // a store must not fail while the check is dormant - the unused
+            // store is simply ignored.
+            None if response_requires_persistent_id_store(response, config) => {
+                return Err(security_err(
+                    "persistent_id_store requires persistent_id_principal: the local \
+                     account identifier established independently of the asserted NameID",
+                ));
+            }
+            None => {}
+        }
     }
     let result = validator.validate_response(&response.inner, &params);
     Ok(ValidationResult { inner: result })

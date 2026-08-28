@@ -160,13 +160,23 @@ fn process_response_with_stores(
         // gamlastan requires an application-supplied principal identifying the
         // local account *independently* of the asserted NameID; keying the
         // uniqueness check by the NameID itself could never detect reassignment.
-        let principal = persistent_id_principal.ok_or_else(|| {
-            profile_err(
-                "persistent_id_store requires persistent_id_principal: the local \
-                 account identifier established independently of the asserted NameID",
-            )
-        })?;
-        validator = validator.with_persistent_id_store(store, principal);
+        match persistent_id_principal {
+            Some(principal) => {
+                validator = validator.with_persistent_id_store(store, principal);
+            }
+            // Only fail on a missing principal when the E78 check actually
+            // applies (uniqueness enabled AND this response carries a
+            // persistent NameID). E78 is opt-in, so a caller that always
+            // injects a store must not fail while the check is dormant - the
+            // unused store is simply ignored.
+            None if response_requires_persistent_id_store_inner(response, &config.inner) => {
+                return Err(profile_err(
+                    "persistent_id_store requires persistent_id_principal: the local \
+                     account identifier established independently of the asserted NameID",
+                ));
+            }
+            None => {}
+        }
     }
 
     let params = gs::ValidationParams {

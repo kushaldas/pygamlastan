@@ -97,6 +97,17 @@ def _verify_authn_request_signature(authn, saml_text, decoded, entity) -> bool:
     sig_alg = getattr(decoded, "sig_alg", None)
     signature = getattr(decoded, "signature", None)
     signature_input = getattr(decoded, "signature_input", None)
+    # An incomplete tuple must never downgrade to "unsigned": the decoder
+    # permits SigAlg without Signature, so stripping just the Signature
+    # parameter would otherwise reach process_authn_request as an unsigned
+    # request and be accepted whenever the SP does not require signing.
+    if any((sig_alg, signature, signature_input)) and not (
+        sig_alg and signature and signature_input
+    ):
+        raise ValueError(
+            "AuthnRequest redirect signature is incomplete: SigAlg, Signature "
+            "and the signed query must all be present"
+        )
     if sig_alg and signature and signature_input:
         if not verifiers:
             raise ValueError("AuthnRequest is signed but the SP publishes no signing key")

@@ -680,6 +680,19 @@ class Saml2Client:
         sig_alg = kwargs.get("sig_alg")
         signature = kwargs.get("signature")
         signed_query = kwargs.get("signed_query")
+        # An incomplete tuple is an error, never "unsigned": a stripped
+        # Signature parameter (the decoder permits SigAlg alone) must surface
+        # as a hard failure rather than silently falling through to the
+        # unsigned handling.
+        if (
+            binding == BINDING_HTTP_REDIRECT
+            and any((sig_alg, signature, signed_query))
+            and not (sig_alg and signature and signed_query)
+        ):
+            raise ValueError(
+                "incomplete redirect signature: sig_alg, signature and "
+                "signed_query must all be supplied together"
+            )
         if binding == BINDING_HTTP_REDIRECT and sig_alg and signature and signed_query:
             # Bind the signed query to THIS message before trusting its
             # signature: a valid signed query captured from a different

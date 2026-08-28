@@ -70,7 +70,16 @@ surfaces; see the migration notes inline.
   defaults off and, when enabled, is keyed by an application-supplied
   `persistent_id_principal` established independently of the asserted NameID
   (the previous behavior keyed it by the NameID itself and could never detect a
-  reassignment).
+  reassignment). Supplying a `persistent_id_store` without a principal only
+  errors when the check actually applies (E78 enabled and the response carries
+  a persistent NameID); a dormant store is ignored, so callers that always
+  inject one keep working with the opt-in default.
+- **Partial Redirect signature tuples are rejected, never downgraded to
+  "unsigned".** The decoder permits `SigAlg` without `Signature`, so stripping
+  one parameter must not turn a signed request into an unsigned one: the
+  django-idp example, the IdP integration guide, and the compat SP's
+  `handle_logout_request` now fail on an incomplete
+  SigAlg/Signature/signed-query tuple before any verification decision.
 - **The pysaml2 compat SP now cryptographically verifies inbound LogoutRequests**
   (`Saml2Client.handle_logout_request`) against the IdP's metadata signing
   certificates before destroying any session. When no signing certificate is
