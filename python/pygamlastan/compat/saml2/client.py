@@ -598,6 +598,16 @@ class Saml2Client:
                 "accepted clock skew"
             )
         if parsed.not_on_or_after is not None:
+            # Bound the request-declared validity window the same way the
+            # no-NotOnOrAfter branch bounds lifetime: a date years ahead would
+            # pin a replay entry until then, letting unique requests (in the
+            # unsigned development fallback, unauthenticated ones) grow the
+            # process-wide cache without bound.
+            if parsed.not_on_or_after - now > _LOGOUT_REQUEST_MAX_AGE:
+                raise ValueError(
+                    "LogoutRequest NotOnOrAfter is further ahead than the "
+                    f"maximum accepted validity window ({_LOGOUT_REQUEST_MAX_AGE})"
+                )
             replay_expiry = parsed.not_on_or_after + timedelta(seconds=180)
         else:
             if now - parsed.issue_instant > _LOGOUT_REQUEST_MAX_AGE:
@@ -658,11 +668,14 @@ class Saml2Client:
 
         When the IdP has no signing certificate configured (metadata-less dev
         setups, or deployments that authenticate the SLO channel at the
-        transport layer) there is no trust anchor to verify against. This mirrors
-        pysaml2's behavior and the ready IdP's ``allow_unauthenticated_backchannel``
-        escape hatch: the request is accepted with a warning rather than
-        verified. Configure IdP metadata with a signing certificate to enforce
-        LogoutRequest signatures.
+        transport layer) there is no trust anchor to verify against. That case
+        FAILS CLOSED unless the deployment explicitly opts in via
+        ``allow_unsigned_logout_requests`` in the SP settings (mirroring the
+        ready IdP's ``allow_unauthenticated_backchannel`` escape hatch); with
+        the opt-in the request is accepted with a warning. A silently missing
+        production certificate must never downgrade this session-destroying
+        endpoint to unsigned requests. Configure IdP metadata with a signing
+        certificate to enforce LogoutRequest signatures.
         """
         # Extract the detached-signature material and enforce tuple
         # completeness BEFORE any certificate lookup: an incomplete tuple
@@ -701,13 +714,26 @@ class Saml2Client:
                     f"unknown IdP {expected_idp!r}: not present in the SP "
                     "configuration or metadata"
                 ) from None
+            # Fail closed by default: a missing production certificate must
+            # not silently turn the session-destroying endpoint into one that
+            # accepts unsigned requests. The unverified path requires the
+            # explicit allow_unsigned_logout_requests opt-in.
+            if not self.config.allow_unsigned_logout_requests:
+                raise ValueError(
+                    f"no signing certificate configured for IdP {expected_idp!r}; "
+                    "refusing to accept an unverified LogoutRequest. Configure "
+                    "IdP metadata with a signing certificate, or explicitly set "
+                    "allow_unsigned_logout_requests=True in the SP settings "
+                    "(development only)."
+                ) from None
             import warnings
 
             warnings.warn(
                 "No signing certificate configured for IdP "
                 f"{expected_idp!r}; accepting the LogoutRequest without "
-                "signature verification. Configure IdP metadata with a signing "
-                "certificate to enforce LogoutRequest signatures.",
+                "signature verification because allow_unsigned_logout_requests "
+                "is enabled. Configure IdP metadata with a signing certificate "
+                "to enforce LogoutRequest signatures.",
                 stacklevel=2,
             )
             return True

@@ -27,6 +27,11 @@ class SPConfig:
         #                          "single_logout_service": {binding: url}}}
         self.idp: dict[str, dict[str, dict[str, str]]] = {}
         self.want_response_signed: bool = True
+        # Explicit development opt-out: accept an unverified LogoutRequest for
+        # an IdP that publishes no signing certificate. Off by default - a
+        # production metadata omission must fail closed, not silently
+        # downgrade the session-destroying endpoint to unsigned requests.
+        self.allow_unsigned_logout_requests: bool = False
         self.key_file: str | None = None
         self.cert_file: str | None = None
         # parsed metadata EntityDescriptors keyed by entity id
@@ -46,6 +51,9 @@ class SPConfig:
         self.idp = dict(sp.get("idp", {}))
         # pysaml2 defaults want_response_signed to True.
         self.want_response_signed = bool(sp.get("want_response_signed", True))
+        self.allow_unsigned_logout_requests = bool(
+            sp.get("allow_unsigned_logout_requests", False)
+        )
 
         self.key_file = conf.get("key_file")
         self.cert_file = conf.get("cert_file")

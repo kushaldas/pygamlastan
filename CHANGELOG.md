@@ -87,8 +87,11 @@ surfaces; see the migration notes inline.
 - **The pysaml2 compat SP now cryptographically verifies inbound LogoutRequests**
   (`Saml2Client.handle_logout_request`) against the IdP's metadata signing
   certificates before destroying any session. When no signing certificate is
-  configured for the IdP it warns and accepts unsigned requests (dev /
-  transport-authenticated parity); configure IdP metadata with a signing
+  configured for the IdP it **fails closed** unless the SP settings explicitly
+  opt in with `allow_unsigned_logout_requests: True` (development /
+  transport-authenticated parity; the opt-in still warns on every accepted
+  unsigned request) - a silent production metadata omission cannot downgrade
+  the endpoint to unsigned requests. Configure IdP metadata with a signing
   certificate to enforce signatures. The Redirect binding accepts the detached
   signature via `sig_alg` / `signature` / `signed_query` keyword arguments, and
   the signed query is bound to the processed message before its signature
@@ -103,8 +106,9 @@ surfaces; see the migration notes inline.
   `IssueInstant`, with the replay entry retained past that whole window - so a
   captured request can never outlive its replay entry and be accepted again.
   An `IssueInstant` more than the 180s clock skew in the future is rejected
-  outright, so a forged timestamp cannot pin a replay entry arbitrarily far
-  into the future.
+  outright, and a request-declared `NotOnOrAfter` further ahead than the same
+  24h window is rejected too, so a forged timestamp or validity window cannot
+  pin replay entries arbitrarily far into the future.
   The signed Redirect query's `RelayState` must also equal the one the handler
   echoes back (or be absent from both), so an unsigned `RelayState` cannot
   ride along a valid signature. The no-certificate development fallback

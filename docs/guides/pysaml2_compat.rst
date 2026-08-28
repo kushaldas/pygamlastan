@@ -288,12 +288,31 @@ The three SLO methods mirror pysaml2:
    if resp.status_ok():
        ...   # logout confirmed
 
-   # IdP-initiated: respond to an incoming LogoutRequest.
+   # IdP-initiated: respond to an incoming LogoutRequest. The request is
+   # cryptographically verified against the IdP's metadata signing
+   # certificates before any session state is touched, so for the Redirect
+   # binding the handler must forward the detached-signature material from
+   # the RAW query string it received (still percent-encoded): signed_query
+   # is the exact SAMLRequest[&RelayState]&SigAlg portion the IdP signed.
+   from urllib.parse import parse_qsl
+
+   raw_query = request.META["QUERY_STRING"]            # framework-specific
+   signed_query = raw_query.split("&Signature=", 1)[0] # Signature is last
+   params = dict(parse_qsl(raw_query))
    http_info = client.handle_logout_request(
-       form["SAMLRequest"], decode(session["name_id"]),
-       BINDING_HTTP_REDIRECT, relay_state=form.get("RelayState"),
+       params["SAMLRequest"], decode(session["name_id"]),
+       BINDING_HTTP_REDIRECT, relay_state=params.get("RelayState"),
+       sig_alg=params.get("SigAlg"), signature=params.get("Signature"),
+       signed_query=signed_query,
+       # expected_idp="https://idp.example.org/metadata"  # if several IdPs
    )
    location = dict(http_info["headers"])["Location"]   # redirect to IdP SLO
+
+   # The verified RelayState from the signed query must match the relay_state
+   # you echo, and the request is one-time use (replay-cached). If the IdP
+   # publishes no signing certificate at all, handle_logout_request fails
+   # closed unless the SP settings explicitly opt in with
+   # ``"allow_unsigned_logout_requests": True`` (development only).
 
 Generating SP metadata
 ~~~~~~~~~~~~~~~~~~~~~~~~

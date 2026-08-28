@@ -50,6 +50,10 @@ CONF = {
                 "single_logout_service": [(SLO, BINDING_HTTP_REDIRECT)],
             },
             "want_response_signed": False,
+            # Dev/test config without IdP metadata certs: opt in to the
+            # unverified LogoutRequest fallback explicitly (it fails closed
+            # without this flag - see the fail-closed test).
+            "allow_unsigned_logout_requests": True,
             "idp": {
                 IDP: {
                     "single_sign_on_service": {BINDING_HTTP_REDIRECT: SSO},
@@ -1347,12 +1351,51 @@ def test_handle_logout_request_replay_rejected(rsa_keypair, tmp_path):
 
 
 def test_handle_logout_request_no_cert_warns_and_accepts(client):
-    """The explicit development opt-out: with no signing certificate configured
-    for the IdP, an unsigned LogoutRequest is accepted with a warning."""
+    """The explicit development opt-out: with no signing certificate for the
+    IdP AND allow_unsigned_logout_requests enabled (as CONF does), an unsigned
+    LogoutRequest is accepted with a warning."""
     encoded = deflate_and_base64_encode(_logout_request("id-lr-no-cert"))
     with pytest.warns(UserWarning, match="No signing certificate"):
         info = client.handle_logout_request(encoded, _session_nameid(), BINDING_HTTP_REDIRECT)
     assert info["headers"][0][1].startswith(IDPSLO + "?SAMLResponse=")
+
+
+def test_handle_logout_request_no_cert_fails_closed_by_default():
+    """Without the explicit allow_unsigned_logout_requests opt-in, a missing
+    IdP signing certificate fails closed: a production metadata omission must
+    not silently downgrade the session-destroying endpoint to accepting
+    unsigned requests."""
+    conf = {**CONF}
+    sp = {**CONF["service"]["sp"]}
+    del sp["allow_unsigned_logout_requests"]
+    conf["service"] = {"sp": sp}
+    client = Saml2Client(SPConfig().load(conf))
+    assert client.config.allow_unsigned_logout_requests is False
+    encoded = deflate_and_base64_encode(_logout_request("id-lr-fail-closed"))
+    with pytest.raises(ValueError, match="allow_unsigned_logout_requests"):
+        client.handle_logout_request(encoded, _session_nameid(), BINDING_HTTP_REDIRECT)
+
+
+def test_handle_logout_request_excessive_notonorafter_rejected(client):
+    """A request-declared NotOnOrAfter beyond the maximum accepted validity
+    window is rejected: an attacker-chosen date years ahead would otherwise
+    pin a replay-cache entry until then and grow the process-wide cache
+    without bound."""
+    far = (datetime.now(timezone.utc) + timedelta(days=365)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    request = f"""<?xml version='1.0' encoding='UTF-8'?>
+<samlp:LogoutRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="id-lr-far-noa" IssueInstant="{ts}" NotOnOrAfter="{far}" Version="2.0" Destination="{SLO}">
+  <saml:Issuer>{IDP}</saml:Issuer>
+  <saml:NameID Format="{TRANSIENT}" SPNameQualifier="{SP}">abc123hash</saml:NameID>
+</samlp:LogoutRequest>"""
+    encoded = deflate_and_base64_encode(request)
+    with pytest.warns(UserWarning, match="No signing certificate"):
+        with pytest.raises(ValueError, match="maximum accepted validity window"):
+            client.handle_logout_request(
+                encoded, _session_nameid(), BINDING_HTTP_REDIRECT
+            )
 
 
 # --------------------------------------------------------------------------- #
