@@ -533,6 +533,36 @@ def test_metadata_parse():
     assert core.NAMEID_TRANSIENT in ed.name_id_formats("idp")
 
 
+def test_metadata_structural_comments_and_pis_accepted():
+    """parse_secure_metadata tolerates the structural comments and processing
+    instructions real federation aggregates carry. Pinned so a parser or
+    dependency update cannot silently tighten this and start rejecting live
+    federation metadata."""
+    commented = SAMPLE_IDP_METADATA.replace(
+        "<md:IDPSSODescriptor",
+        "<!-- structural comment --><?generator aggregate?><md:IDPSSODescriptor",
+    )
+    ed = metadata.parse_entity(commented)
+    assert ed.entity_id == IDP
+    assert ed.is_idp()
+
+
+def test_metadata_text_splitting_comment_and_pi_rejected():
+    """A comment or PI that splits an element's text value is rejected: such a
+    split can change what a signed value verifies as versus what a consumer
+    reads back. Pinned so a parser or dependency update cannot silently weaken
+    this security-sensitive distinction."""
+    fmt = "urn:oasis:names:tc:SAML:2.0:nameid-format:transient"
+    split_comment = SAMPLE_IDP_METADATA.replace(
+        fmt, fmt[:9] + "<!-- split -->" + fmt[9:]
+    )
+    with pytest.raises(pygamlastan.SamlXmlError, match="split"):
+        metadata.parse_entity(split_comment)
+    split_pi = SAMPLE_IDP_METADATA.replace(fmt, fmt[:9] + "<?evil?>" + fmt[9:])
+    with pytest.raises(pygamlastan.SamlXmlError, match="split"):
+        metadata.parse_entity(split_pi)
+
+
 def test_metadata_roundtrip_and_validate():
     """A parsed EntityDescriptor re-serialises to XML and passes validation."""
     ed = metadata.parse_entity(SAMPLE_IDP_METADATA)
@@ -924,6 +954,34 @@ def test_idp_process_authn_request():
     assert processed.requested_name_id_format == core.NAMEID_TRANSIENT
     # This fixture carries no RequestedAuthnContext, so no comparison is set.
     assert processed.authn_context_comparison is None
+
+
+def test_idp_process_authn_request_issuer_mismatch_rejected():
+    """The supplied SP metadata must belong to the request Issuer. Upstream
+    resolves sp_entity_id from the Issuer but only sees the SPSSODescriptor,
+    so metadata for SP A with a request claiming SP B would otherwise return
+    B as sp_entity_id while authorizing A's ACS and signing policy."""
+    req = xml.parse_authn_request(AUTHN_REQUEST)
+    other_md = metadata.parse_entity(
+        SAMPLE_SP_METADATA.replace(
+            'entityID="https://sp.example.org/sp"',
+            'entityID="https://other-sp.example.org/sp"',
+        )
+    )
+    with pytest.raises(pygamlastan.SamlProfileError, match="does not match"):
+        profiles.process_authn_request(req, other_md)
+
+
+def test_idp_process_authn_request_missing_issuer_rejected():
+    """An AuthnRequest without an Issuer cannot be bound to any metadata and is
+    rejected before descriptor selection."""
+    no_issuer = AUTHN_REQUEST.replace(
+        "<saml:Issuer>https://sp.example.org/sp</saml:Issuer>", ""
+    )
+    req = xml.parse_authn_request(no_issuer)
+    sp_md = metadata.parse_entity(SAMPLE_SP_METADATA)
+    with pytest.raises(pygamlastan.SamlProfileError, match="no Issuer"):
+        profiles.process_authn_request(req, sp_md)
 
 
 def test_full_sso_roundtrip():

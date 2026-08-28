@@ -137,6 +137,14 @@ _PROCESS_REPLAY_CACHE = _security.InMemoryReplayCache()
 # process-lifetime cache forever and a long-running SP would grow without
 # bound. Cleanup is throttled process-wide: at most once per interval, run by
 # whichever processing path comes along next.
+# Maximum accepted age (from IssueInstant) for a LogoutRequest that declares
+# no NotOnOrAfter. validate_logout_request only bounds requests that DECLARE
+# NotOnOrAfter, so without this limit a captured request would stay valid
+# forever while any finite replay-cache entry eventually expires - breaking
+# one-time use. Replay entries are retained past this window, so a request can
+# never outlive its replay entry.
+_LOGOUT_REQUEST_MAX_AGE = timedelta(hours=24)
+
 _REPLAY_CLEANUP_INTERVAL_SECONDS = 300.0
 _replay_cleanup_lock = threading.Lock()
 _last_replay_cleanup = 0.0
@@ -530,7 +538,7 @@ class Saml2Client:
             xml = self._decode_message(request, binding)
             parsed = _xml.parse_logout_request(xml)
             signature_verified = self._verify_logout_request_signature(
-                xml, binding, expected_idp, parsed, kwargs
+                xml, binding, expected_idp, parsed, kwargs, relay_state
             )
             _logout.validate_logout_request(
                 parsed,
@@ -561,14 +569,24 @@ class Saml2Client:
         # Record the request ID atomically in the shared replay cache before
         # the success response authorizes any session destruction; a repeat
         # fails closed as a replay. The entry is retained through the request's
-        # own NotOnOrAfter window (plus validation skew) when it declares one;
-        # without NotOnOrAfter validation never expires the request, so a
-        # bounded 24h retention is used - IdPs should send NotOnOrAfter.
+        # own NotOnOrAfter window (plus validation skew) when it declares one.
+        # Without NotOnOrAfter, validation never expires the request, so this
+        # handler enforces its own age limit from IssueInstant and retains the
+        # replay entry past that whole window: the request is rejected as too
+        # old before its replay entry can ever expire, keeping one-time use
+        # airtight either way.
         now = datetime.now(timezone.utc)
         if parsed.not_on_or_after is not None:
             replay_expiry = parsed.not_on_or_after + timedelta(seconds=180)
         else:
-            replay_expiry = now + timedelta(hours=24)
+            if now - parsed.issue_instant > _LOGOUT_REQUEST_MAX_AGE:
+                raise ValueError(
+                    "LogoutRequest without NotOnOrAfter is older than the "
+                    f"maximum accepted age ({_LOGOUT_REQUEST_MAX_AGE})"
+                )
+            replay_expiry = (
+                parsed.issue_instant + _LOGOUT_REQUEST_MAX_AGE + timedelta(seconds=180)
+            )
         _maybe_cleanup_replay_cache(self._replay_cache)
         if not self._replay_cache.check_and_insert(parsed.id, replay_expiry):
             raise ValueError(
@@ -596,6 +614,7 @@ class Saml2Client:
         expected_idp: str,
         parsed: Any,
         kwargs: dict[str, Any],
+        relay_state: str | None,
     ) -> bool:
         """Cryptographically verify an inbound LogoutRequest.
 
@@ -610,9 +629,11 @@ class Saml2Client:
 
         For the Redirect binding the detached signature only counts after the
         signed query has been bound to this exact message: its ``SAMLRequest``
-        must decode to the XML being validated and its ``SigAlg`` must be the
-        algorithm used for verification, so a valid signed query from some
-        other request cannot vouch for a substituted LogoutRequest.
+        must decode to the XML being validated, its ``SigAlg`` must be the
+        algorithm used for verification, and its ``RelayState`` must equal the
+        one this handler will echo back (or be absent from both) - so a valid
+        signed query from some other request cannot vouch for a substituted
+        LogoutRequest, and an unsigned RelayState cannot ride along.
 
         When the IdP has no signing certificate configured (metadata-less dev
         setups, or deployments that authenticate the SLO channel at the
@@ -679,6 +700,14 @@ class Saml2Client:
             if params.get("SigAlg") != sig_alg:
                 raise ValueError(
                     "SigAlg does not match the SigAlg inside the signed query"
+                )
+            # RelayState is covered by the detached signature too: the value
+            # this handler will echo back must be exactly the signed one (or
+            # absent from both), so an unsigned RelayState cannot be swapped
+            # in alongside a validly signed query.
+            if (relay_state or None) != (params.get("RelayState") or None):
+                raise ValueError(
+                    "RelayState does not match the RelayState inside the signed query"
                 )
             query_request = params.get("SAMLRequest")
             if not query_request:

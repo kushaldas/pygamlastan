@@ -645,6 +645,10 @@ impl ProcessedAuthnRequest {
 /// metadata, so a request cannot steer assertions to an unregistered endpoint
 /// or flip a registered URL to a different binding. (The previous
 /// `unsafe_allow_missing_metadata` escape hatch no longer exists upstream.)
+/// The request `Issuer` must be present and equal the metadata's `entityID`;
+/// a missing or non-matching Issuer is rejected before the descriptor is
+/// selected, so the returned `sp_entity_id` always names the SP whose
+/// endpoints and signing policy were enforced.
 ///
 /// SECURITY: `request_signature_verified` must reflect cryptographic
 /// verification of THIS exact request performed by your transport layer (a
@@ -660,6 +664,23 @@ fn process_authn_request(
     sp_metadata: &EntityDescriptor,
     request_signature_verified: bool,
 ) -> PyResult<ProcessedAuthnRequest> {
+    // Bind the supplied metadata to the request Issuer. Upstream extracts
+    // sp_entity_id from the Issuer but only receives the SPSSODescriptor
+    // (which carries no entity id), so without this check metadata for SP A
+    // processed alongside a request claiming SP B would return B as
+    // sp_entity_id while authorizing A's ACS endpoints and signing policy.
+    let issuer = request
+        .inner
+        .base
+        .issuer
+        .as_ref()
+        .ok_or_else(|| profile_err("AuthnRequest has no Issuer"))?;
+    if issuer.value != sp_metadata.inner.entity_id {
+        return Err(profile_err(format!(
+            "AuthnRequest Issuer {:?} does not match the supplied SP metadata entityID {:?}",
+            issuer.value, sp_metadata.inner.entity_id
+        )));
+    }
     let sp_descs = sp_metadata.inner.sp_sso_descriptors();
     let sp_desc = sp_descs
         .first()

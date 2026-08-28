@@ -32,7 +32,10 @@ need with :func:`pygamlastan.profiles.process_authn_request`:
 SP metadata is **required**: gamlastan resolves the ACS location together with
 its registered binding from that metadata, so a request cannot steer the
 response to an unregistered endpoint or flip a registered URL to a different
-binding. There is no "missing metadata" escape hatch.
+binding. There is no "missing metadata" escape hatch. The request's ``Issuer``
+must be present and equal to the metadata's ``entityID`` - a missing or
+non-matching Issuer is rejected, so the returned ``sp_entity_id`` always names
+the SP whose endpoints and signing policy were actually enforced.
 
 Verifying the request signature
 -------------------------------

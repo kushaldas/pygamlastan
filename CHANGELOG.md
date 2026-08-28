@@ -24,8 +24,12 @@ surfaces; see the migration notes inline.
   `unsafe_allow_missing_metadata` escape hatch is gone) and a new
   `request_signature_verified` argument carries transport-verified signature
   provenance. gamlastan resolves the ACS location together with its registered
-  binding, and enforces the SP's `AuthnRequestsSigned` policy. `ProcessedAuthnRequest`
-  gains an `authn_context_comparison` getter.
+  binding, and enforces the SP's `AuthnRequestsSigned` policy. The binding also
+  requires the request `Issuer` to be present and equal to the supplied
+  metadata's `entityID` - otherwise metadata for one SP processed alongside a
+  request claiming another would return the claimed entity id while enforcing
+  the wrong SP's endpoints and signing policy. `ProcessedAuthnRequest` gains an
+  `authn_context_comparison` getter.
 - **`logout.validate_logout_request(request, expected_issuer, signature_verified, now, clock_skew_seconds=180)`**
   — now takes the trusted `expected_issuer` and a `signature_verified` proof;
   the Issuer must match and an unverified request is rejected.
@@ -80,12 +84,17 @@ surfaces; see the migration notes inline.
   verification, so a valid signed query captured from another request cannot
   vouch for a substituted one. Verified LogoutRequests are also **one-time
   use**: the request ID is recorded atomically in the shared replay cache
-  before the success response authorizes session destruction (retained through
-  the request's `NotOnOrAfter` window when declared, otherwise for a bounded
-  24h default), and the no-certificate development fallback applies only to an
-  IdP actually present in the SP configuration or metadata - an arbitrary
-  caller-supplied `expected_idp` is rejected instead of becoming a trusted
-  unsigned issuer.
+  before the success response authorizes session destruction. A request that
+  declares `NotOnOrAfter` is retained through that window (plus skew); one
+  without `NotOnOrAfter` is subject to the shim's own 24h age limit from
+  `IssueInstant`, with the replay entry retained past that whole window - so a
+  captured request can never outlive its replay entry and be accepted again.
+  The signed Redirect query's `RelayState` must also equal the one the handler
+  echoes back (or be absent from both), so an unsigned `RelayState` cannot
+  ride along a valid signature. The no-certificate development fallback
+  applies only to an IdP actually present in the SP configuration or
+  metadata - an arbitrary caller-supplied `expected_idp` is rejected instead
+  of becoming a trusted unsigned issuer.
 - **Binding output is decoded strictly before verification** in the example
   apps and guides: the exact `saml_xml` bytes are decoded as strict UTF-8
   instead of the lossy, display-only `saml_text` projection, so malformed

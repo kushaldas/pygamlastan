@@ -120,8 +120,8 @@ def _logout_response(req_id: str) -> str:
 </samlp:LogoutResponse>"""
 
 
-def _logout_request(req_id: str, issuer: str = IDP) -> str:
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def _logout_request(req_id: str, issuer: str = IDP, issue_instant: str | None = None) -> str:
+    ts = issue_instant or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return f"""<?xml version='1.0' encoding='UTF-8'?>
 <samlp:LogoutRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="{req_id}" IssueInstant="{ts}" Version="2.0" Destination="{SLO}">
   <saml:Issuer>{issuer}</saml:Issuer>
@@ -1058,19 +1058,24 @@ def _session_nameid() -> NameID:
     return NameID(text="abc123hash", format=TRANSIENT, sp_name_qualifier=SP)
 
 
-def _redirect_signed_logout(req_id: str, priv: bytes) -> tuple[str, str, str, str]:
+def _redirect_signed_logout(
+    req_id: str, priv: bytes, relay_state: str | None = None
+) -> tuple[str, str, str, str]:
     """A LogoutRequest over HTTP-Redirect with a valid detached signature.
 
     Returns (encoded_request, sig_alg, signature_b64, signed_query) - the
-    values a web handler would forward from the query string.
+    values a web handler would forward from the query string. ``relay_state``
+    is included in the signed portion when given (the SAML parameter order:
+    SAMLRequest, RelayState, SigAlg).
     """
     signer = crypto.SamlSigner.from_pem(priv)
     sig_alg = signer.signature_method_uri()
     encoded = deflate_and_base64_encode(_logout_request(req_id))
-    signed_query = (
-        "SAMLRequest=" + urllib.parse.quote(encoded, safe="")
-        + "&SigAlg=" + urllib.parse.quote(sig_alg, safe="")
-    )
+    parts = ["SAMLRequest=" + urllib.parse.quote(encoded, safe="")]
+    if relay_state is not None:
+        parts.append("RelayState=" + urllib.parse.quote(relay_state, safe=""))
+    parts.append("SigAlg=" + urllib.parse.quote(sig_alg, safe=""))
+    signed_query = "&".join(parts)
     signature = signer.sign_redirect_query(signed_query.encode("utf-8"), sig_alg)
     return encoded, sig_alg, base64.b64encode(signature).decode("ascii"), signed_query
 
@@ -1199,6 +1204,66 @@ def test_handle_logout_request_enveloped_wrong_key_rejected(rsa_keypair, rsa_key
     raw = base64.b64encode(signed_xml.encode("utf-8")).decode("ascii")
     with pytest.raises(ValueError, match="invalid LogoutRequest"):
         client.handle_logout_request(raw, _session_nameid(), BINDING_HTTP_POST)
+
+
+def test_handle_logout_request_relay_state_bound(rsa_keypair, tmp_path):
+    """RelayState is part of the signed query: a matching echo is accepted (and
+    carried on the response redirect); a substituted one is rejected."""
+    priv, _cert_pem, cert_der_b64 = rsa_keypair
+    client = _signed_client(tmp_path, cert_der_b64)
+    encoded, sig_alg, signature, signed_query = _redirect_signed_logout(
+        "id-lr-rs-ok", priv, relay_state="rs-signed-1"
+    )
+    info = client.handle_logout_request(
+        encoded, _session_nameid(), BINDING_HTTP_REDIRECT, relay_state="rs-signed-1",
+        sig_alg=sig_alg, signature=signature, signed_query=signed_query,
+    )
+    location = info["headers"][0][1]
+    params = dict(urllib.parse.parse_qsl(location.split("?", 1)[1]))
+    assert params["RelayState"] == "rs-signed-1"
+
+    encoded2, sig_alg2, signature2, signed_query2 = _redirect_signed_logout(
+        "id-lr-rs-swap", priv, relay_state="rs-signed-2"
+    )
+    with pytest.raises(ValueError, match="RelayState does not match"):
+        client.handle_logout_request(
+            encoded2, _session_nameid(), BINDING_HTTP_REDIRECT,
+            relay_state="attacker-controlled",
+            sig_alg=sig_alg2, signature=signature2, signed_query=signed_query2,
+        )
+
+
+def test_handle_logout_request_unsigned_relay_state_rejected(rsa_keypair, tmp_path):
+    """A RelayState supplied by the caller when the signed query carries none
+    is rejected: an unsigned RelayState cannot ride along a valid signature."""
+    priv, _cert_pem, cert_der_b64 = rsa_keypair
+    client = _signed_client(tmp_path, cert_der_b64)
+    encoded, sig_alg, signature, signed_query = _redirect_signed_logout(
+        "id-lr-rs-inject", priv
+    )
+    with pytest.raises(ValueError, match="RelayState does not match"):
+        client.handle_logout_request(
+            encoded, _session_nameid(), BINDING_HTTP_REDIRECT,
+            relay_state="injected-unsigned",
+            sig_alg=sig_alg, signature=signature, signed_query=signed_query,
+        )
+
+
+def test_handle_logout_request_stale_without_notonorafter_rejected(client):
+    """A LogoutRequest that declares no NotOnOrAfter is subject to the shim's
+    own age limit, so a captured request cannot outlive its replay-cache entry
+    and be accepted again after the entry expires."""
+    old = (datetime.now(timezone.utc) - timedelta(hours=25)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    encoded = deflate_and_base64_encode(
+        _logout_request("id-lr-ancient", issue_instant=old)
+    )
+    with pytest.warns(UserWarning, match="No signing certificate"):
+        with pytest.raises(ValueError, match="maximum accepted age"):
+            client.handle_logout_request(
+                encoded, _session_nameid(), BINDING_HTTP_REDIRECT
+            )
 
 
 def test_handle_logout_request_unknown_expected_idp_rejected(client):
