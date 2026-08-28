@@ -353,7 +353,10 @@ mirroring pysaml2's SP model. Independently, gamlastan's assertion-replay check
 every ``Saml2Client`` instance, so rebuilding the client per request does not
 reset replay state. A multi-process deployment should inject a shared
 implementation via ``Saml2Client(config, replay_cache=...)`` (any object with
-``check_and_insert(id, expiry) -> bool`` and ``cleanup()``). Deployments that
+``check_and_insert(id, expiry) -> bool`` and ``cleanup()``). The shim calls
+``cleanup()`` periodically (throttled) from its processing paths, so expired
+entries are evicted and the cache stays bounded in a long-running SP.
+Deployments that
 need cross-request ``persistent`` NameID uniqueness can layer a persistent-id
 store separately.
 

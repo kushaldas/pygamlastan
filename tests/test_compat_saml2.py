@@ -1317,3 +1317,68 @@ def test_replay_cache_injectable():
     client2 = Saml2Client(SPConfig().load(CONF), replay_cache=security.InMemoryReplayCache())
     resp = client2.parse_authn_request_response(raw, BINDING_HTTP_POST, {session_id: "r"})
     assert resp.session_id() == session_id
+
+
+def test_replay_cache_periodic_cleanup(monkeypatch):
+    """The processing paths schedule (throttled) cache.cleanup() so expired
+    entries are evicted: gamlastan's check_and_insert never removes other
+    entries and validation never calls cleanup(), so without this the
+    process-lifetime cache would grow without bound."""
+    import time
+
+    from pygamlastan.compat.saml2 import client as client_mod
+
+    def force_next_cleanup():
+        # A marker safely older than the throttle interval (0.0 would be
+        # unreliable: time.monotonic() itself can be < interval after boot).
+        monkeypatch.setattr(
+            client_mod,
+            "_last_replay_cleanup",
+            time.monotonic() - 2 * client_mod._REPLAY_CLEANUP_INTERVAL_SECONDS,
+        )
+
+    class RecordingCache:
+        def __init__(self):
+            self.cleanups = 0
+
+        def check_and_insert(self, id, expiry):
+            return True
+
+        def cleanup(self):
+            self.cleanups += 1
+
+    cache = RecordingCache()
+    c = Saml2Client(SPConfig().load(CONF), replay_cache=cache)
+
+    def parse_once():
+        session_id, _ = c.prepare_for_authenticate(entityid=IDP, binding=BINDING_HTTP_REDIRECT)
+        raw = base64.b64encode(_auth_response(session_id).encode("utf-8")).decode("ascii")
+        c.parse_authn_request_response(raw, BINDING_HTTP_POST, {session_id: "r"})
+
+    # Response path: an expired throttle window triggers exactly one cleanup.
+    force_next_cleanup()
+    parse_once()
+    assert cache.cleanups == 1
+    # Within the throttle interval, no further cleanup runs.
+    parse_once()
+    assert cache.cleanups == 1
+    # Logout path schedules cleanup too (throttle reset to force it).
+    force_next_cleanup()
+    encoded = deflate_and_base64_encode(_logout_request("id-lr-cleanup"))
+    with pytest.warns(UserWarning, match="No signing certificate"):
+        c.handle_logout_request(encoded, _session_nameid(), BINDING_HTTP_REDIRECT)
+    assert cache.cleanups == 2
+
+
+def test_inmemory_replay_cache_cleanup_evicts_expired():
+    """InMemoryReplayCache.cleanup() removes expired entries (check_and_insert
+    alone never shrinks the map)."""
+    from pygamlastan import security
+
+    cache = security.InMemoryReplayCache()
+    now = datetime.now(timezone.utc)
+    assert cache.check_and_insert("expired-entry", now - timedelta(seconds=1))
+    assert cache.check_and_insert("live-entry", now + timedelta(hours=1))
+    assert len(cache) == 2
+    cache.cleanup()
+    assert len(cache) == 1

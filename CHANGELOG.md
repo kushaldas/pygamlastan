@@ -58,6 +58,10 @@ surfaces; see the migration notes inline.
   `Saml2Client` instance for the lifetime of the process (rebuilding the client
   per request no longer resets replay state); multi-process deployments can
   inject a shared implementation via `Saml2Client(config, replay_cache=...)`.
+  The shim also evicts expired entries by scheduling a throttled
+  `cleanup()` from its processing paths - gamlastan's `check_and_insert`
+  never removes other entries on its own, so a long-running SP would
+  otherwise grow the cache without bound.
 - **Persistent-NameID uniqueness (E78) is now opt-in and correctly keyed.** It
   defaults off and, when enabled, is keyed by an application-supplied
   `persistent_id_principal` established independently of the asserted NameID

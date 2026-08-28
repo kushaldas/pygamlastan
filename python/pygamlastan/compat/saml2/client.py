@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import threading
+import time
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -128,6 +130,37 @@ def _maybe_b64_to_xml(raw: str | bytes) -> str:
 # shim; a multi-process deployment should inject a shared implementation via
 # ``Saml2Client(config, replay_cache=...)``.
 _PROCESS_REPLAY_CACHE = _security.InMemoryReplayCache()
+
+# Evict expired replay entries periodically. gamlastan's check_and_insert only
+# ever replaces the SAME expired ID and validation never calls cleanup(), so
+# without this every accepted assertion/LogoutRequest ID would stay in the
+# process-lifetime cache forever and a long-running SP would grow without
+# bound. Cleanup is throttled process-wide: at most once per interval, run by
+# whichever processing path comes along next.
+_REPLAY_CLEANUP_INTERVAL_SECONDS = 300.0
+_replay_cleanup_lock = threading.Lock()
+_last_replay_cleanup = 0.0
+
+
+def _maybe_cleanup_replay_cache(cache: Any) -> None:
+    global _last_replay_cleanup
+    now = time.monotonic()
+    with _replay_cleanup_lock:
+        if now - _last_replay_cleanup < _REPLAY_CLEANUP_INTERVAL_SECONDS:
+            return
+        _last_replay_cleanup = now
+    try:
+        cache.cleanup()
+    except Exception:
+        # Eviction is maintenance, not a security decision (retaining an entry
+        # longer is safe), so a failing injected cache must not abort the
+        # authentication/logout flow - but it must not fail silently either.
+        import warnings
+
+        warnings.warn(
+            "replay cache cleanup() failed; expired entries were not evicted",
+            stacklevel=2,
+        )
 
 
 class Saml2Client:
@@ -308,6 +341,10 @@ class Saml2Client:
                 "than one IdP is configured/known. Pass expected_idp=<entity id> "
                 "(deriving it from the unverified Response issuer would be unsafe)."
             )
+
+        # Both branches below insert into the replay cache; give expired
+        # entries a periodic (throttled) chance to be evicted first.
+        _maybe_cleanup_replay_cache(self._replay_cache)
 
         if self.config.want_response_signed:
             # Use the safe-by-construction entry point: process_response_verified
@@ -532,6 +569,7 @@ class Saml2Client:
             replay_expiry = parsed.not_on_or_after + timedelta(seconds=180)
         else:
             replay_expiry = now + timedelta(hours=24)
+        _maybe_cleanup_replay_cache(self._replay_cache)
         if not self._replay_cache.check_and_insert(parsed.id, replay_expiry):
             raise ValueError(
                 "LogoutRequest replay detected: this request ID was already processed"
