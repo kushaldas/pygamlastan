@@ -137,7 +137,7 @@ and the replay cache. See the :doc:`../guides/validation` guide.
               print(failed.check_number, failed.check_name, failed.detail)
 
       audience = result.by_name("Audience restriction")
-      age = result.get(0)
+      age = result.get(35)                  # checklist #35 (assertion age)
 
 .. py:class:: ValidationCheck
 

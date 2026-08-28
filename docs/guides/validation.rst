@@ -81,7 +81,7 @@ inspect every check. (``process_response`` raises
            print(check.check_number, check.check_name, check.detail)
 
    # Individual outcomes are addressable for profile-specific logic.
-   age = result.get(0)
+   age = result.get(35)                      # checklist #35 (assertion age)
    audience = result.by_name("Audience restriction")
    passed = result.passed_checks()
 

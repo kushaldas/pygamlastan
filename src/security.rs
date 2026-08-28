@@ -235,7 +235,7 @@ impl ValidationResult {
             .map(check_to_py)
             .collect()
     }
-    /// The check with the given checklist number (1-32), or None. Lets a profile
+    /// The check with the given checklist number (1-35), or None. Lets a profile
     /// inspect one specific outcome without re-walking the full `checks` list.
     fn get(&self, check_number: u32) -> Option<ValidationCheck> {
         self.inner

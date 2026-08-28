@@ -956,6 +956,57 @@ def test_idp_process_authn_request():
     assert processed.authn_context_comparison is None
 
 
+def test_idp_process_authn_request_signature_required_by_metadata():
+    """`request_signature_verified` is the security boundary added in this
+    release: when the SP metadata declares AuthnRequestsSigned, processing
+    must fail with the default/explicit False and succeed only when the
+    transport layer attests True. Pins the boolean forwarding through the
+    binding - a dropped or inverted argument would otherwise pass CI."""
+    req = xml.parse_authn_request(AUTHN_REQUEST)
+    signed_md = metadata.parse_entity(
+        SAMPLE_SP_METADATA.replace(
+            "<md:SPSSODescriptor ",
+            '<md:SPSSODescriptor AuthnRequestsSigned="true" ',
+        )
+    )
+    with pytest.raises(pygamlastan.SamlProfileError):
+        profiles.process_authn_request(req, signed_md)  # default False
+    with pytest.raises(pygamlastan.SamlProfileError):
+        profiles.process_authn_request(req, signed_md, request_signature_verified=False)
+    processed = profiles.process_authn_request(
+        req, signed_md, request_signature_verified=True
+    )
+    assert processed.sp_entity_id == SP
+    assert processed.acs_url == ACS
+
+
+def test_idp_process_authn_request_signature_markup_requires_provenance():
+    """A request CARRYING signature markup is rejected without verified
+    provenance even when the metadata does not require signing: markup alone
+    is never trusted, only the transport layer's attestation counts."""
+    sig_markup = (
+        '<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:SignedInfo>'
+        '<ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>'
+        '<ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>'
+        '<ds:Reference URI="#_req1"><ds:Transforms>'
+        '<ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/>'
+        "</ds:Transforms>"
+        '<ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>'
+        "<ds:DigestValue/></ds:Reference></ds:SignedInfo>"
+        "<ds:SignatureValue/></ds:Signature>"
+    )
+    signed_req = AUTHN_REQUEST.replace("</saml:Issuer>", "</saml:Issuer>" + sig_markup)
+    req = xml.parse_authn_request(signed_req)
+    assert req.has_signature is True
+    sp_md = metadata.parse_entity(SAMPLE_SP_METADATA)
+    with pytest.raises(pygamlastan.SamlProfileError):
+        profiles.process_authn_request(req, sp_md)  # default False
+    processed = profiles.process_authn_request(
+        req, sp_md, request_signature_verified=True
+    )
+    assert processed.request_id == "_req1"
+
+
 def test_idp_process_authn_request_issuer_mismatch_rejected():
     """The supplied SP metadata must belong to the request Issuer. Upstream
     resolves sp_entity_id from the Issuer but only sees the SPSSODescriptor,
