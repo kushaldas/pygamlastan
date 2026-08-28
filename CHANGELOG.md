@@ -81,7 +81,9 @@ surfaces; see the migration notes inline.
   one parameter must not turn a signed request into an unsigned one: the
   django-idp example, the IdP integration guide, and the compat SP's
   `handle_logout_request` now fail on an incomplete
-  SigAlg/Signature/signed-query tuple before any verification decision.
+  SigAlg/Signature/signed-query tuple before any verification decision - in
+  the compat SP the check runs before the certificate lookup, so the
+  no-certificate development fallback cannot accept a partial tuple either.
 - **The pysaml2 compat SP now cryptographically verifies inbound LogoutRequests**
   (`Saml2Client.handle_logout_request`) against the IdP's metadata signing
   certificates before destroying any session. When no signing certificate is
@@ -100,6 +102,9 @@ surfaces; see the migration notes inline.
   without `NotOnOrAfter` is subject to the shim's own 24h age limit from
   `IssueInstant`, with the replay entry retained past that whole window - so a
   captured request can never outlive its replay entry and be accepted again.
+  An `IssueInstant` more than the 180s clock skew in the future is rejected
+  outright, so a forged timestamp cannot pin a replay entry arbitrarily far
+  into the future.
   The signed Redirect query's `RelayState` must also equal the one the handler
   echoes back (or be absent from both), so an unsigned `RelayState` cannot
   ride along a valid signature. The no-certificate development fallback

@@ -585,6 +585,18 @@ class Saml2Client:
         # old before its replay entry can ever expire, keeping one-time use
         # airtight either way.
         now = datetime.now(timezone.utc)
+        # Reject an IssueInstant beyond the validation clock skew in the
+        # future before selecting either expiry branch: upstream
+        # validate_logout_request checks only NotOnOrAfter, so a far-future
+        # IssueInstant would otherwise pass the age check and pin a replay
+        # entry expiring 24h after that future instant - unbounded cache
+        # retention for what may be (in the no-certificate fallback) an
+        # unauthenticated request.
+        if parsed.issue_instant - now > timedelta(seconds=180):
+            raise ValueError(
+                "LogoutRequest IssueInstant is in the future beyond the "
+                "accepted clock skew"
+            )
         if parsed.not_on_or_after is not None:
             replay_expiry = parsed.not_on_or_after + timedelta(seconds=180)
         else:
@@ -652,6 +664,26 @@ class Saml2Client:
         verified. Configure IdP metadata with a signing certificate to enforce
         LogoutRequest signatures.
         """
+        # Extract the detached-signature material and enforce tuple
+        # completeness BEFORE any certificate lookup: an incomplete tuple
+        # (e.g. SigAlg with a stripped Signature) is an error everywhere,
+        # including the no-certificate development fallback below - otherwise
+        # a known IdP without metadata keys could have a partial tuple
+        # accepted as "unsigned". A genuinely unsigned request (no signature
+        # fields at all) may still reach the fallback.
+        sig_alg = kwargs.get("sig_alg")
+        signature = kwargs.get("signature")
+        signed_query = kwargs.get("signed_query")
+        if (
+            binding == BINDING_HTTP_REDIRECT
+            and any((sig_alg, signature, signed_query))
+            and not (sig_alg and signature and signed_query)
+        ):
+            raise ValueError(
+                "incomplete redirect signature: sig_alg, signature and "
+                "signed_query must all be supplied together"
+            )
+
         try:
             certs = self.config.idp_signing_certs(expected_idp)
         except ValueError:
@@ -684,24 +716,9 @@ class Saml2Client:
 
         # HTTP-Redirect binding: detached signature over the query string. The
         # web handler must forward the SigAlg/Signature parameters and the exact
-        # signed portion of the query it received. Any published (rollover)
-        # certificate may have produced the signature.
-        sig_alg = kwargs.get("sig_alg")
-        signature = kwargs.get("signature")
-        signed_query = kwargs.get("signed_query")
-        # An incomplete tuple is an error, never "unsigned": a stripped
-        # Signature parameter (the decoder permits SigAlg alone) must surface
-        # as a hard failure rather than silently falling through to the
-        # unsigned handling.
-        if (
-            binding == BINDING_HTTP_REDIRECT
-            and any((sig_alg, signature, signed_query))
-            and not (sig_alg and signature and signed_query)
-        ):
-            raise ValueError(
-                "incomplete redirect signature: sig_alg, signature and "
-                "signed_query must all be supplied together"
-            )
+        # signed portion of the query it received (tuple completeness was
+        # enforced above, before the certificate lookup). Any published
+        # (rollover) certificate may have produced the signature.
         if binding == BINDING_HTTP_REDIRECT and sig_alg and signature and signed_query:
             # Bind the signed query to THIS message before trusting its
             # signature: a valid signed query captured from a different

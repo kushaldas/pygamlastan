@@ -1221,6 +1221,38 @@ def test_handle_logout_request_incomplete_redirect_signature_rejected(rsa_keypai
         )
 
 
+def test_handle_logout_request_incomplete_tuple_rejected_without_cert(client):
+    """The incomplete-tuple check runs BEFORE the certificate lookup: a known
+    IdP without metadata keys (the no-certificate development fallback) must
+    not accept SigAlg with a stripped Signature as 'unsigned'."""
+    encoded = deflate_and_base64_encode(_logout_request("id-lr-partial-nocert"))
+    signed_query = "SAMLRequest=" + urllib.parse.quote(encoded, safe="")
+    with pytest.raises(ValueError, match="incomplete redirect signature"):
+        client.handle_logout_request(
+            encoded, _session_nameid(), BINDING_HTTP_REDIRECT,
+            sig_alg="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+            signed_query=signed_query,  # no signature
+        )
+
+
+def test_handle_logout_request_future_issue_instant_rejected(client):
+    """A far-future IssueInstant is rejected (beyond the 180s skew): upstream
+    validation checks only NotOnOrAfter, and without this a request could pin
+    a replay entry expiring 24h after that future instant - unbounded cache
+    retention, unauthenticated in the no-certificate fallback."""
+    future = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    encoded = deflate_and_base64_encode(
+        _logout_request("id-lr-future", issue_instant=future)
+    )
+    with pytest.warns(UserWarning, match="No signing certificate"):
+        with pytest.raises(ValueError, match="in the future"):
+            client.handle_logout_request(
+                encoded, _session_nameid(), BINDING_HTTP_REDIRECT
+            )
+
+
 def test_handle_logout_request_relay_state_bound(rsa_keypair, tmp_path):
     """RelayState is part of the signed query: a matching echo is accepted (and
     carried on the response redirect); a substituted one is rejected."""
