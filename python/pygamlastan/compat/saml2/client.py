@@ -819,15 +819,29 @@ class Saml2Client:
             last_error: Exception | None = None
             for verifier in verifiers:
                 try:
-                    signed_ids = [
-                        ref
-                        for result in verifier.verify_all_enveloped(xml)
-                        for ref in result.signed_reference_ids()
-                    ]
+                    results = verifier.verify_all_enveloped(xml)
                 except Exception as e:
                     # Not signed by this (rollover) certificate; try the next.
                     last_error = e
                     continue
+                # verify_all_enveloped can RETURN an invalid VerifyResult
+                # rather than raising (e.g. a tampered SignatureValue), so
+                # require at least one result and that every signature present
+                # verifies under this certificate before its reference IDs
+                # count for anything.
+                invalid = [r for r in results if not r.is_valid()]
+                if not results or invalid:
+                    reasons = "; ".join(
+                        r.reason or "invalid signature" for r in invalid
+                    )
+                    last_error = ValueError(
+                        "LogoutRequest XML signature is invalid"
+                        + (f": {reasons}" if reasons else ": no signature found")
+                    )
+                    continue
+                signed_ids = [
+                    ref for result in results for ref in result.signed_reference_ids()
+                ]
                 if parsed.id in signed_ids:
                     break
                 last_error = ValueError(

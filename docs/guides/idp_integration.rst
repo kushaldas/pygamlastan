@@ -90,13 +90,18 @@ against the SP's metadata signing keys:
    if request.has_signature:
        for v in verifiers:
            try:
-               signed_ids = [
-                   ref
-                   for result in v.verify_all_enveloped(request_xml)
-                   for ref in result.signed_reference_ids()
-               ]
+               results = v.verify_all_enveloped(request_xml)
            except Exception:
                continue    # not signed by this (rollover) certificate
+           # verify_all_enveloped can RETURN an invalid VerifyResult rather
+           # than raising (e.g. a tampered SignatureValue): require at least
+           # one result and that every signature present is valid before its
+           # reference IDs count for anything.
+           if not results or not all(r.is_valid() for r in results):
+               continue
+           signed_ids = [
+               ref for result in results for ref in result.signed_reference_ids()
+           ]
            if request.id in signed_ids:
                break
        else:

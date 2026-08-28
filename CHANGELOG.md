@@ -127,7 +127,11 @@ surfaces; see the migration notes inline.
   produced with either the old or the new key during a rollover still verifies.
   The Redirect loops tolerate a certificate that makes verification *raise*
   (e.g. a key-type/algorithm mismatch on a retired key) and keep trying the
-  remaining certificates, failing only after all were attempted.
+  remaining certificates, failing only after all were attempted. The enveloped
+  loops check `VerifyResult.is_valid()` explicitly - `verify_all_enveloped`
+  can *return* an invalid result (e.g. a tampered `SignatureValue`) rather
+  than raising, and reference IDs only count when every signature present
+  verifies.
 
 ## [0.3.0] - 2026-07-07
 

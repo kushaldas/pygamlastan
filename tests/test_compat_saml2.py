@@ -1198,6 +1198,27 @@ def test_handle_logout_request_enveloped_signature_post(rsa_keypair, tmp_path):
     assert info["headers"][0][1].startswith(IDPSLO + "?SAMLResponse=")
 
 
+def test_handle_logout_request_tampered_signature_value_rejected(rsa_keypair, tmp_path):
+    """A trusted-key enveloped signature whose SignatureValue was corrupted is
+    rejected. This exercises the non-raising path: verify_all_enveloped
+    RETURNS an invalid VerifyResult here (unlike the wrong-key case, which
+    raises), so the loop must check is_valid() rather than accept reference
+    IDs from an invalid result."""
+    import re
+
+    priv, _cert_pem, cert_der_b64 = rsa_keypair
+    client = _signed_client(tmp_path, cert_der_b64)
+    signed_xml = _enveloped_signed_logout("id-lr-sigval-tamper", cert_der_b64, priv)
+    match = re.search(r"<ds:SignatureValue>([^<]+)</ds:SignatureValue>", signed_xml, re.S)
+    assert match is not None
+    value = match.group(1)
+    flipped = ("B" if value.lstrip()[0] != "B" else "C") + value.lstrip()[1:]
+    tampered = signed_xml.replace(value, flipped, 1)
+    raw = base64.b64encode(tampered.encode("utf-8")).decode("ascii")
+    with pytest.raises(ValueError, match="invalid LogoutRequest"):
+        client.handle_logout_request(raw, _session_nameid(), BINDING_HTTP_POST)
+
+
 def test_handle_logout_request_enveloped_wrong_key_rejected(rsa_keypair, rsa_keypair2, tmp_path):
     """An enveloped signature by a key NOT published in the IdP metadata is
     rejected."""
