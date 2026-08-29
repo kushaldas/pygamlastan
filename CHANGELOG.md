@@ -111,7 +111,10 @@ surfaces; see the migration notes inline.
   pin replay entries arbitrarily far into the future.
   The signed Redirect query's `RelayState` must also equal the one the handler
   echoes back (or be absent from both), so an unsigned `RelayState` cannot
-  ride along a valid signature. The no-certificate development fallback
+  ride along a valid signature. A present `Destination` must name one of this
+  SP's configured SLO endpoints, so a request validly signed by the trusted
+  IdP but addressed to a different SP cannot be relayed here to destroy a
+  session. The no-certificate development fallback
   applies only to an IdP actually present in the SP configuration or
   metadata - an arbitrary caller-supplied `expected_idp` is rejected instead
   of becoming a trusted unsigned issuer.

@@ -124,10 +124,15 @@ def _logout_response(req_id: str) -> str:
 </samlp:LogoutResponse>"""
 
 
-def _logout_request(req_id: str, issuer: str = IDP, issue_instant: str | None = None) -> str:
+def _logout_request(
+    req_id: str,
+    issuer: str = IDP,
+    issue_instant: str | None = None,
+    destination: str = SLO,
+) -> str:
     ts = issue_instant or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return f"""<?xml version='1.0' encoding='UTF-8'?>
-<samlp:LogoutRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="{req_id}" IssueInstant="{ts}" Version="2.0" Destination="{SLO}">
+<samlp:LogoutRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="{req_id}" IssueInstant="{ts}" Version="2.0" Destination="{destination}">
   <saml:Issuer>{issuer}</saml:Issuer>
   <saml:NameID Format="{TRANSIENT}" SPNameQualifier="{SP}">abc123hash</saml:NameID>
   <samlp:SessionIndex>session-1</samlp:SessionIndex>
@@ -1229,6 +1234,41 @@ def test_handle_logout_request_enveloped_wrong_key_rejected(rsa_keypair, rsa_key
     raw = base64.b64encode(signed_xml.encode("utf-8")).decode("ascii")
     with pytest.raises(ValueError, match="invalid LogoutRequest"):
         client.handle_logout_request(raw, _session_nameid(), BINDING_HTTP_POST)
+
+
+def test_handle_logout_request_foreign_destination_rejected(client):
+    """A LogoutRequest whose Destination names another SP's SLO endpoint is
+    rejected: Destination must match one of THIS SP's configured endpoints."""
+    encoded = deflate_and_base64_encode(
+        _logout_request("id-lr-foreign-dest", destination="https://other-sp.example/slo")
+    )
+    with pytest.raises(ValueError, match="not a configured SLO endpoint"):
+        client.handle_logout_request(encoded, _session_nameid(), BINDING_HTTP_REDIRECT)
+
+
+def test_handle_logout_request_signed_foreign_destination_rejected(rsa_keypair, tmp_path):
+    """The exact attack: a request VALIDLY SIGNED by the trusted IdP but
+    addressed to a different SP's SLO endpoint passes issuer/signature/subject
+    checks yet must still be rejected on Destination."""
+    priv, _cert_pem, cert_der_b64 = rsa_keypair
+    client = _signed_client(tmp_path, cert_der_b64)
+    signer = crypto.SamlSigner.from_pem(priv)
+    sig_alg = signer.signature_method_uri()
+    encoded = deflate_and_base64_encode(
+        _logout_request("id-lr-signed-foreign", destination="https://other-sp.example/slo")
+    )
+    signed_query = (
+        "SAMLRequest=" + urllib.parse.quote(encoded, safe="")
+        + "&SigAlg=" + urllib.parse.quote(sig_alg, safe="")
+    )
+    signature = base64.b64encode(
+        signer.sign_redirect_query(signed_query.encode("utf-8"), sig_alg)
+    ).decode("ascii")
+    with pytest.raises(ValueError, match="not a configured SLO endpoint"):
+        client.handle_logout_request(
+            encoded, _session_nameid(), BINDING_HTTP_REDIRECT,
+            sig_alg=sig_alg, signature=signature, signed_query=signed_query,
+        )
 
 
 def test_handle_logout_request_incomplete_redirect_signature_rejected(rsa_keypair, tmp_path):

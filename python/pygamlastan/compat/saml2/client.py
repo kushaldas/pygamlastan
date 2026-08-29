@@ -541,11 +541,31 @@ class Saml2Client:
         # ValueError("invalid LogoutRequest: ..."). validate_logout_request
         # requires the Issuer to equal the trusted IdP, proof of signature
         # verification, a present NameID, and an unexpired NotOnOrAfter (default
-        # 180s skew), so an unsigned, misattributed, or stale LogoutRequest
-        # cannot force-log out a session.
+        # 180s skew); the shim additionally requires a present Destination to
+        # name one of this SP's configured SLO endpoints - so an unsigned,
+        # misattributed, misaddressed, or stale LogoutRequest cannot force-log
+        # out a session.
         try:
             xml = self._decode_message(request, binding)
             parsed = _xml.parse_logout_request(xml)
+            # Destination binding: a present Destination must name one of THIS
+            # SP's configured SLO endpoints. Without this, a request validly
+            # signed by the trusted IdP but addressed to a different SP (or a
+            # different endpoint) would pass the issuer/signature/subject
+            # checks and destroy a session here - upstream
+            # validate_logout_request does not check Destination, and the shim
+            # never sees the actual request URL, so the configured endpoints
+            # are the local ground truth. Any configured SLO endpoint counts
+            # (not just the received binding's): the attack is cross-SP
+            # relay, and deployments commonly publish one endpoint while
+            # accepting both bindings on it.
+            if parsed.destination is not None:
+                local_slo = {url for url, _b in self.config.slo_endpoints}
+                if parsed.destination not in local_slo:
+                    raise ValueError(
+                        f"LogoutRequest Destination {parsed.destination!r} is "
+                        "not a configured SLO endpoint of this SP"
+                    )
             signature_verified = self._verify_logout_request_signature(
                 xml, binding, expected_idp, parsed, kwargs, relay_state
             )
