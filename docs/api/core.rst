@@ -171,8 +171,9 @@ read-only.
 .. py:class:: LogoutRequest
 
    ``id``, ``issue_instant``, ``destination``, ``issuer``, ``reason``,
-   ``name_id`` (:class:`NameId` | None), ``session_indexes`` (list of str).
-   :py:meth:`to_xml() -> str`.
+   ``not_on_or_after`` (datetime | None), ``name_id`` (:class:`NameId` | None),
+   ``session_indexes`` (list of str), ``has_signature`` (bool - markup
+   presence, never proof of validity). :py:meth:`to_xml() -> str`.
 
 .. py:class:: LogoutResponse
 

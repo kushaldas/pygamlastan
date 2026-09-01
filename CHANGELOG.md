@@ -8,6 +8,142 @@ security handling. `pygamlastan` is a thin PyO3 binding; most entries below
 reflect adopting a change made in `gamlastan` / `uppsala` / `bergshamra` and
 surfacing it correctly to Python.
 
+## [0.4.0] - 2026-09-01
+
+Adopts the upstream `gamlastan` 0.8 hardening release. This is an API-breaking
+release for the IdP request-processing, Single Logout, and persistent-NameID
+surfaces; see the migration notes inline.
+
+### Changed
+
+- **Upgraded the upstream library baseline to the released `gamlastan` 0.8.0.**
+  The Rust dependency now tracks `kryptering` 0.5 and pulls the matching `uppsala` 0.9 /
+  `bergshamra` 0.8 XML-security stack, all consumed from crates.io.
+- **`profiles.process_authn_request(request, sp_metadata, request_signature_verified=False)`**
+  — `sp_metadata` is now a required positional argument (the
+  `unsafe_allow_missing_metadata` escape hatch is gone) and a new
+  `request_signature_verified` argument carries transport-verified signature
+  provenance. gamlastan resolves the ACS location together with its registered
+  binding, and enforces the SP's `AuthnRequestsSigned` policy. The binding also
+  requires the request `Issuer` to be present and equal to the supplied
+  metadata's `entityID` - otherwise metadata for one SP processed alongside a
+  request claiming another would return the claimed entity id while enforcing
+  the wrong SP's endpoints and signing policy. `ProcessedAuthnRequest` gains an
+  `authn_context_comparison` getter.
+- **`logout.validate_logout_request(request, expected_issuer, signature_verified, now, clock_skew_seconds=180)`**
+  — now takes the trusted `expected_issuer` and a `signature_verified` proof;
+  the Issuer must match and an unverified request is rejected.
+- **`SpLogoutOrchestrator.handle_response(response, signature_verified)`** — now
+  requires a `signature_verified` proof; correlation alone can no longer
+  authenticate a LogoutResponse.
+- **`profiles.process_response` / `process_response_verified` / `security.validate_response`**
+  gain a `persistent_id_principal` argument. Enabling persistent-NameID
+  uniqueness (E78) now requires both a `persistent_id_store` and this independent
+  local principal; `LogoutRequest` gains `has_signature` and `not_on_or_after`
+  getters.
+- Metadata parsing (`metadata.parse_entity` / `parse_entities`) now uses
+  gamlastan's `parse_secure_metadata`, which keeps every hardening guard while
+  accepting the structural comments and processing instructions real federation
+  aggregates carry (a comment/PI that splits a signed text value is still
+  rejected).
+- Refreshed the Python dependencies of the `examples/django-idp` and
+  `examples/django-sp` apps (Django 6.0.7, cryptography >=50, gunicorn >=26,
+  whitenoise >=6.12) and the dev tooling (pytest >=9).
+
+### Security
+
+- **Replay protection is now effectively mandatory.** gamlastan fails the
+  replay check (20) closed when no replay cache is configured, so
+  `unsafe_no_replay_cache=True` can no longer produce a valid result — it only
+  relocates the failure from the binding precondition into the validation
+  output. Supply an `InMemoryReplayCache` or a protocol implementation. The
+  pysaml2 compat SP shim now holds a replay cache shared across every
+  `Saml2Client` instance for the lifetime of the process (rebuilding the client
+  per request no longer resets replay state); multi-process deployments can
+  inject a shared implementation via `Saml2Client(config, replay_cache=...)`.
+  The shim also evicts expired entries by scheduling a throttled
+  `cleanup()` from its processing paths - gamlastan's `check_and_insert`
+  never removes other entries on its own, so a long-running SP would
+  otherwise grow the cache without bound. The throttle is tracked per cache,
+  so several injected caches each receive periodic maintenance instead of one
+  cache's traffic starving the others. Replay keys in the compat shim are now
+  stable ASCII values namespaced by message kind, local SP entity ID, and
+  trusted expected IdP. This prevents an assertion or LogoutRequest in one
+  trust context from reserving the same raw SAML ID in another context and
+  causing a cross-context denial of service. Existing raw keys in persistent
+  injected caches are not reused after this key-schema change; deployments
+  requiring uninterrupted replay memory should drain the previous messages'
+  validity window before switching versions.
+- **Persistent-NameID uniqueness (E78) is now opt-in and correctly keyed.** It
+  defaults off and, when enabled, is keyed by an application-supplied
+  `persistent_id_principal` established independently of the asserted NameID
+  (the previous behavior keyed it by the NameID itself and could never detect a
+  reassignment). Supplying a `persistent_id_store` without a principal only
+  errors when the check actually applies (E78 enabled and the response carries
+  a persistent NameID); a dormant store is ignored, so callers that always
+  inject one keep working with the opt-in default.
+- **Partial Redirect signature tuples are rejected, never downgraded to
+  "unsigned".** The decoder permits `SigAlg` without `Signature`, so stripping
+  one parameter must not turn a signed request into an unsigned one: the
+  django-idp example, the IdP integration guide, and the compat SP's
+  `handle_logout_request` now fail on an incomplete
+  SigAlg/Signature/signed-query tuple before any verification decision - in
+  the compat SP the check runs before the certificate lookup, so the
+  no-certificate development fallback cannot accept a partial tuple either.
+- **The pysaml2 compat SP now cryptographically verifies inbound LogoutRequests**
+  (`Saml2Client.handle_logout_request`) against the IdP's metadata signing
+  certificates before destroying any session. When no signing certificate is
+  configured for the IdP it **fails closed** unless the SP settings explicitly
+  opt in with `allow_unsigned_logout_requests: True` (development /
+  transport-authenticated parity; the opt-in still warns on every accepted
+  unsigned request) - a silent production metadata omission cannot downgrade
+  the endpoint to unsigned requests. Configure IdP metadata with a signing
+  certificate to enforce signatures. The Redirect binding accepts the detached
+  signature via `sig_alg` / `signature` / `signed_query` keyword arguments, and
+  the signed query is bound to the processed message before its signature
+  counts: the `SAMLRequest` it carries must decode to the exact LogoutRequest
+  XML under validation and its `SigAlg` must be the algorithm used for
+  verification, so a valid signed query captured from another request cannot
+  vouch for a substituted one. Verified LogoutRequests are also **one-time
+  use**: the request ID is recorded atomically in the shared replay cache
+  before the success response authorizes session destruction. A request that
+  declares `NotOnOrAfter` is retained through that window (plus skew); one
+  without `NotOnOrAfter` is subject to the shim's own 24h age limit from
+  `IssueInstant`, with the replay entry retained past that whole window - so a
+  captured request can never outlive its replay entry and be accepted again.
+  An `IssueInstant` more than the 180s clock skew in the future is rejected
+  outright, and a request-declared `NotOnOrAfter` further ahead than the same
+  24h window is rejected too, so a forged timestamp or validity window cannot
+  pin replay entries arbitrarily far into the future.
+  The signed Redirect query's `RelayState` must also equal the one the handler
+  echoes back (or be absent from both), so an unsigned `RelayState` cannot
+  ride along a valid signature. A present `Destination` must name one of this
+  SP's configured SLO endpoints for the received binding, so a request validly
+  signed by the trusted IdP but addressed to a different SP or binding cannot
+  be relayed here to destroy a session. Deployments accepting multiple
+  bindings at one URL must configure that URL for each binding. The
+  no-certificate development fallback
+  applies only to an IdP actually present in the SP configuration or
+  metadata - an arbitrary caller-supplied `expected_idp` is rejected instead
+  of becoming a trusted unsigned issuer.
+- **Binding output is decoded strictly before verification** in the example
+  apps and guides: the exact `saml_xml` bytes are decoded as strict UTF-8
+  instead of the lossy, display-only `saml_text` projection, so malformed
+  input is rejected rather than silently transformed into different XML than
+  the bytes the binding authenticated.
+- **Signature verification is key-rollover aware.** The compat SP (Response and
+  LogoutRequest verification, via the new `SPConfig.idp_signing_certs`) and the
+  django-idp example (AuthnRequest verification) now try every signing
+  certificate published in metadata instead of only the first, so a signature
+  produced with either the old or the new key during a rollover still verifies.
+  The Redirect loops tolerate a certificate that makes verification *raise*
+  (e.g. a key-type/algorithm mismatch on a retired key) and keep trying the
+  remaining certificates, failing only after all were attempted. The enveloped
+  loops check `VerifyResult.is_valid()` explicitly - `verify_all_enveloped`
+  can *return* an invalid result (e.g. a tampered `SignatureValue`) rather
+  than raising, and reference IDs only count when every signature present
+  verifies.
+
 ## [0.3.0] - 2026-07-07
 
 ### Added
@@ -172,5 +308,6 @@ surfacing it correctly to Python.
 Initial released binding over `gamlastan` 0.5.0. See the Git history for the
 change set prior to this changelog.
 
+[0.4.0]: https://github.com/kushaldas/pygamlastan/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/kushaldas/pygamlastan/compare/ee774370e76d5dd422ddfbe59ed264ed4367918a...v0.3.0
 [0.2.0]: https://github.com/kushaldas/pygamlastan/compare/v0.1.1...ee774370e76d5dd422ddfbe59ed264ed4367918a

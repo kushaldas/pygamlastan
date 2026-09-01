@@ -103,19 +103,25 @@ result in one call.
 
 .. code-block:: python
 
-   def complete_login(self, form_pairs, expected_request_id):
+   def complete_login(self, form_pairs, expected_request_id, local_account_id):
        decoded = bindings.post_decode(form_pairs)   # list[(name, value)]
+       # Strict UTF-8: `saml_text` is a lossy, display-only projection - base
+       # every security decision on the exact bytes (`saml_xml`).
+       response_xml = decoded.saml_xml.decode("utf-8")
        verifier = crypto.SamlVerifier.from_cert(self.idp_signing_cert())
+       cfg = security.SecurityConfig()              # production-safe defaults
+       cfg.enforce_persistent_id_uniqueness = True  # E78 is opt-in; see below
        result = profiles.process_response_verified(
-           decoded.saml_text,
+           response_xml,
            verifier,
-           security.SecurityConfig(),               # production-safe defaults
+           cfg,
            sp_entity_id=self.entity_id,
            acs_url=self.acs_url,
            expected_idp_entity_id=self.idp.entity_id,
            expected_request_id=expected_request_id,
            replay_cache=self.replay_cache,
            persistent_id_store=self.id_store,
+           persistent_id_principal=local_account_id,
        )
        return result                                 # a profiles.AuthnResult
 
@@ -128,9 +134,13 @@ Three deliberate choices, each a profile rule:
 * **Use** :func:`~pygamlastan.profiles.process_response_verified`, not
   ``process_response`` with a hand-passed ``verified_signed_ids`` - the former
   cannot be tricked into "trusting" an unverified response.
-* **Supply a** ``persistent_id_store``. Because the request asked for a
-  persistent ``NameID``, validation requires a store so a persistent identifier
-  cannot be silently re-bound to a different principal.
+* **Supply a** ``persistent_id_store`` **and** ``persistent_id_principal`` when
+  you enable persistent-``NameID`` uniqueness (``enforce_persistent_id_uniqueness``,
+  off by default). The principal is your local account id, resolved
+  *independently* of the asserted NameID and passed into ``complete_login``, so a
+  persistent identifier cannot be silently re-bound to a different principal.
+  gamlastan will not enforce E78 from the SAML input alone, which is why both are
+  required.
 
 The persistent-ID store is the one piece of state you must implement. Any backend
 works; it fails closed, so a raised exception is treated as a conflict:
@@ -158,15 +168,20 @@ Step 4 - use the identity
 -------------------------
 
 :class:`~pygamlastan.profiles.AuthnResult` is the clean output - no XML, no
-borrowing from the parsed document:
+borrowing from the parsed document. Here the surrounding application supplies
+the local account it resolved independently of the asserted SAML NameID:
 
 .. code-block:: python
 
-   result = profile.complete_login(form_pairs, expected_request_id)
-   user_key = result.name_id                       # stable per-SP identifier
-   issuer = result.idp_entity_id
-   attrs = result.attributes_dict()                # {name: [values]}
-   # e.g. attrs["urn:oid:0.9.2342.19200300.100.1.3"] -> ["alice@example.org"]
+   def finish_login(profile, form_pairs, expected_request_id, local_account_id):
+       result = profile.complete_login(
+           form_pairs, expected_request_id, local_account_id
+       )
+       user_key = result.name_id                   # stable per-SP identifier
+       issuer = result.idp_entity_id
+       attrs = result.attributes_dict()            # {name: [values]}
+       # e.g. attrs["urn:oid:0.9.2342.19200300.100.1.3"] -> ["alice@example.org"]
+       return user_key, issuer, attrs
 
 Map the wire attribute names to friendly local names with
 :doc:`../api/attribute_map` if you prefer ``mail`` over the OID.
@@ -175,10 +190,11 @@ Map the wire attribute names to friendly local names with
 Adding a profile rule
 ----------------------
 
-The 32-check suite ran inside ``process_response_verified``. To enforce a *33rd*
-rule specific to your profile, inspect the typed ``AuthnResult`` you already
-hold - no need to re-parse. For example, require a step-up authentication
-context:
+The full validation suite (the 32-item Section 7.2 checklist plus
+response-envelope checks 33-34 and the per-assertion age check 35) ran inside
+``process_response_verified``. To enforce a further rule specific to your
+profile, inspect the typed ``AuthnResult`` you already hold - no need to
+re-parse. For example, require a step-up authentication context:
 
 .. code-block:: python
 

@@ -14,11 +14,10 @@ top of `examples/`; each app keeps only its own code, `Dockerfile`, and data dir
 ## Quick start (Docker Compose + Caddy + mkcert)
 
 Prerequisites: Docker (with Compose), [`just`](https://github.com/casey/just),
-and [`mkcert`](https://github.com/FiloSottile/mkcert). Until `pygamlastan` is on
-PyPI, also Rust + `maturin` for the one-time wheel build.
+[`mkcert`](https://github.com/FiloSottile/mkcert), Rust, and `maturin`.
 
-The example apps require `pygamlastan>=0.3.0`, the binding release aligned with
-`gamlastan` 0.7.0.
+The example apps require `pygamlastan>=0.4.0`, the binding release aligned with
+`gamlastan` 0.8.0.
 
 ```console
 # 0. configure (.env is gitignored). Defaults use *.gamlastan.sverige.
@@ -27,17 +26,15 @@ cp .env-example .env
 # Point the two hostnames at localhost so the browser reaches Caddy:
 #   echo "127.0.0.1 idp.gamlastan.sverige sp.gamlastan.sverige" | sudo tee -a /etc/hosts
 
-# 1. (only until pygamlastan is on PyPI) build a wheel into both app wheel dirs
-just wheel
-
-# 2. mkcert TLS certs for both domains, SWAMID cert, build, start, exchange metadata
+# 1. build and stage the local pygamlastan wheel, create certificates, and start
 just up
 ```
 
-`just up` runs `tls` (mkcert certs into `./certs/{idp,sp}`), `swamid-cert`,
-`docker compose up -d --build`, then `link` - which fetches each party's
-metadata and drops it into the other's local metadata dir so the **local IdP and
-SP trust each other without SWAMID**.
+`just up` first builds the repository's `pygamlastan` wheel into both app build
+contexts, then runs `tls` (mkcert certs into `./certs/{idp,sp}`),
+`swamid-cert`, and `docker compose up -d --build`. Run `just link` after the
+first start to fetch each party's metadata into the other's local metadata dir
+so the **local IdP and SP trust each other without SWAMID**.
 
 Then:
 

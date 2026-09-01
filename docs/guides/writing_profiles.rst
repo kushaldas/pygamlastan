@@ -185,13 +185,15 @@ database row with a unique constraint:
            return row[0] == principal   # False => reassignment, rejected
 
    cfg = security.SecurityConfig()
-   cfg.enforce_persistent_id_uniqueness = True   # default True; explicit here
+   cfg.enforce_persistent_id_uniqueness = True   # default False; opt in explicitly
    result = security.validate_response(
        response, cfg,
        received_url=ACS, expected_idp_entity_id=IDP,
        sp_entity_id=SP, acs_url=ACS, expected_request_id="_req1",
        replay_cache=security.InMemoryReplayCache(),
        persistent_id_store=DbPersistentIdStore(conn),
+       # The local account id resolved independently of the asserted NameID.
+       persistent_id_principal=local_account_id,
    )
 
 .. note::
@@ -202,10 +204,11 @@ database row with a unique constraint:
 Layer profile-specific checks
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-gamlastan runs its 32-check suite as a unit. To add a 33rd, profile-specific
-rule, run the suite and then apply your own check on the parsed response - you
-do **not** have to re-walk the document, because every built-in outcome is
-addressable and you already hold the typed objects:
+gamlastan runs its validation suite as a unit (the 32-item Section 7.2 checklist
+plus response-envelope checks 33-34 and the per-assertion age check 35). To add
+a further profile-specific rule, run the suite and then apply your own check on
+the parsed response - you do **not** have to re-walk the document, because every
+built-in outcome is addressable and you already hold the typed objects:
 
 .. code-block:: python
 
@@ -216,7 +219,7 @@ addressable and you already hold the typed objects:
    )
 
    # Pull one built-in outcome out of the run by number or name:
-   age_check = result.get(0)                       # checklist #0
+   age_check = result.get(35)                      # checklist #35 (assertion age)
    audience = result.by_name("Audience restriction")
 
    # A profile rule: require a specific Authentication Context class.

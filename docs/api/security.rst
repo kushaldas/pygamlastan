@@ -69,9 +69,12 @@ and the replay cache. See the :doc:`../guides/validation` guide.
    .. py:attribute:: enforce_persistent_id_uniqueness
       :type: bool
 
-      For a persistent ``NameID``, require a ``persistent_id_store`` and reject a
-      persistent identifier silently re-bound to a different principal (SAML
-      erratum E78). On by default.
+      For a persistent ``NameID``, reject a persistent identifier silently
+      re-bound to a different principal (SAML erratum E78). **Off by default**:
+      it requires both a ``persistent_id_store`` and a ``persistent_id_principal``
+      (the local account id established independently of the asserted NameID), so
+      an SP-side validator cannot enforce it from the SAML input alone. When
+      enabled without both, the check fails closed.
 
    .. py:attribute:: reject_signatures_with_ds_object
       :type: bool
@@ -90,16 +93,23 @@ and the replay cache. See the :doc:`../guides/validation` guide.
       Require an integrity mechanism when CBC-mode encryption is used, blocking
       padding-oracle attacks (erratum E93). On by default.
 
-.. py:function:: validate_response(response, config, received_url, expected_idp_entity_id, sp_entity_id, acs_url, expected_request_id=None, client_address=None, relay_state=None, response_signature_verified=None, verified_signed_ids=None, current_proxy_depth=0, now=None, replay_cache=None, persistent_id_store=None, unsafe_no_replay_cache=False, unsafe_no_persistent_id_store=False) -> ValidationResult
+.. py:function:: validate_response(response, config, received_url, expected_idp_entity_id, sp_entity_id, acs_url, expected_request_id=None, client_address=None, relay_state=None, response_signature_verified=None, verified_signed_ids=None, current_proxy_depth=0, now=None, replay_cache=None, persistent_id_store=None, persistent_id_principal=None, unsafe_no_replay_cache=False, unsafe_no_persistent_id_store=False) -> ValidationResult
 
    Run the full validation suite over a parsed
    :class:`pygamlastan.core.Response` and return a structured
    :class:`ValidationResult` (does not raise on a validation failure).
-   ``replay_cache`` is required by default and may be an
-   :class:`InMemoryReplayCache` or any object implementing the replay-cache
-   protocol. If persistent NameID uniqueness is enabled and the response carries
-   a persistent NameID, ``persistent_id_store`` is also required unless
-   ``unsafe_no_persistent_id_store=True`` is explicit.
+   ``replay_cache`` may be an :class:`InMemoryReplayCache` or any object
+   implementing the replay-cache protocol; it is effectively mandatory, since
+   gamlastan fails the replay check (20) closed when none is configured, so
+   ``unsafe_no_replay_cache=True`` only relocates that failure into the returned
+   result. If persistent NameID uniqueness is enabled and the response carries a
+   persistent NameID, ``persistent_id_store`` **and** ``persistent_id_principal``
+   are also required. ``unsafe_no_persistent_id_store=True`` is **not** a waiver:
+   it only skips this binding-level precondition, and gamlastan then fails the
+   uniqueness check (26) closed because no store/principal reaches it - the
+   failure moves from a raised error into the returned result, which can never
+   be valid. To process responses without a store, leave
+   ``enforce_persistent_id_uniqueness`` off instead.
 
 .. py:class:: ValidationResult
 
@@ -127,7 +137,7 @@ and the replay cache. See the :doc:`../guides/validation` guide.
               print(failed.check_number, failed.check_name, failed.detail)
 
       audience = result.by_name("Audience restriction")
-      age = result.get(0)
+      age = result.get(35)                  # checklist #35 (assertion age)
 
 .. py:class:: ValidationCheck
 

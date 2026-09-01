@@ -141,17 +141,36 @@ fn create_logout_response_error(
 // validate_logout_request
 // ---------------------------------------------------------------------------
 
-/// Validate an incoming LogoutRequest: NameID present and (if present)
-/// NotOnOrAfter not expired, allowing `clock_skew_seconds` of skew. Raises
+/// Validate an incoming LogoutRequest: the Issuer must exactly match
+/// `expected_issuer` (the trusted peer's entity ID, e.g. your IdP's entity ID
+/// on the SP side), a NameID must be present, and NotOnOrAfter (if present)
+/// must not be expired, allowing `clock_skew_seconds` of skew. Raises
 /// `SamlProfileError` if invalid.
+///
+/// SECURITY: `signature_verified` must reflect cryptographic verification of
+/// THIS exact message performed by your transport layer (a Redirect-binding
+/// query signature and/or an enveloped XML-DSig checked with a real
+/// `crypto.SamlVerifier` against the peer's metadata keys). Never pass a
+/// hard-coded True: SLO destroys sessions keyed by the request-supplied
+/// NameID, so an unauthenticated LogoutRequest lets anyone who guesses a
+/// NameID force-logout a victim.
 #[pyfunction]
-#[pyo3(signature = (request, now, clock_skew_seconds=180))]
+#[pyo3(signature = (request, expected_issuer, signature_verified, now, clock_skew_seconds=180))]
 fn validate_logout_request(
     request: &LogoutRequest,
+    expected_issuer: &str,
+    signature_verified: bool,
     now: DateTime<Utc>,
     clock_skew_seconds: u64,
 ) -> PyResult<()> {
-    gl::validate_logout_request(&request.inner, now, clock_skew_seconds).map_err(profile_err)
+    gl::validate_logout_request(
+        &request.inner,
+        expected_issuer,
+        signature_verified,
+        now,
+        clock_skew_seconds,
+    )
+    .map_err(profile_err)
 }
 
 // ---------------------------------------------------------------------------
@@ -367,12 +386,22 @@ impl SpLogoutOrchestrator {
         Ok(pending.map(|inner| PendingLogoutRequest { inner }))
     }
     /// Correlate a LogoutResponse with its outstanding request and record the
-    /// outcome. Raises `SamlProfileError` if it matches no outstanding request
-    /// or the issuer does not match the target.
-    fn handle_response(&mut self, response: &LogoutResponse) -> PyResult<LogoutResponseOutcome> {
+    /// outcome. Raises `SamlProfileError` if the response was not verified, it
+    /// matches no outstanding request, or the issuer does not match the target.
+    ///
+    /// SECURITY: `signature_verified` must reflect cryptographic verification
+    /// of THIS exact response performed by your transport layer (Redirect query
+    /// signature or enveloped XML-DSig via a real `crypto.SamlVerifier`).
+    /// Correlation alone must not authenticate a LogoutResponse - a forged
+    /// success would mark the participant logged out while its session lives.
+    fn handle_response(
+        &mut self,
+        response: &LogoutResponse,
+        signature_verified: bool,
+    ) -> PyResult<LogoutResponseOutcome> {
         let inner = self
             .inner
-            .handle_response(&response.inner)
+            .handle_response(&response.inner, signature_verified)
             .map_err(profile_err)?;
         Ok(LogoutResponseOutcome { inner })
     }

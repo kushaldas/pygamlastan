@@ -778,6 +778,13 @@ impl LogoutRequest {
     fn reason(&self) -> Option<&str> {
         self.inner.reason.as_deref()
     }
+    /// Time at which the logout must complete (`NotOnOrAfter`), if present.
+    /// `logout.validate_logout_request` rejects the request once this has
+    /// passed; SPs also use it to bound replay-cache retention.
+    #[getter]
+    fn not_on_or_after(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.inner.not_on_or_after
+    }
     #[getter]
     fn name_id(&self) -> Option<NameId> {
         match &self.inner.name_id {
@@ -788,6 +795,13 @@ impl LogoutRequest {
     #[getter]
     fn session_indexes(&self) -> Vec<String> {
         self.inner.session_indexes.clone()
+    }
+    /// Whether the parsed request carried a `<ds:Signature>` element. This
+    /// records only the *presence* of signature markup; it is never proof of a
+    /// valid signature - verify with a `crypto.SamlVerifier` before trusting it.
+    #[getter]
+    fn has_signature(&self) -> bool {
+        self.inner.has_signature
     }
     fn to_xml(&self) -> PyResult<String> {
         use gamlastan::xml::SamlSerialize;

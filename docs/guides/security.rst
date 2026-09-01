@@ -3,8 +3,9 @@ Security guide
 
 SAML is a security protocol whose entire value depends on getting a handful of
 checks exactly right. ``pygamlastan`` is a thin binding: the cryptography and
-the 32-check validation suite live upstream in ``gamlastan`` / ``bergshamra`` /
-``kryptering``. This guide describes the security properties the **binding**
+the validation suite (the 32-item Section 7.2 checklist plus response-envelope
+checks 33-34 and the per-assertion age check 35) live upstream in ``gamlastan``
+/ ``bergshamra`` / ``kryptering``. This guide describes the security properties the **binding**
 preserves, the safe entry points, and the footguns the API deliberately leaves
 reachable so that you can integrate without recreating a classic SAML CVE.
 
@@ -229,14 +230,21 @@ Replay protection and persistent-NameID safety
   adapter **fails closed**: if your ``check_and_insert`` raises, the ID is
   treated as a replay. See :doc:`validation`.
 
-* **Persistent-ID store.** When a response carries a persistent NameID, a
-  persistent-ID store is required so NameID **reassignment** (one identifier
-  re-pointed at a different subject) is detected. This adapter also fails closed:
-  a Python-side error is treated as a conflict.
+* **Persistent-ID store.** Persistent-NameID uniqueness (E78) is **off by
+  default** and opt-in: when you enable it and a response carries a persistent
+  NameID, both a persistent-ID store **and** a ``persistent_id_principal`` are
+  required so NameID **reassignment** (one identifier re-pointed at a different
+  subject) is detected. The principal is your local account id, resolved
+  independently of the asserted NameID; gamlastan will not enforce the invariant
+  from the SAML input alone. This adapter also fails closed: a Python-side error
+  is treated as a conflict.
 
-* The ``unsafe_no_replay_cache`` / ``unsafe_no_persistent_id_store`` flags exist
-  only to make the requirement explicit and opt-out-able in tests. The ``unsafe_``
-  prefix is a deliberate signpost: do not set them in production.
+* The ``unsafe_no_replay_cache`` / ``unsafe_no_persistent_id_store`` flags only
+  skip the binding's *precondition* checks; they do **not** disable enforcement.
+  gamlastan now fails the replay check (20) closed when no cache is configured,
+  so ``unsafe_no_replay_cache`` cannot buy a valid result - it merely moves the
+  failure into the validation output. The ``unsafe_`` prefix is a deliberate
+  signpost: do not set them in production.
 
 
 Encrypted assertions

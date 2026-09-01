@@ -81,7 +81,7 @@ inspect every check. (``process_response`` raises
            print(check.check_number, check.check_name, check.detail)
 
    # Individual outcomes are addressable for profile-specific logic.
-   age = result.get(0)
+   age = result.get(35)                      # checklist #35 (assertion age)
    audience = result.by_name("Audience restriction")
    passed = result.passed_checks()
 
@@ -169,9 +169,11 @@ adapter fails closed: if your method raises, the id is treated as a replay.
 Persistent NameID store
 -----------------------
 
-With ``enforce_persistent_id_uniqueness`` enabled (the default), a response that
-carries a persistent ``NameID`` also needs a store that prevents the same
-identifier from being rebound to a different local principal:
+``enforce_persistent_id_uniqueness`` is opt-in (it defaults to off); enable it
+explicitly when your SP correlates persistent ``NameID`` values with local
+accounts. With it enabled, a response that carries a persistent ``NameID`` also
+needs a store that prevents the same identifier from being rebound to a
+different local principal:
 
 .. code-block:: python
 
@@ -194,7 +196,12 @@ identifier from being rebound to a different local principal:
        acs_url="https://sp.example.org/acs",
        replay_cache=security.InMemoryReplayCache(),
        persistent_id_store=PersistentIdStore({}),
+       # The local account id resolved independently of the asserted NameID.
+       persistent_id_principal="local-account-42",
    )
 
 The object needs ``check_and_record(name_id, sp_entity_id, principal) -> bool``.
 Returning ``False`` or raising fails the validation check closed.
+``persistent_id_principal`` is required alongside the store: gamlastan keys the
+uniqueness check by this independent local principal, never by the asserted
+NameID (which could never detect a reassignment).

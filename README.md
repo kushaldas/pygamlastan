@@ -1,6 +1,6 @@
 # pygamlastan
 
-Python bindings for [gamlastan](https://github.com/kushaldas/gamlastan) **0.7.0**, a
+Python bindings for [gamlastan](https://github.com/kushaldas/gamlastan) **0.8.x**, a
 pure-Rust SAML 2.0 library - types, XML, crypto, metadata, bindings, security, and
 profiles. Built with [PyO3](https://pyo3.rs) 0.29 + [maturin](https://www.maturin.rs)
 (abi3, Python ≥ 3.10).

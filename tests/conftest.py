@@ -24,8 +24,7 @@ def _have(cmd):
     return shutil.which(cmd) is not None
 
 
-@pytest.fixture(scope="session")
-def rsa_keypair(tmp_path_factory):
+def _gen_rsa_keypair(tmp_path_factory, cn):
     """Return (private_key_pem: bytes, cert_pem: bytes, cert_der_b64: str)."""
     if not _have("openssl"):
         pytest.skip("openssl not available")
@@ -35,7 +34,41 @@ def rsa_keypair(tmp_path_factory):
     subprocess.run(
         ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
          "-keyout", str(key), "-out", str(cert), "-days", "3650",
-         "-subj", "/CN=pygamlastan-test"],
+         "-subj", f"/CN={cn}"],
+        check=True, capture_output=True,
+    )
+    der = subprocess.run(
+        ["openssl", "x509", "-in", str(cert), "-outform", "DER"],
+        check=True, capture_output=True,
+    ).stdout
+    return key.read_bytes(), cert.read_bytes(), base64.b64encode(der).decode()
+
+
+@pytest.fixture(scope="session")
+def rsa_keypair(tmp_path_factory):
+    """Return (private_key_pem: bytes, cert_pem: bytes, cert_der_b64: str)."""
+    return _gen_rsa_keypair(tmp_path_factory, "pygamlastan-test")
+
+
+@pytest.fixture(scope="session")
+def rsa_keypair2(tmp_path_factory):
+    """A second, unrelated keypair for key-rollover / wrong-key tests."""
+    return _gen_rsa_keypair(tmp_path_factory, "pygamlastan-test-2")
+
+
+@pytest.fixture(scope="session")
+def ec_keypair(tmp_path_factory):
+    """An EC (P-256) keypair: verifying an RSA signature against it errors
+    rather than returning False, exercising the raise path in rollover loops."""
+    if not _have("openssl"):
+        pytest.skip("openssl not available")
+    d = tmp_path_factory.mktemp("keys-ec")
+    key = d / "key.pem"
+    cert = d / "cert.pem"
+    subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt",
+         "ec_paramgen_curve:P-256", "-nodes", "-keyout", str(key),
+         "-out", str(cert), "-days", "3650", "-subj", "/CN=pygamlastan-test-ec"],
         check=True, capture_output=True,
     )
     der = subprocess.run(

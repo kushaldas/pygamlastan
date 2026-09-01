@@ -42,8 +42,8 @@ All SAML work lives in [`idp/saml_logic.py`](idp/saml_logic.py); the Django view
 > ```console
 > cd ..            # the examples/ directory
 > cp .env-example .env
-> just wheel       # only until pygamlastan is on PyPI
-> just up          # certs, build, start, and link IdP <-> SP metadata
+> just up          # local wheel, certs, build, and start
+> just link        # exchange IdP <-> SP metadata
 > ```
 >
 > The recipe names below (`just add-sp`, `just swamid-cert`, ...) and the
@@ -52,28 +52,25 @@ All SAML work lives in [`idp/saml_logic.py`](idp/saml_logic.py); the Django view
 > `examples/certs/`). The rest of this document still describes the IdP itself.
 
 Prerequisites: Docker (with Compose), [`just`](https://github.com/casey/just),
-and [`mkcert`](https://github.com/FiloSottile/mkcert) (for locally-trusted TLS).
-Until `pygamlastan` is on PyPI, also Rust + `maturin` for the one-time wheel build.
+[`mkcert`](https://github.com/FiloSottile/mkcert) (for locally-trusted TLS),
+Rust, and `maturin`.
 
 ```console
 # 0. configure: copy the template and set IDP_DOMAIN (.env is gitignored).
 #    The template uses the SWAMID QA MDQ and a placeholder domain.
 cp .env-example .env
 
-# 1. (only until pygamlastan is on PyPI) build a wheel into ./wheels
-just wheel
-
-# 2. generate keys, the MDQ signing cert, and mkcert TLS certs, then bring up
+# 1. build/stage the local wheel, generate keys and certificates, then bring up
 just up
 
-# 3. open the IdP at https://${IDP_DOMAIN}/  and  /idp/metadata
+# 2. open the IdP at https://${IDP_DOMAIN}/  and  /idp/metadata
 ```
 
-`just up` generates `./data/idp_key.pem` + `idp_cert.pem`, fetches the SWAMID
-signing cert, creates **mkcert** TLS certs for `IDP_DOMAIN` in `./data/caddy`,
-builds the image, and starts two containers: **idp** (Django + gunicorn) and
-**caddy** (TLS + reverse proxy). The SQLite DB (users and sessions only - no SP
-data) and keys persist in `./data`.
+`just up` builds and stages the repository's local `pygamlastan` wheel, generates
+`./data/idp_key.pem` + `idp_cert.pem`, fetches the SWAMID signing cert, creates
+**mkcert** TLS certs for `IDP_DOMAIN` in `./data/caddy`, builds the image, and
+starts the containers. The SQLite DB (users and sessions only - no SP data) and
+keys persist in `./data`.
 
 Caddy serves HTTPS using the mkcert cert/key (no Let's Encrypt), so it works for
 any local domain. For a custom `IDP_DOMAIN` like `idp.gamlastan.sverige`, point
@@ -185,7 +182,7 @@ compose) and [`docker-compose.yml`](docker-compose.yml).
 
 ```console
 uv venv
-uv pip install --find-links wheels django==6.0.6 "pygamlastan>=0.3.0" cryptography gunicorn whitenoise
+uv pip install --find-links wheels django==6.0.7 "pygamlastan>=0.4.0" cryptography gunicorn whitenoise
 export DJANGO_DEBUG=1 SAML_IDP_BASE_URL=http://localhost:8000
 python manage.py idp_keys
 python manage.py migrate

@@ -70,9 +70,15 @@ def error(request):
 @require_http_methods(["GET", "POST"])
 def sso(request):
     try:
-        saml_text, relay_state = sl.decode_authn_request(
+        decoded = sl.decode_authn_request(
             request.method, request.META.get("QUERY_STRING", ""), request.POST
         )
+        # Strict UTF-8, never decoded.saml_text: that projection is lossy
+        # (invalid bytes become U+FFFD, display/logging only), so the bytes the
+        # binding authenticated could differ from the XML parsed and verified
+        # below. Malformed input must be rejected, not transformed.
+        saml_text = decoded.saml_xml.decode("utf-8")
+        relay_state = decoded.relay_state
         authn = sl.parse_authn(saml_text)
     except Exception as exc:  # noqa: BLE001
         return _error(request, f"Could not decode the AuthnRequest: {exc}")
@@ -88,7 +94,9 @@ def sso(request):
         )
 
     try:
-        processed = sl.process_authn(authn, sp_metadata_xml)
+        # Verifies the request signature against the SP metadata and enforces the
+        # SP's AuthnRequestsSigned policy before the request is acted on.
+        processed = sl.process_authn(authn, saml_text, decoded, sp_metadata_xml)
     except Exception as exc:  # noqa: BLE001
         return _error(request, f"The AuthnRequest was rejected: {exc}")
 

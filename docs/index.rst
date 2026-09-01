@@ -2,7 +2,7 @@ pygamlastan
 ===========
 
 **pygamlastan** is a Python binding for `gamlastan
-<https://github.com/kushaldas/gamlastan>`_ 0.7.0, a pure-Rust SAML 2.0 library.
+<https://github.com/kushaldas/gamlastan>`_ 0.8.x, a pure-Rust SAML 2.0 library.
 It exposes gamlastan's types, XML parsing, cryptography (including PKCS#11/HSM
 signing), metadata handling, protocol bindings, security validation, and the
 Web Browser SSO profiles to Python.

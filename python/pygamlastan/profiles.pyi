@@ -76,6 +76,8 @@ class ProcessedAuthnRequest:
     @property
     def requested_authn_context_class_refs(self) -> list[str]: ...
     @property
+    def authn_context_comparison(self) -> str | None: ...
+    @property
     def attribute_consuming_service_index(self) -> int | None: ...
 
 class ResponseOptions:
@@ -111,6 +113,7 @@ def process_response(
     now: datetime | None = ...,
     replay_cache: ReplayCacheProtocol | None = ...,
     persistent_id_store: PersistentIdStoreProtocol | None = ...,
+    persistent_id_principal: str | None = ...,
     unsafe_no_replay_cache: bool = ...,
     unsafe_no_persistent_id_store: bool = ...,
 ) -> AuthnResult: ...
@@ -125,13 +128,14 @@ def process_response_verified(
     now: datetime | None = ...,
     replay_cache: ReplayCacheProtocol | None = ...,
     persistent_id_store: PersistentIdStoreProtocol | None = ...,
+    persistent_id_principal: str | None = ...,
     unsafe_no_replay_cache: bool = ...,
     unsafe_no_persistent_id_store: bool = ...,
 ) -> AuthnResult: ...
 def process_authn_request(
     request: AuthnRequest,
-    sp_metadata: EntityDescriptor | None = ...,
-    unsafe_allow_missing_metadata: bool = ...,
+    sp_metadata: EntityDescriptor,
+    request_signature_verified: bool = ...,
 ) -> ProcessedAuthnRequest: ...
 def create_response(
     options: ResponseOptions,
