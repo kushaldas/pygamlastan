@@ -956,6 +956,28 @@ def test_idp_process_authn_request():
     assert processed.authn_context_comparison is None
 
 
+def test_idp_process_authn_request_authn_context_comparison():
+    """A RequestedAuthnContext comparison survives IdP-side processing and
+    maps from the Rust enum to its SAML string in Python."""
+    opts = profiles.AuthnRequestOptions(
+        SP,
+        acs_url=ACS,
+        destination="https://idp.example.org/sso",
+        protocol_binding=core.BINDING_HTTP_POST,
+        authn_context_class_refs=[core.AUTHN_CONTEXT_PASSWORD],
+        authn_context_comparison="exact",
+    )
+    req = xml.parse_authn_request(profiles.create_authn_request(opts).to_xml())
+    sp_md = metadata.parse_entity(SAMPLE_SP_METADATA)
+
+    processed = profiles.process_authn_request(req, sp_md)
+
+    assert processed.requested_authn_context_class_refs == [
+        core.AUTHN_CONTEXT_PASSWORD
+    ]
+    assert processed.authn_context_comparison == "exact"
+
+
 def test_idp_process_authn_request_signature_required_by_metadata():
     """`request_signature_verified` is the security boundary added in this
     release: when the SP metadata declares AuthnRequestsSigned, processing

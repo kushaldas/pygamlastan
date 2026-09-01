@@ -48,8 +48,7 @@ surfaces; see the migration notes inline.
   rejected).
 - Refreshed the Python dependencies of the `examples/django-idp` and
   `examples/django-sp` apps (Django 6.0.7, cryptography >=50, gunicorn >=26,
-  whitenoise >=6.12) and the dev tooling (pytest >=9). The bundled example
-  wheels were rebuilt for `pygamlastan` 0.4.0.
+  whitenoise >=6.12) and the dev tooling (pytest >=9).
 
 ### Security
 
