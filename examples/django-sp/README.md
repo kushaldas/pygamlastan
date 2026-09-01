@@ -44,8 +44,8 @@ This SP runs as part of the local federation orchestrated from
 ```console
 cd ..            # the examples/ directory
 cp .env-example .env
-just wheel       # only until pygamlastan is on PyPI
-just up          # certs, build, start, and link IdP <-> SP metadata
+just up          # local wheel, certs, build, and start
+just link        # exchange IdP <-> SP metadata
 ```
 
 Open `https://${SP_DOMAIN}/`, click **Log in**, authenticate at the IdP as

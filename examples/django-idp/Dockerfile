@@ -17,9 +17,8 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
 
-# Install dependencies first for better layer caching. pygamlastan is pulled from
-# PyPI (manylinux abi3 wheel - no Rust toolchain needed); if it is not published
-# yet, a wheel placed in ./wheels is used instead via --find-links.
+# `just up` builds and stages the repository's local pygamlastan wheel before
+# this image is built, so no unpublished release artifact is assumed.
 COPY wheels/ /app/wheels/
 RUN uv venv /app/.venv \
  && uv pip install --find-links /app/wheels \

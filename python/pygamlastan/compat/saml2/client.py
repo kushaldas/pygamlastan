@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import threading
 import time
 import urllib.parse
@@ -130,6 +131,42 @@ def _maybe_b64_to_xml(raw: str | bytes) -> str:
 # shim; a multi-process deployment should inject a shared implementation via
 # ``Saml2Client(config, replay_cache=...)``.
 _PROCESS_REPLAY_CACHE = _security.InMemoryReplayCache()
+
+
+class _ScopedReplayCache:
+    """Namespace opaque replay IDs without changing the cache protocol.
+
+    Assertion and LogoutRequest IDs are unique only within their SAML trust
+    context. The compat shim shares one backend across clients, so raw IDs must
+    be scoped by message kind, local SP, and trusted IdP before they reach that
+    backend. Compact JSON makes the tuple unambiguous; URL-safe base64 keeps the
+    resulting key ASCII-only for Redis/database-backed protocol implementations.
+    """
+
+    _KEY_PREFIX = "pygamlastan-replay:v1:"
+
+    def __init__(
+        self,
+        cache: Any,
+        message_kind: str,
+        sp_entity_id: str,
+        expected_idp: str,
+    ) -> None:
+        self._cache = cache
+        self._scope = (message_kind, sp_entity_id, expected_idp)
+
+    def check_and_insert(self, message_id: str, expiry: datetime) -> bool:
+        payload = json.dumps(
+            (*self._scope, message_id),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        encoded = base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
+        return self._cache.check_and_insert(self._KEY_PREFIX + encoded, expiry)
+
+    def cleanup(self) -> None:
+        self._cache.cleanup()
+
 
 # Maximum accepted age (from IssueInstant) for a LogoutRequest that declares
 # no NotOnOrAfter. validate_logout_request only bounds requests that DECLARE
@@ -362,6 +399,12 @@ class Saml2Client:
         # Both branches below insert into the replay cache; give expired
         # entries a periodic (throttled) chance to be evicted first.
         _maybe_cleanup_replay_cache(self._replay_cache)
+        scoped_replay_cache = _ScopedReplayCache(
+            self._replay_cache,
+            "assertion",
+            sp_entity_id,
+            expected_idp,
+        )
 
         if self.config.want_response_signed:
             # Use the safe-by-construction entry point: process_response_verified
@@ -393,7 +436,7 @@ class Saml2Client:
                         acs_url,
                         expected_idp,
                         expected_request_id=in_response_to,
-                        replay_cache=self._replay_cache,
+                        replay_cache=scoped_replay_cache,
                         unsafe_no_persistent_id_store=True,
                     )
                     break
@@ -432,7 +475,7 @@ class Saml2Client:
                     expected_idp,
                     expected_request_id=in_response_to,
                     verified_signed_ids=[],
-                    replay_cache=self._replay_cache,
+                    replay_cache=scoped_replay_cache,
                     unsafe_no_persistent_id_store=True,
                 )
             except Exception as e:
@@ -541,10 +584,10 @@ class Saml2Client:
         # ValueError("invalid LogoutRequest: ..."). validate_logout_request
         # requires the Issuer to equal the trusted IdP, proof of signature
         # verification, a present NameID, and an unexpired NotOnOrAfter (default
-        # 180s skew); the shim additionally requires a present Destination to
-        # name one of this SP's configured SLO endpoints for the received
-        # binding - so an unsigned, misattributed, misaddressed, or stale
-        # LogoutRequest cannot force-log out a session.
+        # 180s skew); when a Destination is present, the shim additionally
+        # requires it to name one of this SP's configured SLO endpoints for the
+        # received binding - so an unsigned, misattributed, misaddressed, or
+        # stale LogoutRequest cannot force-log out a session.
         try:
             xml = self._decode_message(request, binding)
             parsed = _xml.parse_logout_request(xml)
@@ -642,7 +685,13 @@ class Saml2Client:
                 parsed.issue_instant + _LOGOUT_REQUEST_MAX_AGE + timedelta(seconds=180)
             )
         _maybe_cleanup_replay_cache(self._replay_cache)
-        if not self._replay_cache.check_and_insert(parsed.id, replay_expiry):
+        scoped_replay_cache = _ScopedReplayCache(
+            self._replay_cache,
+            "logout-request",
+            sp_entity_id,
+            expected_idp,
+        )
+        if not scoped_replay_cache.check_and_insert(parsed.id, replay_expiry):
             raise ValueError(
                 "LogoutRequest replay detected: this request ID was already processed"
             )

@@ -66,7 +66,14 @@ surfaces; see the migration notes inline.
   never removes other entries on its own, so a long-running SP would
   otherwise grow the cache without bound. The throttle is tracked per cache,
   so several injected caches each receive periodic maintenance instead of one
-  cache's traffic starving the others.
+  cache's traffic starving the others. Replay keys in the compat shim are now
+  stable ASCII values namespaced by message kind, local SP entity ID, and
+  trusted expected IdP. This prevents an assertion or LogoutRequest in one
+  trust context from reserving the same raw SAML ID in another context and
+  causing a cross-context denial of service. Existing raw keys in persistent
+  injected caches are not reused after this key-schema change; deployments
+  requiring uninterrupted replay memory should drain the previous messages'
+  validity window before switching versions.
 - **Persistent-NameID uniqueness (E78) is now opt-in and correctly keyed.** It
   defaults off and, when enabled, is keyed by an application-supplied
   `persistent_id_principal` established independently of the asserted NameID

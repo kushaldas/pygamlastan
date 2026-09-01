@@ -51,6 +51,7 @@ tls:
 # Only needed until pygamlastan is published to PyPI. Requires Rust + maturin.
 wheel:
     cd ../.. && maturin build --release
+    mkdir -p wheels
     cp ../../target/wheels/pygamlastan-*.whl wheels/
     @echo "Staged pygamlastan wheel in ./wheels"
 
@@ -59,7 +60,7 @@ build:
     docker compose build
 
 # Generate IdP keys, the MDQ signing cert, and mkcert TLS certs, then start.
-up: keygen swamid-cert tls
+up: wheel keygen swamid-cert tls
     docker compose up -d --build
     @echo "IdP running at https://${IDP_DOMAIN:-localhost}/"
     @echo "Demo login: angela (or pamela, sandra, ...) / gamlastan   |   Admin: admin / admin at /admin/"

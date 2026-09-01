@@ -46,8 +46,8 @@ swamid-cert url=swamid_cert_url:
 build:
     docker compose build
 
-# Certs + build + start (SP uses SWAMID QA MDQ + discovery; local pairing: `just link`).
-up: tls swamid-cert
+# Build/stage pygamlastan, then create certs and start the local federation.
+up: wheel tls swamid-cert
     docker compose up -d --build
     @echo "IdP:  https://${IDP_DOMAIN:-idp.localhost}/   (login: angela / gamlastan)"
     @echo "SP:   https://${SP_DOMAIN:-sp.localhost}/      (Log in -> SWAMID QA discovery)"

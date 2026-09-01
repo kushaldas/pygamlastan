@@ -12,6 +12,6 @@ dependencies = [
 ]
 
 # This project is run, not packaged/installed. uv uses the dependency list above
-# (`uv pip install` / `uv sync`). Until pygamlastan is published to PyPI, build a
-# wheel from the repo root (`maturin build --release`) and drop it in ./wheels;
-# the Dockerfile installs with `--find-links ./wheels` so the local wheel wins.
+# (`uv pip install` / `uv sync`). The top-level examples/justfile builds the local
+# repository wheel into ./wheels before Docker runs; the Dockerfile installs it
+# with `--find-links ./wheels`.

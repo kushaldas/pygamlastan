@@ -24,11 +24,12 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
 
-# Copy the app (including optional ./wheels) so the build works whether or not a local wheel is present.
+# `just up` stages the repository's local pygamlastan wheel in ./wheels before
+# this image is built.
 COPY . /app
 RUN mkdir -p /app/wheels
 
-# Install dependencies. If a local pygamlastan wheel is present in ./wheels it will win via --find-links.
+# Install dependencies from the staged wheel without assuming 0.4.0 is on PyPI.
 RUN uv venv /app/.venv \
  && uv pip install --find-links /app/wheels \
         "django==6.0.7" "pygamlastan>=0.4.0" "cryptography>=50" "gunicorn>=26" "whitenoise>=6.12"

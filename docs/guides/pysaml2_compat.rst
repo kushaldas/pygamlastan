@@ -377,7 +377,10 @@ reset replay state. A multi-process deployment should inject a shared
 implementation via ``Saml2Client(config, replay_cache=...)`` (any object with
 ``check_and_insert(id, expiry) -> bool`` and ``cleanup()``). The shim calls
 ``cleanup()`` periodically (throttled) from its processing paths, so expired
-entries are evicted and the cache stays bounded in a long-running SP.
+entries are evicted and the cache stays bounded in a long-running SP. Keys sent
+to that backend are stable ASCII strings namespaced by message kind, local SP
+entity ID, and trusted expected IdP, so one trust context cannot reserve a raw
+SAML ID and make another context fail as a replay.
 Deployments that
 need cross-request ``persistent`` NameID uniqueness can layer a persistent-id
 store separately.

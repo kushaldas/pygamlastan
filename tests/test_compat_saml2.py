@@ -1580,6 +1580,162 @@ def test_replay_cache_injectable():
     assert resp.session_id() == session_id
 
 
+def test_replay_cache_scopes_identical_assertion_ids_by_sp_and_idp():
+    """A trusted IdP or SP cannot reserve an assertion ID in another trust
+    context, while a repeat inside the original context remains a replay."""
+    from pygamlastan import security
+
+    cache = security.InMemoryReplayCache()
+    shared_assertion_id = "id-shared-across-trust-contexts"
+    other_idp = "https://other.idp.example/md"
+
+    def parse(client_obj, response_xml, request_id, expected_idp):
+        raw = base64.b64encode(response_xml.encode("utf-8")).decode("ascii")
+        return client_obj.parse_authn_request_response(
+            raw,
+            BINDING_HTTP_POST,
+            {request_id: "relay"},
+            expected_idp=expected_idp,
+        )
+
+    multi_idp_client = Saml2Client(
+        SPConfig().load(_two_idp_config()), replay_cache=cache
+    )
+    first_xml = _auth_response(
+        "id-scope-idp-1",
+        resp_id="id-response-scope-idp-1",
+        assert_id=shared_assertion_id,
+    )
+    second_xml = _auth_response(
+        "id-scope-idp-2",
+        resp_id="id-response-scope-idp-2",
+        assert_id=shared_assertion_id,
+    ).replace(IDP, other_idp)
+    assert parse(multi_idp_client, first_xml, "id-scope-idp-1", IDP)
+    assert parse(multi_idp_client, second_xml, "id-scope-idp-2", other_idp)
+
+    other_sp = "https://other-sp.example/metadata"
+    other_acs = "https://other-sp.example/acs"
+    other_sp_config = {
+        "entityid": other_sp,
+        "service": {
+            "sp": {
+                "endpoints": {
+                    "assertion_consumer_service": [
+                        (other_acs, BINDING_HTTP_POST)
+                    ]
+                },
+                "want_response_signed": False,
+                "idp": {
+                    IDP: {
+                        "single_sign_on_service": {
+                            BINDING_HTTP_REDIRECT: SSO
+                        }
+                    }
+                },
+            }
+        },
+    }
+    other_sp_client = Saml2Client(
+        SPConfig().load(other_sp_config), replay_cache=cache
+    )
+    third_xml = _auth_response(
+        "id-scope-sp-2",
+        resp_id="id-response-scope-sp-2",
+        assert_id=shared_assertion_id,
+    ).replace(ACS, other_acs).replace(SP, other_sp)
+    assert parse(other_sp_client, third_xml, "id-scope-sp-2", IDP)
+
+    with pytest.raises(AssertionError):
+        parse(multi_idp_client, first_xml, "id-scope-idp-1", IDP)
+
+
+def test_replay_cache_scopes_assertions_and_logout_requests():
+    """The same raw ID may occur once in each SAML message kind, in either
+    order, without weakening repeat detection inside either kind."""
+    from pygamlastan import security
+
+    cache = security.InMemoryReplayCache()
+    scoped_client = Saml2Client(SPConfig().load(CONF), replay_cache=cache)
+
+    assertion_first_id = "id-assertion-before-logout"
+    response = _auth_response(
+        "id-request-assertion-first",
+        resp_id="id-response-assertion-first",
+        assert_id=assertion_first_id,
+    )
+    raw = base64.b64encode(response.encode("utf-8")).decode("ascii")
+    scoped_client.parse_authn_request_response(
+        raw, BINDING_HTTP_POST, {"id-request-assertion-first": "relay"}
+    )
+    logout = deflate_and_base64_encode(_logout_request(assertion_first_id))
+    with pytest.warns(UserWarning, match="No signing certificate"):
+        scoped_client.handle_logout_request(
+            logout, _session_nameid(), BINDING_HTTP_REDIRECT
+        )
+    with pytest.warns(UserWarning, match="No signing certificate"):
+        with pytest.raises(ValueError, match="replay"):
+            scoped_client.handle_logout_request(
+                logout, _session_nameid(), BINDING_HTTP_REDIRECT
+            )
+
+    logout_first_id = "id-logout-before-assertion"
+    logout_first = deflate_and_base64_encode(_logout_request(logout_first_id))
+    with pytest.warns(UserWarning, match="No signing certificate"):
+        scoped_client.handle_logout_request(
+            logout_first, _session_nameid(), BINDING_HTTP_REDIRECT
+        )
+    response_after = _auth_response(
+        "id-request-logout-first",
+        resp_id="id-response-logout-first",
+        assert_id=logout_first_id,
+    )
+    raw_after = base64.b64encode(response_after.encode("utf-8")).decode("ascii")
+    scoped_client.parse_authn_request_response(
+        raw_after, BINDING_HTTP_POST, {"id-request-logout-first": "relay"}
+    )
+    with pytest.raises(AssertionError):
+        scoped_client.parse_authn_request_response(
+            raw_after, BINDING_HTTP_POST, {"id-request-logout-first": "relay"}
+        )
+
+
+def test_scoped_replay_cache_uses_distinct_ascii_protocol_keys():
+    """The private adapter keeps the two-argument custom-cache protocol while
+    encoding delimiter-heavy and Unicode scope values without collisions."""
+    from pygamlastan.compat.saml2 import client as client_mod
+
+    class RecordingCache:
+        def __init__(self):
+            self.keys = []
+            self.seen = set()
+            self.cleanups = 0
+
+        def check_and_insert(self, message_id, expiry):
+            self.keys.append(message_id)
+            if message_id in self.seen:
+                return False
+            self.seen.add(message_id)
+            return True
+
+        def cleanup(self):
+            self.cleanups += 1
+
+    cache = RecordingCache()
+    expiry = datetime.now(timezone.utc) + timedelta(minutes=5)
+    first = client_mod._ScopedReplayCache(cache, "assertion", "sp,a", "idp:b")
+    second = client_mod._ScopedReplayCache(cache, "assertion", "sp", "a,idp:b")
+
+    assert first.check_and_insert("id-å", expiry)
+    assert second.check_and_insert("id-å", expiry)
+    assert not first.check_and_insert("id-å", expiry)
+    assert len(cache.seen) == 2
+    assert all(key.startswith("pygamlastan-replay:v1:") for key in cache.keys)
+    assert all(key.isascii() for key in cache.keys)
+    first.cleanup()
+    assert cache.cleanups == 1
+
+
 def test_replay_cache_periodic_cleanup(monkeypatch):
     """The processing paths schedule (throttled) cache.cleanup() so expired
     entries are evicted: gamlastan's check_and_insert never removes other

@@ -103,7 +103,7 @@ result in one call.
 
 .. code-block:: python
 
-   def complete_login(self, form_pairs, expected_request_id):
+   def complete_login(self, form_pairs, expected_request_id, local_account_id):
        decoded = bindings.post_decode(form_pairs)   # list[(name, value)]
        # Strict UTF-8: `saml_text` is a lossy, display-only projection - base
        # every security decision on the exact bytes (`saml_xml`).
@@ -121,7 +121,7 @@ result in one call.
            expected_request_id=expected_request_id,
            replay_cache=self.replay_cache,
            persistent_id_store=self.id_store,
-           persistent_id_principal=self.local_account_id,
+           persistent_id_principal=local_account_id,
        )
        return result                                 # a profiles.AuthnResult
 
@@ -137,9 +137,10 @@ Three deliberate choices, each a profile rule:
 * **Supply a** ``persistent_id_store`` **and** ``persistent_id_principal`` when
   you enable persistent-``NameID`` uniqueness (``enforce_persistent_id_uniqueness``,
   off by default). The principal is your local account id, resolved
-  *independently* of the asserted NameID, so a persistent identifier cannot be
-  silently re-bound to a different principal. gamlastan will not enforce E78 from
-  the SAML input alone, which is why both are required.
+  *independently* of the asserted NameID and passed into ``complete_login``, so a
+  persistent identifier cannot be silently re-bound to a different principal.
+  gamlastan will not enforce E78 from the SAML input alone, which is why both are
+  required.
 
 The persistent-ID store is the one piece of state you must implement. Any backend
 works; it fails closed, so a raised exception is treated as a conflict:
@@ -167,15 +168,20 @@ Step 4 - use the identity
 -------------------------
 
 :class:`~pygamlastan.profiles.AuthnResult` is the clean output - no XML, no
-borrowing from the parsed document:
+borrowing from the parsed document. Here the surrounding application supplies
+the local account it resolved independently of the asserted SAML NameID:
 
 .. code-block:: python
 
-   result = profile.complete_login(form_pairs, expected_request_id)
-   user_key = result.name_id                       # stable per-SP identifier
-   issuer = result.idp_entity_id
-   attrs = result.attributes_dict()                # {name: [values]}
-   # e.g. attrs["urn:oid:0.9.2342.19200300.100.1.3"] -> ["alice@example.org"]
+   def finish_login(profile, form_pairs, expected_request_id, local_account_id):
+       result = profile.complete_login(
+           form_pairs, expected_request_id, local_account_id
+       )
+       user_key = result.name_id                   # stable per-SP identifier
+       issuer = result.idp_entity_id
+       attrs = result.attributes_dict()            # {name: [values]}
+       # e.g. attrs["urn:oid:0.9.2342.19200300.100.1.3"] -> ["alice@example.org"]
+       return user_key, issuer, attrs
 
 Map the wire attribute names to friendly local names with
 :doc:`../api/attribute_map` if you prefer ``mail`` over the OID.
