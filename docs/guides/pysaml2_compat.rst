@@ -313,6 +313,9 @@ The three SLO methods mirror pysaml2:
    # publishes no signing certificate at all, handle_logout_request fails
    # closed unless the SP settings explicitly opt in with
    # ``"allow_unsigned_logout_requests": True`` (development only).
+   # When Destination is present, it must match an SLO endpoint configured for
+   # the received binding. Register the same URL for both bindings if both are
+   # accepted there.
 
 Generating SP metadata
 ~~~~~~~~~~~~~~~~~~~~~~~~

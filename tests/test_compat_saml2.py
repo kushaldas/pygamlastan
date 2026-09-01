@@ -128,11 +128,12 @@ def _logout_request(
     req_id: str,
     issuer: str = IDP,
     issue_instant: str | None = None,
-    destination: str = SLO,
+    destination: str | None = SLO,
 ) -> str:
     ts = issue_instant or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    destination_attr = f' Destination="{destination}"' if destination is not None else ""
     return f"""<?xml version='1.0' encoding='UTF-8'?>
-<samlp:LogoutRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="{req_id}" IssueInstant="{ts}" Version="2.0" Destination="{destination}">
+<samlp:LogoutRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="{req_id}" IssueInstant="{ts}" Version="2.0"{destination_attr}>
   <saml:Issuer>{issuer}</saml:Issuer>
   <saml:NameID Format="{TRANSIENT}" SPNameQualifier="{SP}">abc123hash</saml:NameID>
   <samlp:SessionIndex>session-1</samlp:SessionIndex>
@@ -471,7 +472,10 @@ def _signed_client(tmp_path, *cert_der_b64s):
             "sp": {
                 "endpoints": {
                     "assertion_consumer_service": [(ACS, BINDING_HTTP_POST)],
-                    "single_logout_service": [(SLO, BINDING_HTTP_REDIRECT)],
+                    "single_logout_service": [
+                        (SLO, BINDING_HTTP_REDIRECT),
+                        (SLO, BINDING_HTTP_POST),
+                    ],
                 },
                 # want_response_signed omitted -> defaults to True (signed required)
             }
@@ -1244,6 +1248,28 @@ def test_handle_logout_request_foreign_destination_rejected(client):
     )
     with pytest.raises(ValueError, match="not a configured SLO endpoint"):
         client.handle_logout_request(encoded, _session_nameid(), BINDING_HTTP_REDIRECT)
+
+
+def test_handle_logout_request_destination_for_other_binding_rejected(client):
+    """A local Redirect-only SLO URL is not a valid POST destination merely
+    because the URL appears elsewhere in this SP's endpoint configuration."""
+    raw = base64.b64encode(
+        _logout_request("id-lr-wrong-binding", destination=SLO).encode("utf-8")
+    ).decode("ascii")
+    with pytest.raises(ValueError, match="not a configured SLO endpoint.*HTTP-POST"):
+        client.handle_logout_request(raw, _session_nameid(), BINDING_HTTP_POST)
+
+
+def test_handle_logout_request_without_destination_accepted(client):
+    """Destination is optional; only a present value is endpoint-bound."""
+    encoded = deflate_and_base64_encode(
+        _logout_request("id-lr-no-destination", destination=None)
+    )
+    with pytest.warns(UserWarning, match="No signing certificate"):
+        info = client.handle_logout_request(
+            encoded, _session_nameid(), BINDING_HTTP_REDIRECT
+        )
+    assert info["headers"][0][1].startswith(IDPSLO + "?SAMLResponse=")
 
 
 def test_handle_logout_request_signed_foreign_destination_rejected(rsa_keypair, tmp_path):

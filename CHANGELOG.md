@@ -8,7 +8,7 @@ security handling. `pygamlastan` is a thin PyO3 binding; most entries below
 reflect adopting a change made in `gamlastan` / `uppsala` / `bergshamra` and
 surfacing it correctly to Python.
 
-## [0.4.0] - 2026-08-28
+## [0.4.0] - 2026-09-01
 
 Adopts the upstream `gamlastan` 0.8 hardening release. This is an API-breaking
 release for the IdP request-processing, Single Logout, and persistent-NameID
@@ -112,9 +112,11 @@ surfaces; see the migration notes inline.
   The signed Redirect query's `RelayState` must also equal the one the handler
   echoes back (or be absent from both), so an unsigned `RelayState` cannot
   ride along a valid signature. A present `Destination` must name one of this
-  SP's configured SLO endpoints, so a request validly signed by the trusted
-  IdP but addressed to a different SP cannot be relayed here to destroy a
-  session. The no-certificate development fallback
+  SP's configured SLO endpoints for the received binding, so a request validly
+  signed by the trusted IdP but addressed to a different SP or binding cannot
+  be relayed here to destroy a session. Deployments accepting multiple
+  bindings at one URL must configure that URL for each binding. The
+  no-certificate development fallback
   applies only to an IdP actually present in the SP configuration or
   metadata - an arbitrary caller-supplied `expected_idp` is rejected instead
   of becoming a trusted unsigned issuer.
