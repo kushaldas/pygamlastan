@@ -521,16 +521,18 @@ class Saml2Client:
         nameid_format: str | None = None,
         allow_create: str | bool | None = None,
         scoping: Any = None,
+        service_url_binding: str | None = None,
         **kwargs: Any,
     ) -> tuple[str, str]:
         """Create an AuthnRequest and return ``(request_id, XML)``.
 
         This is the lower-level API used by djangosaml2's custom HTTP-POST
-        template.  ``binding`` describes the requested response binding, not
-        the transport used to deliver the request.  When signing is enabled an
-        enveloped XML signature is produced over this exact request document.
+        template. ``binding`` describes the requested response protocol, while
+        ``service_url_binding`` optionally selects which configured ACS URL to
+        include. When signing is enabled an enveloped XML signature is produced
+        over this exact request document.
         """
-        acs_url, acs_binding = self.config.acs(binding)
+        acs_url, _acs_binding = self.config.acs(service_url_binding or binding)
         force_value = self.config.force_authn if force_authn is None else force_authn
         force = str(force_value).lower() in ("true", "1", "yes")
         allow_value = self.config.allow_create if allow_create is None else allow_create
@@ -555,7 +557,7 @@ class Saml2Client:
         options = _profiles.AuthnRequestOptions(
             sp_entity_id=self._require_entityid(),
             acs_url=acs_url,
-            protocol_binding=acs_binding,
+            protocol_binding=binding,
             force_authn=force,
             name_id_format=nameid_format or self.config.name_id_format,
             allow_create=allow,
@@ -598,6 +600,7 @@ class Saml2Client:
         force_authn: str | bool | None = None,
         requested_authn_context: Any = None,
         sign: bool | None = None,
+        response_binding: str = BINDING_HTTP_POST,
         **kwargs: Any,
     ) -> tuple[str, dict[str, Any]]:
         """Build and bind an AuthnRequest using pysaml2's return shape."""
@@ -618,13 +621,15 @@ class Saml2Client:
             effective_binding = BINDING_HTTP_REDIRECT
             sso_url = self.sso_location(idp, effective_binding)
 
-        # Web SSO responses normally return through POST even when the request
-        # itself is delivered by Redirect.  Honour an explicit service binding
-        # for callers with a different ACS layout.
-        response_binding = kwargs.pop("service_url_binding", BINDING_HTTP_POST)
+        # The response protocol and the binding used to select the ACS URL are
+        # independent pysaml2 options. Most callers leave service_url_binding
+        # unset, in which case create_authn_request uses response_binding for
+        # both values.
+        service_url_binding = kwargs.pop("service_url_binding", None)
         session_id, xml = self.create_authn_request(
             sso_url,
             binding=response_binding,
+            service_url_binding=service_url_binding,
             sign=False,
             force_authn=force_authn,
             requested_authn_context=requested_authn_context,
@@ -920,16 +925,16 @@ class Saml2Client:
         if signer is not None and signature_algorithm is None:
             signature_algorithm = signer.signature_method_uri()
 
-        responses: dict[str, tuple[str, dict[str, Any]]] = {}
+        preferred = list(self.config.preferred_binding["single_logout_service"])
+        candidates = []
+        for candidate in ([expected_binding] if expected_binding else []) + preferred:
+            if candidate in (BINDING_HTTP_REDIRECT, BINDING_HTTP_POST):
+                if candidate not in candidates:
+                    candidates.append(candidate)
+
+        selected_endpoints: list[tuple[str, str, str]] = []
+        unhandled: list[str] = []
         for idp in entity_ids:
-            preferred = list(
-                self.config.preferred_binding["single_logout_service"]
-            )
-            candidates = []
-            for candidate in ([expected_binding] if expected_binding else []) + preferred:
-                if candidate in (BINDING_HTTP_REDIRECT, BINDING_HTTP_POST):
-                    if candidate not in candidates:
-                        candidates.append(candidate)
             selected: tuple[str, str] | None = None
             for candidate in candidates:
                 try:
@@ -941,9 +946,14 @@ class Saml2Client:
                 except ValueError:
                     continue
             if selected is None:
-                continue
-            binding, slo_url = selected
+                unhandled.append(idp)
+            else:
+                selected_endpoints.append((idp, *selected))
+        if unhandled:
+            raise LogoutError(f"no configured SLO endpoint for {unhandled!r}")
 
+        responses: dict[str, tuple[str, dict[str, Any]]] = {}
+        for idp, binding, slo_url in selected_endpoints:
             session_indexes: list[str] | None = None
             if self.users is not None:
                 getter = getattr(self.users, "get_info_from", None)
@@ -1011,8 +1021,6 @@ class Saml2Client:
             }
             responses[idp] = (binding, http_info)
 
-        if entity_ids and not responses:
-            raise LogoutError(f"no configured SLO endpoint for {entity_ids!r}")
         return responses
 
     def _verify_logout_response_signature(

@@ -596,6 +596,21 @@ def test_do_logout_falls_back_when_expected_binding_is_unavailable(client):
     assert dict(info["headers"])["Location"].startswith(IDPSLO)
 
 
+def test_do_logout_rejects_partial_multi_idp_results():
+    """Every requested IdP must resolve before any logout state is created."""
+    from pygamlastan.compat.saml2.client_base import LogoutError
+
+    state: dict[str, dict[str, str]] = {}
+    logout_client = Saml2Client(SPConfig().load(CONF), state_cache=state)
+    nid = NameID(text="abc123hash", format=TRANSIENT, sp_name_qualifier=SP)
+    missing_idp = "https://idp-without-slo.example.org"
+
+    with pytest.raises(LogoutError, match=missing_idp):
+        logout_client.do_logout(nid, [IDP, missing_idp], "", None)
+
+    assert state == {}
+
+
 def test_global_logout_carries_reason_and_expiry(client):
     """The lower-level request preserves pysaml2's reason/expire arguments."""
     nid = NameID(text="abc123hash", format=TRANSIENT, sp_name_qualifier=SP)
@@ -947,6 +962,66 @@ def test_empty_requested_authn_context_overrides_configured_context():
     )
 
     assert pgxml.parse_authn_request(xml).requested_authn_context is None
+
+
+def test_create_authn_request_separates_response_and_acs_bindings():
+    """ProtocolBinding remains independent from the ACS lookup binding."""
+    redirect_acs = ACS + "/redirect"
+    sp = {
+        **CONF["service"]["sp"],
+        "endpoints": {
+            **CONF["service"]["sp"]["endpoints"],
+            "assertion_consumer_service": [
+                (ACS, BINDING_HTTP_POST),
+                (redirect_acs, BINDING_HTTP_REDIRECT),
+            ],
+        },
+    }
+    binding_client = Saml2Client(
+        SPConfig().load({**CONF, "service": {"sp": sp}})
+    )
+
+    _request_id, xml = binding_client.create_authn_request(
+        SSO,
+        binding=BINDING_HTTP_POST,
+        service_url_binding=BINDING_HTTP_REDIRECT,
+    )
+    request = pgxml.parse_authn_request(xml)
+
+    assert request.protocol_binding == BINDING_HTTP_POST
+    assert request.assertion_consumer_service_url == redirect_acs
+
+
+def test_prepare_honors_response_binding_separately_from_acs_lookup():
+    """prepare_for_authenticate forwards both pysaml2 binding options."""
+    redirect_acs = ACS + "/redirect"
+    sp = {
+        **CONF["service"]["sp"],
+        "endpoints": {
+            **CONF["service"]["sp"]["endpoints"],
+            "assertion_consumer_service": [
+                (ACS, BINDING_HTTP_POST),
+                (redirect_acs, BINDING_HTTP_REDIRECT),
+            ],
+        },
+    }
+    binding_client = Saml2Client(
+        SPConfig().load({**CONF, "service": {"sp": sp}})
+    )
+
+    _request_id, info = binding_client.prepare_for_authenticate(
+        entityid=IDP,
+        binding=BINDING_HTTP_REDIRECT,
+        response_binding=BINDING_HTTP_POST,
+        service_url_binding=BINDING_HTTP_REDIRECT,
+    )
+    query = dict(info["headers"])["Location"].split("?", 1)[1]
+    request = pgxml.parse_authn_request(
+        pgbindings.redirect_decode(query).saml_text
+    )
+
+    assert request.protocol_binding == BINDING_HTTP_POST
+    assert request.assertion_consumer_service_url == redirect_acs
 
 
 def test_prepare_post_binding():
