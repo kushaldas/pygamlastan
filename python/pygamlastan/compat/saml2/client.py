@@ -714,19 +714,15 @@ class Saml2Client:
         acs_url, _ = self.config.acs(binding)
         expected_idp = kwargs.get("expected_idp") or self.config.only_idp()
         if expected_idp is None:
-            # djangosaml2's outstanding-query cache predates per-request IdP
-            # storage.  In a multi-IdP deployment, use the claimed issuer only
-            # to select a *known* trust anchor; signed mode then verifies the
-            # exact document against that entity's certificate before trusting
-            # the claim.  Unsigned mode is already an explicit insecure opt-out.
-            issuer = parsed.issuer.value if parsed.issuer is not None else None
-            known_idps = set(self.config.idp) | set(self.config.metadata)
-            if issuer not in known_idps:
-                raise ValueError(
-                    "Cannot determine a configured IdP for response processing; "
-                    "pass expected_idp=<entity id>"
-                )
-            expected_idp = issuer
+            # The legacy outstanding-query mapping stores only the return URL,
+            # not the IdP selected for the request. Trusting the response's
+            # claimed issuer here would let any configured IdP answer another
+            # IdP's outstanding request. Require the caller to supply the
+            # request-correlated entity ID when the configuration is ambiguous.
+            raise ValueError(
+                "Cannot determine the IdP targeted by this outstanding request; "
+                "pass expected_idp=<entity id>"
+            )
 
         # Both branches below insert into the replay cache; give expired
         # entries a periodic (throttled) chance to be evicted first.

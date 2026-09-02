@@ -1958,14 +1958,15 @@ def _two_idp_config() -> dict:
     }
 
 
-def test_parse_multi_idp_accepts_configured_issuer():
-    """A multi-IdP SP can select a configured issuer from the response."""
+def test_parse_multi_idp_requires_request_correlated_idp():
+    """A response issuer cannot choose its own trust anchor in multi-IdP mode."""
     client = Saml2Client(SPConfig().load(_two_idp_config()))
     raw = base64.b64encode(_auth_response("id-req-x").encode("utf-8")).decode("ascii")
-    resp = client.parse_authn_request_response(
-        raw, BINDING_HTTP_POST, {"id-req-x": "r"}
-    )
-    assert resp.session_info()["issuer"] == IDP
+
+    with pytest.raises(ValueError, match="pass expected_idp"):
+        client.parse_authn_request_response(
+            raw, BINDING_HTTP_POST, {"id-req-x": "r"}
+        )
 
 
 def test_parse_ambiguous_idp_accepts_explicit_expected():
