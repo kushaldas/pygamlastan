@@ -10,7 +10,7 @@ Errors raise :class:`pygamlastan.SamlProfileError`.
 Service Provider
 ----------------
 
-.. py:class:: AuthnRequestOptions(sp_entity_id, acs_url=None, acs_index=None, protocol_binding=None, force_authn=None, is_passive=None, name_id_format=None, allow_create=True, sp_name_qualifier=None, authn_context_class_refs=None, authn_context_comparison=None, provider_name=None, destination=None, proxy_count=None, requester_ids=None, attribute_consuming_service_index=None, extensions=None)
+.. py:class:: AuthnRequestOptions(sp_entity_id, acs_url=None, acs_index=None, protocol_binding=None, force_authn=None, is_passive=None, name_id_format=None, allow_create=True, sp_name_qualifier=None, authn_context_class_refs=None, authn_context_comparison=None, provider_name=None, destination=None, proxy_count=None, requester_ids=None, attribute_consuming_service_index=None, extensions=None, idp_list=None, request_id=None)
 
    Inputs to :func:`create_authn_request`. ``authn_context_comparison`` is one of
    ``"exact"``, ``"minimum"``, ``"maximum"``, ``"better"``.

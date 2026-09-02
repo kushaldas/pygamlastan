@@ -26,12 +26,17 @@ from pygamlastan.compat.saml2.client import Saml2Client
 from pygamlastan.compat.saml2.config import SPConfig
 from pygamlastan.compat.saml2.ident import code, decode
 from pygamlastan.compat.saml2.metadata import entity_descriptor
-from pygamlastan.compat.saml2.response import StatusError, UnsolicitedResponse
+from pygamlastan.compat.saml2.response import (
+    RequestVersionTooLow,
+    StatusError,
+    UnsolicitedResponse,
+)
 from pygamlastan.compat.saml2.s_utils import (
     decode_base64_and_inflate,
     deflate_and_base64_encode,
 )
 from pygamlastan.compat.saml2.saml import NameID
+from pygamlastan.compat.saml2.validate import ResponseLifetimeExceed, ToEarly
 
 SP = "http://test.localhost:6544/saml2-metadata"
 ACS = "http://test.localhost:6544/saml2-acs"
@@ -286,6 +291,12 @@ def test_spconfig_load_and_only_idp():
     assert cfg.single_logout_service(IDP, BINDING_HTTP_REDIRECT) == IDPSLO
     assert cfg.want_response_signed is False
     assert cfg.want_logout_response_signed is False
+    assert cfg.accepted_time_diff == 0
+
+
+def test_spconfig_loads_accepted_time_diff():
+    cfg = SPConfig().load({**CONF, "accepted_time_diff": 60})
+    assert cfg.accepted_time_diff == 60
 
 
 def test_metadata_store_has_djangosaml2_query_shape(tmp_path):
@@ -790,6 +801,53 @@ def test_signed_response_unsigned_rejected(rsa_keypair, tmp_path):
         client.parse_authn_request_response(raw, BINDING_HTTP_POST, {session_id: "r"})
 
 
+def test_deprecated_response_version_raises_compat_exception(client):
+    session_id, _ = client.prepare_for_authenticate(binding=BINDING_HTTP_REDIRECT)
+    xml = _auth_response(session_id).replace('Version="2.0"', 'Version="1.1"', 1)
+    raw = base64.b64encode(xml.encode()).decode()
+
+    with pytest.raises(RequestVersionTooLow):
+        client.parse_authn_request_response(
+            raw, BINDING_HTTP_POST, {session_id: "return"}
+        )
+
+
+def test_expired_assertion_raises_compat_lifetime_exception(client):
+    session_id, _ = client.prepare_for_authenticate(binding=BINDING_HTTP_REDIRECT)
+    expired = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    xml = re.sub(
+        r'NotOnOrAfter="[^"]+"',
+        f'NotOnOrAfter="{expired}"',
+        _auth_response(session_id),
+    )
+    raw = base64.b64encode(xml.encode()).decode()
+
+    with pytest.raises(ResponseLifetimeExceed):
+        client.parse_authn_request_response(
+            raw, BINDING_HTTP_POST, {session_id: "return"}
+        )
+
+
+def test_future_assertion_raises_compat_too_early_exception(client):
+    session_id, _ = client.prepare_for_authenticate(binding=BINDING_HTTP_REDIRECT)
+    future = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    xml = re.sub(
+        r'(<saml:Conditions )NotBefore="[^"]+"',
+        rf'\1NotBefore="{future}"',
+        _auth_response(session_id),
+    )
+    raw = base64.b64encode(xml.encode()).decode()
+
+    with pytest.raises(ToEarly):
+        client.parse_authn_request_response(
+            raw, BINDING_HTTP_POST, {session_id: "return"}
+        )
+
+
 def test_signed_response_tampered_rejected(rsa_keypair, tmp_path):
     """A signed Response whose bytes were altered after signing is rejected."""
     priv, _cert_pem, cert_der_b64 = rsa_keypair
@@ -1061,6 +1119,29 @@ def test_cache_set_get_round_trip():
     assert c.entities(nid) == [IDP]
     assert c.active(nid, IDP) is True
     assert [s.text for s in c.subjects()] == ["subject-1"]
+
+
+def test_cache_structured_nameid_finds_legacy_pysaml2_key():
+    """djangosaml2 decodes session NameIDs before cache lookup, so a structured
+    NameID must still reach records persisted under pysaml2's legacy key."""
+    from pygamlastan.compat.saml2.cache import Cache
+
+    nid = _nid()
+    legacy = ",".join(
+        (
+            "1=" + urllib.parse.quote(SP, safe=""),
+            "2=" + urllib.parse.quote(TRANSIENT, safe=""),
+            "4=subject-1",
+        )
+    )
+    future = int(datetime.now(timezone.utc).timestamp()) + 3600
+    cache = Cache()
+    cache._db[legacy] = {
+        IDP: (future, {"ava": {"mail": ["legacy@example.org"]}})
+    }
+
+    assert cache.get(nid, IDP)["ava"]["mail"] == ["legacy@example.org"]
+    assert cache.entities(nid) == [IDP]
 
 
 def test_cache_get_identity_aggregates_and_reports_expired():
@@ -1451,6 +1532,41 @@ def test_handle_logout_request_valid_redirect_signature(rsa_keypair, tmp_path):
         sig_alg=sig_alg, signature=signature, signed_query=signed_query,
     )
     assert info["headers"][0][1].startswith(IDPSLO + "?SAMLResponse=")
+
+
+def test_logout_response_signing_uses_configured_algorithm(rsa_keypair, tmp_path):
+    """The response to an IdP-initiated logout uses signing_algorithm rather
+    than silently falling back to the key's default algorithm."""
+    private_key, _cert_pem, _cert_der_b64 = rsa_keypair
+    key_file = tmp_path / "sp-logout.key"
+    key_file.write_bytes(private_key)
+    conf = {
+        **CONF,
+        "key_file": str(key_file),
+        "service": {
+            "sp": {
+                **CONF["service"]["sp"],
+                "logout_responses_signed": True,
+                "signing_algorithm": (
+                    "http://www.w3.org/2001/04/xmldsig-more#rsa-sha512"
+                ),
+            }
+        },
+    }
+    signing_client = Saml2Client(SPConfig().load(conf))
+    encoded = deflate_and_base64_encode(
+        _logout_request("id-lr-configured-response-alg")
+    )
+
+    with pytest.warns(UserWarning, match="No signing certificate"):
+        info = signing_client.handle_logout_request(
+            encoded, _session_nameid(), BINDING_HTTP_REDIRECT
+        )
+
+    query = dict(
+        urllib.parse.parse_qsl(dict(info["headers"])["Location"].split("?", 1)[1])
+    )
+    assert query["SigAlg"].endswith("rsa-sha512")
 
 
 def test_handle_logout_request_invalid_redirect_signature(rsa_keypair, tmp_path):

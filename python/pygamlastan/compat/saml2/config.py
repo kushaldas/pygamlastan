@@ -40,6 +40,7 @@ class SPConfig:
         self.requested_authn_context: Any = None
         self.signing_algorithm: str | None = None
         self.digest_algorithm: str | None = None
+        self.accepted_time_diff: int = 0
         # Explicit development opt-out: accept an unverified LogoutRequest for
         # an IdP that publishes no signing certificate. This is independent of
         # response-signature policy and stays off unless directly configured.
@@ -93,6 +94,7 @@ class SPConfig:
         self.requested_authn_context = sp.get("requested_authn_context")
         self.signing_algorithm = sp.get("signing_algorithm")
         self.digest_algorithm = sp.get("digest_algorithm")
+        self.accepted_time_diff = int(conf.get("accepted_time_diff") or 0)
         self.allow_unsigned_logout_requests = bool(
             sp.get("allow_unsigned_logout_requests", False)
         )

@@ -274,8 +274,8 @@ impl AuthnRequestOptions {
         sp_entity_id, acs_url=None, acs_index=None, protocol_binding=None,
         force_authn=None, is_passive=None, name_id_format=None, allow_create=true,
         sp_name_qualifier=None, authn_context_class_refs=None, authn_context_comparison=None,
-        provider_name=None, destination=None, proxy_count=None, idp_list=None, requester_ids=None,
-        attribute_consuming_service_index=None, extensions=None, request_id=None,
+        provider_name=None, destination=None, proxy_count=None, requester_ids=None,
+        attribute_consuming_service_index=None, extensions=None, idp_list=None, request_id=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -293,10 +293,10 @@ impl AuthnRequestOptions {
         provider_name: Option<String>,
         destination: Option<String>,
         proxy_count: Option<u32>,
-        idp_list: Option<Vec<String>>,
         requester_ids: Option<Vec<String>>,
         attribute_consuming_service_index: Option<u16>,
         extensions: Option<String>,
+        idp_list: Option<Vec<String>>,
         request_id: Option<String>,
     ) -> PyResult<Self> {
         let o = gwb::AuthnRequestOptions {

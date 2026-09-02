@@ -169,8 +169,8 @@ class AuthnResponse:
         return {
             "ava": self.ava,
             "name_id": self.get_subject(),
-            # pysaml2 carries the SP-supplied return target here; the eduID flow
-            # tracks that itself (OutstandingQueriesCache), so it is always None.
+            # pysaml2 carries the SP-supplied return target recovered from the
+            # caller's OutstandingQueriesCache here.
             "came_from": self._came_from,
             "issuer": r.idp_entity_id,
             "not_on_or_after": not_on_or_after,

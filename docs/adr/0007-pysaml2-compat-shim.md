@@ -35,9 +35,10 @@ it inside the pygamlastan distribution** as `pygamlastan.compat.saml2`, mirrorin
 the pysaml2 module layout (`client`, `client_base`, `config`, `ident`, `response`,
 `saml`, `samlp`, `cache`, `metadata`, `mdstore`, `md`, `s_utils`, `sigver`,
 `validate`, `xmldsig`, `xmlenc`, `server`, `typing`).
-Consumers migrate by swapping `from saml2 import X` for
-`from pygamlastan.compat.saml2 import X`; the surrounding view/session code is
-left untouched.
+Consumers migrate most covered flows by swapping `from saml2 import X` for
+`from pygamlastan.compat.saml2 import X`. Signed HTTP-Redirect SLO additionally
+requires the web adapter to preserve the exact signed query; unmodified
+djangosaml2 does not forward it.
 
 Rationale for the two choices:
 
@@ -117,6 +118,11 @@ djangosaml2; this avoids recreating pysaml2's general XML object model.
   `attribute_map.AttributeConverterSet.with_default_maps()` instead. Anything
   outside the implemented SP surface must be addressed before a consumer that
   relies on it can migrate.
+- Signed HTTP-Redirect LogoutRequests and LogoutResponses require `SigAlg`,
+  `Signature`, and the exact percent-encoded signed query. The unmodified
+  djangosaml2 logout view forwards only the decoded SAML parameter and binding,
+  so that specific flow needs an adapter change or the POST/enveloped binding;
+  the shim cannot safely reconstruct discarded signature input.
 - Behavioural divergences from pysaml2 are deliberate and documented: malformed
   native session encodings fail closed; assertion/logout replay is enforced;
   LogoutResponses must correlate with stored state; and Redirect signatures are

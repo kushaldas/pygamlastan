@@ -423,22 +423,26 @@ What is and is not covered
 POST, including signed requests), lower-level ``sso_location`` /
 ``create_authn_request``, ``parse_authn_request_response`` with the full
 ``session_info`` and assertion-confirmation object graph,
-``global_logout`` / ``parse_logout_request_response`` / ``handle_logout_request``,
+``global_logout`` and the POST/enveloped or adapter-assisted Redirect forms of
+``parse_logout_request_response`` / ``handle_logout_request``,
 ``SPConfig.load``, ``MetadataStore``, ``ident.code`` / ``decode``, the schema
 namespace/value and exception modules imported by djangosaml2,
 ``metadata.entity_descriptor``, persistent ``cache.Cache`` population methods,
 and the ``s_utils`` Redirect helpers.
 
-**Not covered (yet):** the IdP ``server.Server`` (a later phase - the placeholder
-imports but raises ``NotImplementedError``), ECP/PAOS, artifact resolution,
-virtual organisations, and pysaml2's on-disk attribute-map files (attribute
-conversion uses :doc:`attribute_map <../api/attribute_map>` instead). If your
-integration depends on any of these, address it before migrating.
+**Not covered (yet):** unmodified djangosaml2 handling of signed Redirect SLO
+messages (its view discards the exact signed query required for detached-signature
+verification), the IdP ``server.Server`` (a later phase - the placeholder imports
+but raises ``NotImplementedError``), ECP/PAOS, artifact resolution, virtual
+organisations, and pysaml2's on-disk attribute-map files (attribute conversion
+uses :doc:`attribute_map <../api/attribute_map>` instead). If your integration
+depends on any of these, address it before migrating.
 
 **Deliberate divergences from pysaml2:** malformed native ``pgc1:`` session
-values fail closed; the signed/unsigned response path is gated entirely on
-``want_response_signed``; assertion and IdP-initiated logout replay is enforced
-through a process-lifetime replay cache; and SP-initiated LogoutResponses are
-correlated against the state cache. Test fixtures must therefore use fresh SAML
-IDs and echo the actual outgoing request ID. These rules are pinned by the shim's
-test suite (``tests/test_compat_saml2.py``).
+values fail closed; verified response processing is selected independently by
+``want_response_signed`` or ``want_assertions_signed`` and enforces the selected
+envelope/assertion requirements; assertion and IdP-initiated logout replay is
+enforced through a process-lifetime replay cache; and SP-initiated
+LogoutResponses are correlated against the state cache. Test fixtures must
+therefore use fresh SAML IDs and echo the actual outgoing request ID. These rules
+are pinned by the shim's test suite (``tests/test_compat_saml2.py``).

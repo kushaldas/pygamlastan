@@ -22,10 +22,10 @@ class AuthnRequestOptions:
         provider_name: str | None = ...,
         destination: str | None = ...,
         proxy_count: int | None = ...,
-        idp_list: list[str] | None = ...,
         requester_ids: list[str] | None = ...,
         attribute_consuming_service_index: int | None = ...,
         extensions: str | None = ...,
+        idp_list: list[str] | None = ...,
         request_id: str | None = ...,
     ) -> None: ...
 

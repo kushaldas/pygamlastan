@@ -40,6 +40,7 @@ from .ident import code, decode
 from .response import (
     AuthnResponse,
     LogoutResponse,
+    RequestVersionTooLow,
     SignatureError,
     StatusAuthnFailed,
     StatusError,
@@ -50,6 +51,7 @@ from .response import (
 from .saml import NameID
 from .s_utils import UnsupportedBinding
 from .sigver import MissingKey
+from .validate import ResponseLifetimeExceed, ToEarly
 from .xmldsig import DIGEST_SHA256, SIG_RSA_SHA256
 
 
@@ -145,6 +147,83 @@ def _legacy_nil_attribute_values(xml: str) -> dict[str, list[str]]:
             if nil in {"true", "1"} and text:
                 recovered.setdefault(name, []).append(text)
     return recovered
+
+
+def _validate_response_version(xml: str) -> None:
+    """Translate pysaml2's response-version check to its public exceptions.
+
+    The hardened native parser has already accepted this document before this
+    helper runs, so using ElementTree to read the root attribute does not create
+    a second, less-safe XML entry point.
+    """
+    from xml.etree import ElementTree
+
+    value = ElementTree.fromstring(xml).get("Version")
+    if value == "2.0":
+        return
+    try:
+        version = tuple(int(part) for part in (value or "").split("."))
+    except ValueError as exc:
+        raise StatusError(f"invalid SAML response version {value!r}") from exc
+    if version < (2, 0):
+        raise RequestVersionTooLow(f"deprecated SAML response version {value}")
+    raise StatusError(f"unsupported SAML response version {value!r}")
+
+
+def _raise_compat_time_error(parsed: Any, config: _security.SecurityConfig) -> None:
+    """Raise pysaml2's dedicated exception for a native time-check failure.
+
+    Native profile processing reports all validation failures through one
+    ``SamlProfileError``. Inspecting the already-parsed typed timestamps keeps
+    djangosaml2's exception contract without classifying errors from strings.
+    This helper is called only after native validation has failed.
+    """
+    now = datetime.now(timezone.utc)
+    skew = timedelta(seconds=config.clock_skew_seconds)
+
+    for assertion in parsed.assertions:
+        if now - assertion.issue_instant > timedelta(
+            seconds=config.max_assertion_age_seconds
+        ):
+            raise ResponseLifetimeExceed(
+                "SAML assertion exceeds the configured maximum age"
+            )
+
+        conditions = assertion.conditions
+        if conditions is not None:
+            if (
+                conditions.not_on_or_after is not None
+                and now - skew >= conditions.not_on_or_after
+            ):
+                raise ResponseLifetimeExceed("SAML assertion conditions have expired")
+            if (
+                conditions.not_before is not None
+                and now + skew < conditions.not_before
+            ):
+                raise ToEarly("SAML assertion conditions are not valid yet")
+
+        subject = assertion.subject
+        if subject is not None:
+            for confirmation in subject.subject_confirmations:
+                data = confirmation.subject_confirmation_data
+                if data is None:
+                    continue
+                if (
+                    data.not_on_or_after is not None
+                    and now - skew >= data.not_on_or_after
+                ):
+                    raise ResponseLifetimeExceed(
+                        "SAML subject confirmation has expired"
+                    )
+                if data.not_before is not None and now + skew < data.not_before:
+                    raise ToEarly("SAML subject confirmation is not valid yet")
+
+        for statement in assertion.authn_statements:
+            if (
+                statement.session_not_on_or_after is not None
+                and now - skew >= statement.session_not_on_or_after
+            ):
+                raise ResponseLifetimeExceed("SAML authentication session has expired")
 
 
 def _logout_deadline(value: Any) -> datetime | None:
@@ -587,6 +666,8 @@ class Saml2Client:
             # eduID treats parse failures as a bad response.
             raise StatusError(f"could not parse SAML response: {e}") from e
 
+        _validate_response_version(xml)
+
         in_response_to = parsed.in_response_to
         if outstanding is not None and in_response_to not in outstanding:
             raise UnsolicitedResponse(
@@ -631,6 +712,7 @@ class Saml2Client:
             # it). `want_response_signed` maps to a required Response-envelope
             # signature; it does not imply direct Assertion signatures.
             cfg = _security.SecurityConfig()
+            cfg.clock_skew_seconds = self.config.accepted_time_diff
             cfg.require_signed_assertions = self.config.want_assertions_signed
             cfg.require_signed_responses = self.config.want_response_signed
             cfg.require_encrypted_assertions = False
@@ -671,6 +753,7 @@ class Saml2Client:
                     # signature has been verified); anything else stays AssertionError.
                     if not parsed.is_success():
                         self._raise_on_failed_status(parsed)
+                    _raise_compat_time_error(parsed, cfg)
                     raise AssertionError(f"SAML response validation failed: {e}") from e
             if result is None:
                 # No published certificate verified the signature; eduID's
@@ -684,6 +767,7 @@ class Saml2Client:
             # settings explicitly set want_response_signed=False.
             self._raise_on_failed_status(parsed)
             cfg = _security.SecurityConfig.permissive()
+            cfg.clock_skew_seconds = self.config.accepted_time_diff
             try:
                 result = _profiles.process_response(
                     parsed,
@@ -697,6 +781,7 @@ class Saml2Client:
                     unsafe_no_persistent_id_store=True,
                 )
             except Exception as e:
+                _raise_compat_time_error(parsed, cfg)
                 raise AssertionError(f"SAML response processing failed: {e}") from e
 
         assertions = list(parsed.assertions)
@@ -1182,10 +1267,14 @@ class Saml2Client:
         resp = _logout.create_logout_response_success(
             sp_entity_id, parsed.id, destination=slo_url
         )
-        response_signer = self._get_signer() if self.config.logout_responses_signed else None
-        response_sig_alg = (
-            response_signer.signature_method_uri() if response_signer is not None else None
+        response_signer = (
+            self._get_signer() if self.config.logout_responses_signed else None
         )
+        response_sig_alg = None
+        if response_signer is not None:
+            response_sig_alg = (
+                self.config.signing_algorithm or response_signer.signature_method_uri()
+            )
         url = _bindings.redirect_encode(
             resp.to_xml().encode("utf-8"),
             False,

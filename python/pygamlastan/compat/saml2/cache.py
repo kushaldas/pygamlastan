@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import Any
 
 from .ident import code, decode
+from .saml import NameID
 
 
 class ToOld(Exception):
@@ -97,14 +98,22 @@ class Cache:
         direct = code(name_id)
         if direct in self._db:
             return direct
-        # Compatibility for callers holding only NameID.text (including
-        # djangosaml2's historical session format).  Match a stored structured
-        # identifier by its text when that match is unambiguous.
-        if isinstance(name_id, str):
+        # Compatibility with cache keys persisted by pysaml2 before a rolling
+        # upgrade. djangosaml2 decodes its session value before cache lookups,
+        # so handle both a structured NameID (full identity equality) and the
+        # historical bare-text form (text-only equality).
+        if isinstance(name_id, (NameID, str)):
             matches = []
             for stored in self._db:
                 try:
-                    if decode(stored).text == name_id:
+                    decoded = decode(stored)
+                    structured_match = (
+                        isinstance(name_id, NameID) and decoded == name_id
+                    )
+                    text_match = (
+                        isinstance(name_id, str) and decoded.text == name_id
+                    )
+                    if structured_match or text_match:
                         matches.append(stored)
                 except ValueError:
                     continue
