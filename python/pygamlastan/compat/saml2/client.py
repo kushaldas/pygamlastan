@@ -52,7 +52,7 @@ from .saml import NameID
 from .s_utils import UnsupportedBinding
 from .sigver import MissingKey
 from .validate import ResponseLifetimeExceed, ToEarly
-from .xmldsig import DIGEST_SHA256, SIG_RSA_SHA256
+from .xmldsig import DIGEST_SHA256
 
 
 def _redirect_http_info(url: str) -> dict[str, Any]:
@@ -121,7 +121,7 @@ def _sign_enveloped_request(
     return signer.sign_enveloped(templated)
 
 
-def _legacy_nil_attribute_values(xml: str) -> dict[str, list[str]]:
+def _legacy_nil_attributes(xml: str) -> list[Any]:
     """Recover text from contradictory ``xsi:nil=true`` AttributeValues.
 
     Older pysaml2 accepted an ``AttributeValue`` that simultaneously declared
@@ -129,23 +129,36 @@ def _legacy_nil_attribute_values(xml: str) -> dict[str, list[str]]:
     that value as null, but djangosaml2's long-standing test fixtures—and some
     legacy IdPs—expect the text to win.  This adapter runs only after the native
     hardened parser has accepted the document and never changes the bytes used
-    for signature verification.
+    for signature verification. Recovered values retain only their wire name
+    and NameFormat; FriendlyName is deliberately ignored so the strict native
+    attribute converter remains the authority for local names.
     """
     from xml.etree import ElementTree
+
+    from pygamlastan.core import Attribute
 
     assertion_namespace = "urn:oasis:names:tc:SAML:2.0:assertion"
     nil_attribute = "{http://www.w3.org/2001/XMLSchema-instance}nil"
     root = ElementTree.fromstring(xml)
-    recovered: dict[str, list[str]] = {}
+    recovered: list[Any] = []
     for attribute in root.iter(f"{{{assertion_namespace}}}Attribute"):
-        name = attribute.get("FriendlyName") or attribute.get("Name")
-        if not name:
+        wire_name = attribute.get("Name")
+        if not wire_name:
             continue
+        values: list[str] = []
         for value in attribute.findall(f"{{{assertion_namespace}}}AttributeValue"):
             nil = (value.get(nil_attribute) or "").lower()
             text = (value.text or "").strip()
             if nil in {"true", "1"} and text:
-                recovered.setdefault(name, []).append(text)
+                values.append(text)
+        if values:
+            recovered.append(
+                Attribute(
+                    wire_name,
+                    values=values,
+                    name_format=attribute.get("NameFormat"),
+                )
+            )
     return recovered
 
 
@@ -791,7 +804,7 @@ class Saml2Client:
             in_response_to,
             assertion=assertions[0] if assertions else None,
             came_from=came_from,
-            legacy_attribute_values=_legacy_nil_attribute_values(xml),
+            legacy_attributes=_legacy_nil_attributes(xml),
         )
         if self.identity_cache is not None:
             session_info = wrapped.session_info()
@@ -1263,20 +1276,58 @@ class Saml2Client:
                 "LogoutRequest replay detected: this request ID was already processed"
             )
         issuer = parsed.issuer.value if parsed.issuer is not None else expected_idp
-        slo_url = self.config.single_logout_service(issuer, BINDING_HTTP_REDIRECT)
+        response_bindings = {
+            BINDING_HTTP_POST: [BINDING_HTTP_POST, BINDING_HTTP_REDIRECT],
+            BINDING_HTTP_REDIRECT: [BINDING_HTTP_REDIRECT, BINDING_HTTP_POST],
+        }.get(binding)
+        if response_bindings is None:
+            raise UnsupportedBinding(
+                f"unsupported binding for LogoutResponse: {binding}"
+            )
+        response_binding = None
+        slo_url = None
+        for candidate in response_bindings:
+            try:
+                slo_url = self.config.single_logout_service(issuer, candidate)
+                response_binding = candidate
+                break
+            except ValueError:
+                continue
+        if response_binding is None or slo_url is None:
+            raise UnsupportedBinding(
+                f"no supported SingleLogoutService response endpoint for {issuer!r}"
+            )
         resp = _logout.create_logout_response_success(
             sp_entity_id, parsed.id, destination=slo_url
         )
         response_signer = (
             self._get_signer() if self.config.logout_responses_signed else None
         )
+        xml = resp.to_xml()
+        if response_binding == BINDING_HTTP_POST:
+            if response_signer is not None:
+                xml = _sign_enveloped_request(
+                    xml,
+                    resp.id,
+                    response_signer,
+                    self.config.signing_algorithm,
+                    self.config.digest_algorithm,
+                )
+            html = _bindings.post_encode(
+                xml.encode("utf-8"),
+                False,
+                slo_url,
+                relay_state=relay_state or None,
+            )
+            return _post_http_info(slo_url, html)
+
         response_sig_alg = None
         if response_signer is not None:
             response_sig_alg = (
                 self.config.signing_algorithm or response_signer.signature_method_uri()
             )
         url = _bindings.redirect_encode(
-            resp.to_xml().encode("utf-8"),
+            xml.encode("utf-8"),
             False,
             slo_url,
             relay_state=relay_state or None,

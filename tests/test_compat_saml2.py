@@ -396,7 +396,9 @@ def test_parse_authn_response_session_info(client):
     # object graph before completing authentication.
     confirmations = resp.assertion.subject.subject_confirmation
     assert confirmations[0].method == saml2.saml.SCM_BEARER
-    assert confirmations[0].subject_confirmation_data.not_on_or_after is not None
+    confirmation_expiry = confirmations[0].subject_confirmation_data.not_on_or_after
+    assert isinstance(confirmation_expiry, str)
+    assert datetime.fromisoformat(confirmation_expiry).tzinfo is not None
 
 
 def test_parse_authn_response_unsolicited_rejected(client):
@@ -730,11 +732,15 @@ def test_ava_multivalue_and_extra_attributes():
 
 
 def test_legacy_nil_attribute_text_is_recovered(client):
-    """Match pysaml2 for legacy IdPs that emit nil values containing text."""
+    """Legacy nil text is recovered through the strict wire-name converter."""
     session_id, _ = client.prepare_for_authenticate(
         entityid=IDP, binding=BINDING_HTTP_REDIRECT
     )
     xml = _auth_response(session_id).replace(
+        'FriendlyName="eduPersonPrincipalName"',
+        'FriendlyName="isAdmin"',
+        1,
+    ).replace(
         "<saml:AttributeValue>hubba-bubba@eduid.se</saml:AttributeValue>",
         '<saml:AttributeValue xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
         'xsi:nil="true">hubba-bubba@eduid.se</saml:AttributeValue>',
@@ -744,6 +750,33 @@ def test_legacy_nil_attribute_text_is_recovered(client):
         raw, BINDING_HTTP_POST, {session_id: "return"}
     )
     assert response.ava["eduPersonPrincipalName"] == ["hubba-bubba@eduid.se"]
+    assert "isAdmin" not in response.ava
+
+
+def test_legacy_nil_unknown_wire_attribute_is_rejected(client):
+    """A malicious FriendlyName cannot introduce an unmapped local attribute."""
+    session_id, _ = client.prepare_for_authenticate(
+        entityid=IDP, binding=BINDING_HTTP_REDIRECT
+    )
+    xml = _auth_response(session_id).replace(
+        'Name="urn:oid:1.3.6.1.4.1.5923.1.1.1.6" '
+        'FriendlyName="eduPersonPrincipalName"',
+        'Name="urn:example:unknown-admin" FriendlyName="isAdmin"',
+        1,
+    ).replace(
+        "<saml:AttributeValue>hubba-bubba@eduid.se</saml:AttributeValue>",
+        '<saml:AttributeValue xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+        'xsi:nil="true">true</saml:AttributeValue>',
+        1,
+    )
+    raw = base64.b64encode(xml.encode()).decode()
+
+    response = client.parse_authn_request_response(
+        raw, BINDING_HTTP_POST, {session_id: "return"}
+    )
+
+    assert "isAdmin" not in response.ava
+    assert "urn:example:unknown-admin" not in response.ava
 
 
 # --------------------------------------------------------------------------- #
@@ -1655,6 +1688,59 @@ def test_handle_logout_request_enveloped_signature_post(rsa_keypair, tmp_path):
     raw = base64.b64encode(signed_xml.encode("utf-8")).decode("ascii")
     info = client.handle_logout_request(raw, _session_nameid(), BINDING_HTTP_POST)
     assert info["headers"][0][1].startswith(IDPSLO + "?SAMLResponse=")
+
+
+def test_handle_logout_request_signs_post_response_for_post_only_idp(
+    rsa_keypair, tmp_path
+):
+    """A POST request to an IdP with only POST SLO gets an enveloped, signed
+    POST response that djangosaml2 can return as an auto-submitting form."""
+    private_key, cert_pem, cert_der_b64 = rsa_keypair
+    metadata_file = tmp_path / "post-only-idp.xml"
+    metadata_file.write_text(
+        _idp_metadata(cert_der_b64).replace(
+            f'<md:SingleLogoutService Binding="{BINDING_HTTP_REDIRECT}"',
+            f'<md:SingleLogoutService Binding="{BINDING_HTTP_POST}"',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    key_file = tmp_path / "post-response.key"
+    key_file.write_bytes(private_key)
+    config = {
+        "entityid": SP,
+        "service": {
+            "sp": {
+                "endpoints": {
+                    "assertion_consumer_service": [(ACS, BINDING_HTTP_POST)],
+                    "single_logout_service": [(SLO, BINDING_HTTP_POST)],
+                },
+                "logout_responses_signed": True,
+            }
+        },
+        "metadata": {"local": [str(metadata_file)]},
+        "key_file": str(key_file),
+    }
+    post_client = Saml2Client(SPConfig().load(config))
+    signed_request = _enveloped_signed_logout(
+        "id-lr-post-response", cert_der_b64, private_key
+    )
+    encoded = base64.b64encode(signed_request.encode()).decode()
+
+    info = post_client.handle_logout_request(
+        encoded, _session_nameid(), BINDING_HTTP_POST, relay_state="post-state"
+    )
+
+    assert info["method"] == "POST"
+    assert info["url"] == IDPSLO
+    match = re.search(r'name="SAMLResponse" value="([^"]+)"', info["data"])
+    assert match is not None
+    response_xml = base64.b64decode(html.unescape(match.group(1))).decode()
+    verification = crypto.SamlVerifier.from_cert(cert_pem).verify_enveloped(
+        response_xml
+    )
+    assert verification.is_valid()
+    assert f'Destination="{IDPSLO}"' in response_xml
 
 
 def test_handle_logout_request_tampered_signature_value_rejected(rsa_keypair, tmp_path):

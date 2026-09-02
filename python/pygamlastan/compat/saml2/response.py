@@ -65,8 +65,9 @@ class _SubjectConfirmationDataAdapter:
         self._value = value
 
     @property
-    def not_on_or_after(self) -> Any:
-        return self._value.not_on_or_after
+    def not_on_or_after(self) -> str | None:
+        value = self._value.not_on_or_after
+        return value.isoformat() if value is not None else None
 
 
 class _SubjectConfirmationAdapter:
@@ -124,12 +125,12 @@ class AuthnResponse:
         in_response_to: str | None,
         assertion: Any = None,
         came_from: Any = None,
-        legacy_attribute_values: dict[str, list[str]] | None = None,
+        legacy_attributes: list[Any] | None = None,
     ) -> None:
         self._result = result
         self._in_response_to = in_response_to
         self._came_from = came_from
-        self._legacy_attribute_values = legacy_attribute_values or {}
+        self._legacy_attributes = legacy_attributes or []
         self.assertion = _AssertionAdapter(assertion) if assertion is not None else None
 
     def session_id(self) -> str | None:
@@ -144,9 +145,10 @@ class AuthnResponse:
         values = {la.name: list(la.values) for la in local}
         # Only fill empty/missing native values. A well-formed typed value
         # remains authoritative over the narrow legacy recovery path.
-        for name, recovered in self._legacy_attribute_values.items():
-            if not values.get(name):
-                values[name] = list(recovered)
+        legacy_local = _converter().to_local(self._legacy_attributes)
+        for attribute in legacy_local:
+            if not values.get(attribute.name):
+                values[attribute.name] = list(attribute.values)
         return values
 
     def get_subject(self) -> NameID:
