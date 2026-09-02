@@ -607,14 +607,16 @@ class Saml2Client:
             # "unable to know which IdP to use".
             raise TypeError("Unable to determine which IdP to use")
 
+        effective_binding = binding
         try:
-            sso_url = self.sso_location(idp, binding)
+            sso_url = self.sso_location(idp, effective_binding)
         except UnsupportedBinding:
             # Some older configurations publish only a Redirect endpoint but
             # callers still ask the binding layer for POST first.  Preserve
             # pysaml2's endpoint fallback; djangosaml2 normally detects and
             # switches the binding itself before reaching this method.
-            sso_url = self.sso_location(idp, BINDING_HTTP_REDIRECT)
+            effective_binding = BINDING_HTTP_REDIRECT
+            sso_url = self.sso_location(idp, effective_binding)
 
         # Web SSO responses normally return through POST even when the request
         # itself is delivered by Redirect.  Honour an explicit service binding
@@ -633,7 +635,7 @@ class Saml2Client:
 
         rs = relay_state or None
         should_sign = self.config.authn_requests_signed if sign is None else bool(sign)
-        if binding == BINDING_HTTP_REDIRECT:
+        if effective_binding == BINDING_HTTP_REDIRECT:
             signer = self._get_signer() if should_sign else None
             effective_sigalg = sigalg or self.config.signing_algorithm
             if signer is not None and effective_sigalg is None:
@@ -647,7 +649,7 @@ class Saml2Client:
                 sig_alg=effective_sigalg,
             )
             return session_id, _redirect_http_info(url)
-        elif binding == BINDING_HTTP_POST:
+        elif effective_binding == BINDING_HTTP_POST:
             if should_sign:
                 signer = self._get_signer()
                 xml = _sign_enveloped_request(
@@ -659,7 +661,9 @@ class Saml2Client:
                 )
             html = _bindings.post_encode(xml.encode("utf-8"), True, sso_url, relay_state=rs)
             return session_id, _post_http_info(sso_url, html)
-        raise UnsupportedBinding(f"unsupported binding for AuthnRequest: {binding}")
+        raise UnsupportedBinding(
+            f"unsupported binding for AuthnRequest: {effective_binding}"
+        )
 
     # -- Response processing ----------------------------------------------
 
@@ -1303,7 +1307,9 @@ class Saml2Client:
         slo_url = None
         for candidate in response_bindings:
             try:
-                slo_url = self.config.single_logout_service(issuer, candidate)
+                slo_url = self.config.single_logout_response_service(
+                    issuer, candidate
+                )
                 response_binding = candidate
                 break
             except ValueError:

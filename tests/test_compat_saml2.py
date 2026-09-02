@@ -286,6 +286,7 @@ def test_djangosaml2_import_surface_is_present():
 
 def test_public_saml_failures_share_samlerror_base():
     """Generic pysaml2 error handlers catch the shim's SAML failures."""
+    from pygamlastan.compat.saml2.cache import ToOld
     from pygamlastan.compat.saml2.client_base import LogoutError
     from pygamlastan.compat.saml2.response import SignatureError
     from pygamlastan.compat.saml2.s_utils import UnknownSystemEntity
@@ -297,6 +298,7 @@ def test_public_saml_failures_share_samlerror_base():
         RequestVersionTooLow,
         SignatureError,
         StatusError,
+        ToOld,
         UnsolicitedResponse,
         UnknownSystemEntity,
         ResponseLifetimeExceed,
@@ -324,6 +326,7 @@ def test_spconfig_loads_accepted_time_diff():
 
 
 def test_spconfig_normalizes_string_boolean_options():
+    """Textual config booleans preserve their intended truth values."""
     sp = {
         **CONF["service"]["sp"],
         "want_response_signed": "false",
@@ -373,6 +376,18 @@ def test_metadata_store_has_djangosaml2_query_shape(tmp_path):
         IDP, "idpsso_descriptor", "single_sign_on_service"
     )
     assert services[BINDING_HTTP_REDIRECT][0]["location"] == SSO
+    logout_services = cfg.metadata.single_logout_service(
+        IDP, binding=BINDING_HTTP_REDIRECT, typ="idpsso"
+    )
+    assert isinstance(logout_services, list)
+    assert logout_services[0]["binding"] == BINDING_HTTP_REDIRECT
+    assert logout_services[0]["location"] == IDPSLO
+    assert cfg.metadata.service(
+        IDP,
+        "idpsso_descriptor",
+        "single_logout_service",
+        BINDING_HTTP_POST,
+    ) == []
     assert IDP in cfg.metadata.with_descriptor("idpsso")
 
 
@@ -662,6 +677,51 @@ def test_handle_logout_request_redirects_to_idp(client):
     assert info["headers"][0][1].startswith(IDPSLO + "?SAMLResponse=")
 
 
+def test_logout_response_prefers_metadata_response_location(tmp_path):
+    """Responses use ResponseLocation while requests continue using Location."""
+    response_location = IDPSLO + "/responses"
+    metadata_file = tmp_path / "idp-response-location.xml"
+    metadata_file.write_text(
+        _idp_metadata().replace(
+            f'Location="{IDPSLO}"',
+            f'Location="{IDPSLO}" ResponseLocation="{response_location}"',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    conf = {
+        "entityid": SP,
+        "service": {
+            "sp": {
+                "endpoints": {
+                    "assertion_consumer_service": [(ACS, BINDING_HTTP_POST)],
+                    "single_logout_service": [(SLO, BINDING_HTTP_REDIRECT)],
+                },
+                "allow_unsigned_logout_requests": True,
+            }
+        },
+        "metadata": {"local": [str(metadata_file)]},
+    }
+    response_client = Saml2Client(SPConfig().load(conf))
+    nid = NameID(text="abc123hash", format=TRANSIENT, sp_name_qualifier=SP)
+
+    _binding, request_info = response_client.global_logout(nid)[IDP]
+    assert dict(request_info["headers"])["Location"].startswith(IDPSLO)
+    encoded = deflate_and_base64_encode(
+        _logout_request("id-response-location")
+    )
+    response_info = response_client.handle_logout_request(
+        encoded, nid, BINDING_HTTP_REDIRECT
+    )
+
+    location = dict(response_info["headers"])["Location"]
+    assert location.startswith(response_location + "?SAMLResponse=")
+    response_xml = pgbindings.redirect_decode(
+        urllib.parse.urlsplit(location).query
+    ).saml_text
+    assert f'Destination="{response_location}"' in response_xml
+
+
 def test_handle_logout_request_rejects_mismatched_subject(client):
     """A LogoutRequest for a different subject than the session must fail closed."""
     other = NameID(text="someone-else", format=TRANSIENT, sp_name_qualifier=SP)
@@ -775,8 +835,27 @@ def test_empty_requested_authn_context_overrides_configured_context():
     assert pgxml.parse_authn_request(xml).requested_authn_context is None
 
 
-def test_prepare_post_binding(client):
-    _session_id, info = client.prepare_for_authenticate(entityid=IDP, binding=BINDING_HTTP_POST)
+def test_prepare_post_binding():
+    """A published POST SSO endpoint produces an auto-submitting POST form."""
+    sp = {
+        **CONF["service"]["sp"],
+        "idp": {
+            IDP: {
+                **CONF["service"]["sp"]["idp"][IDP],
+                "single_sign_on_service": {
+                    BINDING_HTTP_REDIRECT: SSO,
+                    BINDING_HTTP_POST: SSO,
+                },
+            }
+        },
+    }
+    post_client = Saml2Client(
+        SPConfig().load({**CONF, "service": {"sp": sp}})
+    )
+
+    _session_id, info = post_client.prepare_for_authenticate(
+        entityid=IDP, binding=BINDING_HTTP_POST
+    )
     assert info["method"] == "POST"
     assert info["url"] == SSO
     assert "SAMLRequest" in info["data"]  # auto-submit form body
@@ -1169,7 +1248,9 @@ def test_prepare_falls_back_to_redirect_endpoint():
     resolves a destination (falls back to the Redirect endpoint)."""
     client = Saml2Client(SPConfig().load(CONF))  # CONF has only a Redirect SSO
     _sid, info = client.prepare_for_authenticate(entityid=IDP, binding=BINDING_HTTP_POST)
-    assert info["url"] == SSO
+    assert info["method"] == "GET"
+    assert info["url"].startswith(SSO + "?SAMLRequest=")
+    assert dict(info["headers"])["Location"].startswith(SSO + "?SAMLRequest=")
 
 
 def test_decode_normalizes_corrupt_value_to_valueerror():
@@ -1246,7 +1327,14 @@ def _client_with_key(rsa_keypair, tmp_path):
         "service": {
             "sp": {
                 "endpoints": {"assertion_consumer_service": [(ACS, BINDING_HTTP_POST)]},
-                "idp": {IDP: {"single_sign_on_service": {BINDING_HTTP_REDIRECT: SSO}}},
+                "idp": {
+                    IDP: {
+                        "single_sign_on_service": {
+                            BINDING_HTTP_REDIRECT: SSO,
+                            BINDING_HTTP_POST: SSO,
+                        }
+                    }
+                },
                 "authn_requests_signed": True,
             }
         },

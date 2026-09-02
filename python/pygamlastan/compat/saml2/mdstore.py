@@ -46,11 +46,14 @@ class _LocalMetadataSource:
         return result
 
 
-def _service_endpoints(entity: EntityDescriptor, service: str) -> list[Any]:
+def _service_endpoints(
+    entity: EntityDescriptor, service: str, role: str = "idp"
+) -> list[Any]:
+    """Return native endpoint records for one metadata service and role."""
     if service == "single_sign_on_service":
-        return list(entity.single_sign_on_services())
+        return list(entity.single_sign_on_services()) if role == "idp" else []
     if service == "single_logout_service":
-        return list(entity.single_logout_services("idp"))
+        return list(entity.single_logout_services(role))
     return []
 
 
@@ -99,39 +102,64 @@ class MetadataStore(Mapping[str, EntityDescriptor]):
         return entity_id
 
     def service(
-        self, entity_id: str, descriptor: str, service: str
-    ) -> dict[str, list[dict[str, Any]]]:
-        """Return pysaml2-shaped endpoint records grouped by binding URI."""
+        self,
+        entity_id: str,
+        descriptor: str,
+        service: str,
+        binding: str | None = None,
+    ) -> dict[str, list[dict[str, Any]]] | list[dict[str, Any]]:
+        """Return endpoint records, optionally filtered to one binding."""
         entity = self._entities.get(entity_id)
-        if entity is None or descriptor != "idpsso_descriptor" or not entity.is_idp():
+        if entity is None:
             raise UnknownSystemEntity(entity_id)
+        if descriptor == "idpsso_descriptor" and entity.is_idp():
+            role = "idp"
+        elif descriptor == "spsso_descriptor" and entity.is_sp():
+            role = "sp"
+        else:
+            raise UnknownSystemEntity(entity_id)
+        records = [
+            {
+                "binding": endpoint.binding,
+                "location": endpoint.location,
+                "response_location": endpoint.response_location,
+            }
+            for endpoint in _service_endpoints(entity, service, role)
+            if binding is None or endpoint.binding == binding
+        ]
+        if binding is not None:
+            return records
         grouped: dict[str, list[dict[str, Any]]] = {}
-        for endpoint in _service_endpoints(entity, service):
-            grouped.setdefault(endpoint.binding, []).append(
-                {
-                    "location": endpoint.location,
-                    "response_location": endpoint.response_location,
-                }
-            )
+        for record in records:
+            grouped.setdefault(record["binding"], []).append(record)
         return grouped
 
     def single_sign_on_service(
         self, entity_id: str, binding: str | None = None
-    ) -> dict[str, list[dict[str, Any]]]:
+    ) -> dict[str, list[dict[str, Any]]] | list[dict[str, Any]]:
         """Return SSO endpoints, optionally restricted to one binding."""
-        services = self.service(
-            entity_id, "idpsso_descriptor", "single_sign_on_service"
+        return self.service(
+            entity_id,
+            "idpsso_descriptor",
+            "single_sign_on_service",
+            binding,
         )
-        if binding is None:
-            return services
-        return {binding: services[binding]} if binding in services else {}
 
     def single_logout_service(
-        self, entity_id: str, typ: str = "idpsso"
-    ) -> dict[str, list[dict[str, Any]]]:
+        self,
+        entity_id: str,
+        binding: str | None = None,
+        typ: str | None = None,
+    ) -> dict[str, list[dict[str, Any]]] | list[dict[str, Any]]:
         """Return logout endpoints for the requested descriptor type."""
-        descriptor = "idpsso_descriptor" if typ == "idpsso" else typ
-        return self.service(entity_id, descriptor, "single_logout_service")
+        if typ is None:
+            raise AttributeError("Missing type specification")
+        return self.service(
+            entity_id,
+            f"{typ}_descriptor",
+            "single_logout_service",
+            binding,
+        )
 
     def with_descriptor(self, descriptor: str) -> dict[str, EntityDescriptor]:
         """Return entities that publish the requested IdP or SP descriptor."""

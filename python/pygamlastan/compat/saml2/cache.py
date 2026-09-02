@@ -19,11 +19,12 @@ import time
 from datetime import datetime
 from typing import Any
 
+from . import SAMLError
 from .ident import code, decode
 from .saml import NameID
 
 
-class ToOld(Exception):
+class ToOld(SAMLError):
     """Raised by :meth:`Cache.get` when an entry is past its expiry."""
 
 

@@ -236,6 +236,18 @@ class SPConfig:
                     return ep.location
         raise ValueError(f"no SingleLogoutService for {idp_entity_id!r} with binding {binding}")
 
+    def single_logout_response_service(
+        self, idp_entity_id: str | None, binding: str = BINDING_HTTP_REDIRECT
+    ) -> str:
+        """Resolve a LogoutResponse target, preferring metadata ResponseLocation."""
+        idp_entity_id = idp_entity_id or self.only_idp()
+        ed = self.metadata.get(idp_entity_id or "")
+        if ed is not None:
+            for endpoint in ed.single_logout_services("idp"):
+                if endpoint.binding == binding and endpoint.response_location:
+                    return endpoint.response_location
+        return self.single_logout_service(idp_entity_id, binding)
+
     def idp_signing_certs(self, idp_entity_id: str | None) -> list[bytes]:
         """All IdP signing certificates (DER) from parsed metadata.
 
