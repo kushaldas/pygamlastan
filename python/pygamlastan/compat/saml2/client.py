@@ -906,11 +906,14 @@ class Saml2Client:
 
         responses: dict[str, tuple[str, dict[str, Any]]] = {}
         for idp in entity_ids:
-            candidates = (
-                [expected_binding]
-                if expected_binding
-                else list(self.config.preferred_binding["single_logout_service"])
+            preferred = list(
+                self.config.preferred_binding["single_logout_service"]
             )
+            candidates = []
+            for candidate in ([expected_binding] if expected_binding else []) + preferred:
+                if candidate in (BINDING_HTTP_REDIRECT, BINDING_HTTP_POST):
+                    if candidate not in candidates:
+                        candidates.append(candidate)
             selected: tuple[str, str] | None = None
             for candidate in candidates:
                 try:

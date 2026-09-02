@@ -1,7 +1,9 @@
 """Exceptions shared by pysaml2's client base classes."""
 
+from . import SAMLError
 
-class LogoutError(Exception):
+
+class LogoutError(SAMLError):
     """Raised when no configured peer can complete Single Logout."""
 
 

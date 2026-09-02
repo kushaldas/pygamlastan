@@ -19,14 +19,17 @@ from pygamlastan.core import (
     BINDING_URI,
 )
 
-# pysaml2 eagerly exposes its schema modules from the package root.  Importing
-# these lightweight compatibility modules preserves expressions such as
-# ``saml2.saml.NAMEID_FORMAT_PERSISTENT`` and ``saml2.xmldsig.SIG_RSA_SHA256``.
-from . import md, saml, samlp, s_utils, xmldsig, xmlenc
-
 
 class SAMLError(Exception):
     """Base exception retained for consumers that catch generic SAML errors."""
+
+
+# pysaml2 eagerly exposes its schema modules from the package root.  Importing
+# these lightweight compatibility modules preserves expressions such as
+# ``saml2.saml.NAMEID_FORMAT_PERSISTENT`` and ``saml2.xmldsig.SIG_RSA_SHA256``.
+# ``SAMLError`` must exist first because compatibility submodules derive their
+# public exceptions from it while the package is being initialized.
+from . import md, saml, samlp, s_utils, xmldsig, xmlenc
 
 __all__ = [
     "BINDING_HTTP_ARTIFACT",

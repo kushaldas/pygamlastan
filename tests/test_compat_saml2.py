@@ -283,6 +283,27 @@ def test_djangosaml2_import_surface_is_present():
     assert isinstance(MetaDataMDX(), MetaDataMDX)
 
 
+def test_public_saml_failures_share_samlerror_base():
+    """Generic pysaml2 error handlers catch the shim's SAML failures."""
+    from pygamlastan.compat.saml2.client_base import LogoutError
+    from pygamlastan.compat.saml2.response import SignatureError
+    from pygamlastan.compat.saml2.s_utils import UnknownSystemEntity
+
+    for exception in (
+        LogoutError,
+        RequestVersionTooLow,
+        SignatureError,
+        StatusError,
+        UnsolicitedResponse,
+        UnknownSystemEntity,
+        ResponseLifetimeExceed,
+        ToEarly,
+    ):
+        assert issubclass(exception, saml2.SAMLError)
+
+    assert issubclass(SignatureError, AssertionError)
+
+
 def test_spconfig_load_and_only_idp():
     cfg = SPConfig().load(CONF)
     assert cfg.entityid == SP
@@ -386,6 +407,8 @@ def test_parse_authn_response_session_info(client):
     assert si["ava"]["eduPersonPrincipalName"] == ["hubba-bubba@eduid.se"]
     assert si["ava"]["mail"] == ["hubba@eduid.se"]
     assert si["session_index"] == session_id
+    assert isinstance(si["not_on_or_after"], int)
+    assert si["not_on_or_after"] > datetime.now(timezone.utc).timestamp()
     assert si["authn_info"][0][0] == PPT
     datetime.fromisoformat(si["authn_info"][0][2])  # authn instant is parseable
     assert isinstance(si["name_id"], NameID)
@@ -399,6 +422,32 @@ def test_parse_authn_response_session_info(client):
     confirmation_expiry = confirmations[0].subject_confirmation_data.not_on_or_after
     assert isinstance(confirmation_expiry, str)
     assert datetime.fromisoformat(confirmation_expiry).tzinfo is not None
+
+
+def test_identity_cache_uses_conditions_expiry_without_session_expiry():
+    """A finite assertion lifetime bounds cached sessions when AuthnStatement
+    omits SessionNotOnOrAfter."""
+    from pygamlastan.compat.saml2.cache import Cache
+
+    identity_cache = Cache()
+    cached_client = Saml2Client(
+        SPConfig().load(CONF), identity_cache=identity_cache
+    )
+    session_id, _ = cached_client.prepare_for_authenticate(
+        entityid=IDP, binding=BINDING_HTTP_REDIRECT
+    )
+    raw = base64.b64encode(_auth_response(session_id).encode("utf-8")).decode(
+        "ascii"
+    )
+
+    response = cached_client.parse_authn_request_response(
+        raw, BINDING_HTTP_POST, {session_id: "ref-1"}
+    )
+    info = response.session_info()
+    cached = identity_cache._db[code(info["name_id"])][IDP]
+
+    assert cached[0] == info["not_on_or_after"]
+    assert cached[0] is not None
 
 
 def test_parse_authn_response_unsolicited_rejected(client):
@@ -430,6 +479,22 @@ def test_global_logout_builds_redirect(client):
     req_id, info = logouts[IDP]
     assert req_id
     assert info["headers"][0][1].startswith(IDPSLO + "?SAMLRequest=")
+
+
+def test_do_logout_falls_back_when_expected_binding_is_unavailable(client):
+    """djangosaml2's preferred binding does not exclude published fallbacks."""
+    nid = NameID(text="abc123hash", format=TRANSIENT, sp_name_qualifier=SP)
+
+    binding, info = client.do_logout(
+        nid,
+        [IDP],
+        "",
+        None,
+        expected_binding=BINDING_HTTP_POST,
+    )[IDP]
+
+    assert binding == BINDING_HTTP_REDIRECT
+    assert dict(info["headers"])["Location"].startswith(IDPSLO)
 
 
 def test_global_logout_carries_reason_and_expiry(client):

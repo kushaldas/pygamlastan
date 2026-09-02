@@ -1,11 +1,13 @@
 """Validation exception names used by existing pysaml2 integrations."""
 
+from . import SAMLError
 
-class ResponseLifetimeExceed(Exception):
+
+class ResponseLifetimeExceed(SAMLError):
     """The response or assertion is no longer valid."""
 
 
-class ToEarly(Exception):
+class ToEarly(SAMLError):
     """The response or assertion is not valid yet."""
 
 

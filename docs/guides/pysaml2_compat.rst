@@ -298,7 +298,12 @@ The three SLO methods mirror pysaml2:
    # SP-initiated: build LogoutRequests for each federated IdP that has an SLO.
    logouts = client.global_logout(decode(session["name_id"]))
    for idp_entity_id, (binding, http_info) in logouts.items():
-       location = dict(http_info["headers"])["Location"]   # redirect to IdP SLO
+       if binding == BINDING_HTTP_REDIRECT:
+           location = dict(http_info["headers"])["Location"]
+           ...   # redirect to location
+       elif binding == BINDING_HTTP_POST:
+           form = http_info["data"]
+           ...   # return the auto-submitting HTML form
 
    # We started the logout: parse the IdP's correlated LogoutResponse. Construct
    # the client with djangosaml2's StateCache so the outgoing request ID survives

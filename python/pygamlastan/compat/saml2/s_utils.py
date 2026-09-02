@@ -7,8 +7,10 @@ from __future__ import annotations
 import base64
 import zlib
 
+from . import SAMLError
 
-class UnknownSystemEntity(Exception):
+
+class UnknownSystemEntity(SAMLError):
     """A requested entity is absent from configured metadata."""
 
 

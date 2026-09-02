@@ -15,22 +15,23 @@ from typing import Any
 from pygamlastan import attribute_map as _attr
 from pygamlastan.profiles import AuthnResult as _AuthnResult
 
+from . import SAMLError
 from .saml import NameID
 
 
-class StatusError(Exception):
+class StatusError(SAMLError):
     """Raised when the SAML Response carries a non-Success status."""
 
 
-class UnsolicitedResponse(Exception):
+class UnsolicitedResponse(SAMLError):
     """Raised when a Response's InResponseTo is not in the outstanding set."""
 
 
-class RequestVersionTooLow(Exception):
+class RequestVersionTooLow(SAMLError):
     """The response uses an unsupported SAML version."""
 
 
-class SignatureError(AssertionError):
+class SignatureError(AssertionError, SAMLError):
     """The response signature is missing or invalid.
 
     pysaml2 keeps signature failures outside the status-error hierarchy.
@@ -131,6 +132,10 @@ class AuthnResponse:
         self._in_response_to = in_response_to
         self._came_from = came_from
         self._legacy_attributes = legacy_attributes or []
+        conditions = getattr(assertion, "conditions", None)
+        self._assertion_not_on_or_after = getattr(
+            conditions, "not_on_or_after", None
+        )
         self.assertion = _AssertionAdapter(assertion) if assertion is not None else None
 
     def session_id(self) -> str | None:
@@ -164,10 +169,11 @@ class AuthnResponse:
     def session_info(self) -> dict[str, Any]:
         """Return the session dictionary expected by pysaml2 SP callers."""
         r = self._result
+        expiry = r.session_not_on_or_after or self._assertion_not_on_or_after
         not_on_or_after = None
-        if r.session_not_on_or_after is not None:
+        if expiry is not None:
             # pysaml2 expressed this as epoch seconds.
-            not_on_or_after = int(r.session_not_on_or_after.timestamp())
+            not_on_or_after = int(expiry.timestamp())
         return {
             "ava": self.ava,
             "name_id": self.get_subject(),
