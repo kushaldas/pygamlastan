@@ -16,6 +16,17 @@ from pygamlastan.core import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT
 from .mdstore import MetadataStore, SourceNotFound
 
 
+def _as_bool(value: Any) -> bool:
+    """Parse pysaml2-style boolean values without treating ``"false"`` as true."""
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off", ""}:
+            return False
+    return bool(value)
+
+
 class SPConfig:
     """A minimal SP configuration parsed from an eduID-style settings dict."""
 
@@ -74,18 +85,26 @@ class SPConfig:
         self.idp = dict(sp.get("idp", {}))
         # The shim deliberately defaults to signed AuthnResponses. Deployments
         # accepting unsigned test responses must opt out in their SP settings.
-        self.want_response_signed = bool(sp.get("want_response_signed", True))
-        self.want_assertions_signed = bool(sp.get("want_assertions_signed", False))
+        self.want_response_signed = _as_bool(sp.get("want_response_signed", True))
+        self.want_assertions_signed = _as_bool(
+            sp.get("want_assertions_signed", False)
+        )
         # pysaml2 treats logout-response signing as its own setting; requiring
         # signed AuthnResponses must not silently change the SLO contract.
-        self.want_logout_response_signed = bool(
+        self.want_logout_response_signed = _as_bool(
             sp.get("want_logout_response_signed", False)
         )
-        self.authn_requests_signed = bool(sp.get("authn_requests_signed", False))
-        self.logout_requests_signed = bool(sp.get("logout_requests_signed", False))
-        self.logout_responses_signed = bool(sp.get("logout_responses_signed", False))
-        self.force_authn = bool(sp.get("force_authn", False))
-        self.allow_create = bool(
+        self.authn_requests_signed = _as_bool(
+            sp.get("authn_requests_signed", False)
+        )
+        self.logout_requests_signed = _as_bool(
+            sp.get("logout_requests_signed", False)
+        )
+        self.logout_responses_signed = _as_bool(
+            sp.get("logout_responses_signed", False)
+        )
+        self.force_authn = _as_bool(sp.get("force_authn", False))
+        self.allow_create = _as_bool(
             sp.get("allow_create", sp.get("name_id_format_allow_create", False))
         )
         self.name_id_format = sp.get("name_id_format") or sp.get(
@@ -95,7 +114,7 @@ class SPConfig:
         self.signing_algorithm = sp.get("signing_algorithm")
         self.digest_algorithm = sp.get("digest_algorithm")
         self.accepted_time_diff = int(conf.get("accepted_time_diff") or 0)
-        self.allow_unsigned_logout_requests = bool(
+        self.allow_unsigned_logout_requests = _as_bool(
             sp.get("allow_unsigned_logout_requests", False)
         )
 

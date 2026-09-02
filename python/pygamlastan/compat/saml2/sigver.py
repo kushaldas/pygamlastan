@@ -10,8 +10,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from . import SAMLError
 
-class MissingKey(Exception):
+
+class MissingKey(SAMLError):
     """No trusted verification key is available for the peer."""
 
 

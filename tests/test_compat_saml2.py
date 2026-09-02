@@ -14,6 +14,7 @@ import itertools
 import re
 import urllib.parse
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -288,9 +289,11 @@ def test_public_saml_failures_share_samlerror_base():
     from pygamlastan.compat.saml2.client_base import LogoutError
     from pygamlastan.compat.saml2.response import SignatureError
     from pygamlastan.compat.saml2.s_utils import UnknownSystemEntity
+    from pygamlastan.compat.saml2.sigver import MissingKey
 
     for exception in (
         LogoutError,
+        MissingKey,
         RequestVersionTooLow,
         SignatureError,
         StatusError,
@@ -318,6 +321,33 @@ def test_spconfig_load_and_only_idp():
 def test_spconfig_loads_accepted_time_diff():
     cfg = SPConfig().load({**CONF, "accepted_time_diff": 60})
     assert cfg.accepted_time_diff == 60
+
+
+def test_spconfig_normalizes_string_boolean_options():
+    sp = {
+        **CONF["service"]["sp"],
+        "want_response_signed": "false",
+        "want_assertions_signed": " TRUE ",
+        "want_logout_response_signed": "false",
+        "authn_requests_signed": "true",
+        "logout_requests_signed": "0",
+        "logout_responses_signed": "1",
+        "force_authn": "no",
+        "allow_create": "yes",
+        "allow_unsigned_logout_requests": "off",
+    }
+
+    cfg = SPConfig().load({**CONF, "service": {"sp": sp}})
+
+    assert cfg.want_response_signed is False
+    assert cfg.want_assertions_signed is True
+    assert cfg.want_logout_response_signed is False
+    assert cfg.authn_requests_signed is True
+    assert cfg.logout_requests_signed is False
+    assert cfg.logout_responses_signed is True
+    assert cfg.force_authn is False
+    assert cfg.allow_create is True
+    assert cfg.allow_unsigned_logout_requests is False
 
 
 def test_metadata_store_has_djangosaml2_query_shape(tmp_path):
@@ -448,6 +478,39 @@ def test_identity_cache_uses_conditions_expiry_without_session_expiry():
 
     assert cached[0] == info["not_on_or_after"]
     assert cached[0] is not None
+
+
+def test_response_adapter_uses_the_processed_authn_assertion(monkeypatch, client):
+    """The djangosaml2-facing assertion matches the one selected natively."""
+    session_id, _ = client.prepare_for_authenticate(
+        entityid=IDP, binding=BINDING_HTTP_REDIRECT
+    )
+    authenticated_id = "id-authenticated-assertion"
+    xml = _auth_response(session_id, assert_id=authenticated_id)
+    issue_instant = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    attribute_only = f"""<saml:Assertion ID="id-attribute-only" IssueInstant="{issue_instant}" Version="2.0">
+    <saml:Issuer Format="urn:oasis:names:tc:SAML:2.0:nameid-format:entity">{IDP}</saml:Issuer>
+    <saml:AttributeStatement>
+      <saml:Attribute Name="urn:oid:0.9.2342.19200300.100.1.3" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:uri">
+        <saml:AttributeValue>attribute-only@example.org</saml:AttributeValue>
+      </saml:Attribute>
+    </saml:AttributeStatement>
+  </saml:Assertion>
+  """
+    xml = xml.replace("  <saml:Assertion ", f"  {attribute_only}<saml:Assertion ", 1)
+    raw = base64.b64encode(xml.encode("utf-8")).decode("ascii")
+    result = SimpleNamespace(assertion_id=authenticated_id)
+    monkeypatch.setattr(
+        "pygamlastan.compat.saml2.client._profiles.process_response",
+        lambda *args, **kwargs: result,
+    )
+
+    response = client.parse_authn_request_response(
+        raw, BINDING_HTTP_POST, {session_id: "ref-1"}
+    )
+
+    assert response.assertion.id == authenticated_id
+    assert response.assertion.subject is not None
 
 
 def test_parse_authn_response_unsolicited_rejected(client):
@@ -687,6 +750,29 @@ def test_prepare_request_roundtrips_and_carries_options(client):
     assert req.assertion_consumer_service_url == ACS
     rac = req.requested_authn_context
     assert rac is not None and PPT in rac.authn_context_class_refs
+
+
+def test_empty_requested_authn_context_overrides_configured_context():
+    """An explicit empty mapping disables the configured request context."""
+    conf = {
+        **CONF,
+        "service": {
+            "sp": {
+                **CONF["service"]["sp"],
+                "requested_authn_context": {
+                    "authn_context_class_ref": [PPT],
+                    "comparison": "exact",
+                },
+            }
+        },
+    }
+    configured_client = Saml2Client(SPConfig().load(conf))
+
+    _request_id, xml = configured_client.create_authn_request(
+        SSO, requested_authn_context={}
+    )
+
+    assert pgxml.parse_authn_request(xml).requested_authn_context is None
 
 
 def test_prepare_post_binding(client):

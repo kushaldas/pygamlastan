@@ -302,14 +302,20 @@ The three SLO methods mirror pysaml2:
            location = dict(http_info["headers"])["Location"]
            ...   # redirect to location
        elif binding == BINDING_HTTP_POST:
-           form = http_info["data"]
+           post_form = http_info["data"]
            ...   # return the auto-submitting HTML form
 
    # We started the logout: parse the IdP's correlated LogoutResponse. Construct
    # the client with djangosaml2's StateCache so the outgoing request ID survives
    # across web requests.
+   incoming_params = request.POST if request.method == "POST" else request.GET
+   response_binding = (
+       BINDING_HTTP_POST
+       if request.method == "POST"
+       else BINDING_HTTP_REDIRECT
+   )
    resp = client.parse_logout_request_response(
-       form["SAMLResponse"], BINDING_HTTP_REDIRECT,
+       incoming_params["SAMLResponse"], response_binding,
        # For a signed Redirect response also forward sig_alg, signature, and
        # the exact signed_query, as shown for LogoutRequest below.
    )

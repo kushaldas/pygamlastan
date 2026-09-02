@@ -536,7 +536,11 @@ class Saml2Client:
         allow_value = self.config.allow_create if allow_create is None else allow_create
         allow = str(allow_value).lower() in ("true", "1", "yes")
 
-        context = requested_authn_context or self.config.requested_authn_context
+        context = (
+            self.config.requested_authn_context
+            if requested_authn_context is None
+            else requested_authn_context
+        )
         class_refs: list[str] | None = None
         comparison: str | None = None
         if isinstance(context, dict):
@@ -798,11 +802,19 @@ class Saml2Client:
                 raise AssertionError(f"SAML response processing failed: {e}") from e
 
         assertions = list(parsed.assertions)
+        assertion = next(
+            (item for item in assertions if item.id == result.assertion_id),
+            None,
+        )
+        if assertion is None:
+            raise AssertionError(
+                f"processed assertion {result.assertion_id!r} is absent from response"
+            )
         came_from = outstanding.get(in_response_to) if outstanding is not None else None
         wrapped = AuthnResponse(
             result,
             in_response_to,
-            assertion=assertions[0] if assertions else None,
+            assertion=assertion,
             came_from=came_from,
             legacy_attributes=_legacy_nil_attributes(xml),
         )
