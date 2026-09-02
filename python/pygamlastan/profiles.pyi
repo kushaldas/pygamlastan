@@ -15,7 +15,7 @@ class AuthnRequestOptions:
         force_authn: bool | None = ...,
         is_passive: bool | None = ...,
         name_id_format: str | None = ...,
-        allow_create: bool = ...,
+        allow_create: bool | None = ...,
         sp_name_qualifier: str | None = ...,
         authn_context_class_refs: list[str] | None = ...,
         authn_context_comparison: str | None = ...,

@@ -47,7 +47,8 @@ class SPConfig:
         self.logout_responses_signed: bool = False
         self.force_authn: bool = False
         self.allow_create: bool = False
-        self.name_id_format: str | None = None
+        self.name_id_format: str | list[str] | None = None
+        self.name_id_policy_format: str | None = None
         self.requested_authn_context: Any = None
         self.signing_algorithm: str | None = None
         self.digest_algorithm: str | None = None
@@ -107,9 +108,8 @@ class SPConfig:
         self.allow_create = _as_bool(
             sp.get("allow_create", sp.get("name_id_format_allow_create", False))
         )
-        self.name_id_format = sp.get("name_id_format") or sp.get(
-            "name_id_policy_format"
-        )
+        self.name_id_format = sp.get("name_id_format")
+        self.name_id_policy_format = sp.get("name_id_policy_format")
         self.requested_authn_context = sp.get("requested_authn_context")
         self.signing_algorithm = sp.get("signing_algorithm")
         self.digest_algorithm = sp.get("digest_algorithm")
@@ -125,6 +125,7 @@ class SPConfig:
         self._sp_digest_algorithm = self.digest_algorithm
         self._sp_force_authn = self.force_authn
         self._sp_allow_create = self.allow_create
+        self._sp_name_id_policy_format = self.name_id_policy_format
 
         self.key_file = conf.get("key_file")
         self.cert_file = conf.get("cert_file")

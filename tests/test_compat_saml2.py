@@ -19,11 +19,11 @@ from types import SimpleNamespace
 import pytest
 
 from pygamlastan import bindings as pgbindings
-from pygamlastan import crypto, metadata as md
+from pygamlastan import crypto, metadata as md, security
 from pygamlastan import xml as pgxml
 from pygamlastan.compat import saml2
 from pygamlastan.compat.saml2 import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT
-from pygamlastan.compat.saml2.client import Saml2Client
+from pygamlastan.compat.saml2.client import Saml2Client, _raise_compat_time_error
 from pygamlastan.compat.saml2.config import SPConfig
 from pygamlastan.compat.saml2.ident import code, decode
 from pygamlastan.compat.saml2.metadata import entity_descriptor
@@ -344,6 +344,33 @@ def test_spconfig_load_and_only_idp():
 def test_spconfig_loads_accepted_time_diff():
     cfg = SPConfig().load({**CONF, "accepted_time_diff": 60})
     assert cfg.accepted_time_diff == 60
+
+
+def test_spconfig_keeps_name_id_capabilities_and_policy_separate():
+    """Advertised NameID formats do not become a request policy."""
+    formats = [TRANSIENT, "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"]
+    sp = {
+        **CONF["service"]["sp"],
+        "name_id_format": formats,
+        "name_id_policy_format": TRANSIENT,
+    }
+
+    cfg = SPConfig().load({**CONF, "service": {"sp": sp}})
+
+    assert cfg.name_id_format == formats
+    assert cfg.name_id_policy_format == TRANSIENT
+
+
+def test_scalar_name_id_capability_does_not_create_request_policy():
+    """A scalar metadata capability is not reused as NameIDPolicy format."""
+    sp = {**CONF["service"]["sp"], "name_id_format": TRANSIENT}
+    configured_client = Saml2Client(
+        SPConfig().load({**CONF, "service": {"sp": sp}})
+    )
+
+    _request_id, xml = configured_client.create_authn_request(SSO)
+
+    assert pgxml.parse_authn_request(xml).name_id_policy is None
 
 
 def test_spconfig_normalizes_string_boolean_options():
@@ -992,6 +1019,24 @@ def test_create_authn_request_separates_response_and_acs_bindings():
     assert request.assertion_consumer_service_url == redirect_acs
 
 
+def test_transient_authn_request_omits_allow_create():
+    """Transient NameIDPolicy never serializes the prohibited AllowCreate."""
+    sp = {
+        **CONF["service"]["sp"],
+        "name_id_policy_format": TRANSIENT,
+        "allow_create": True,
+    }
+    configured_client = Saml2Client(
+        SPConfig().load({**CONF, "service": {"sp": sp}})
+    )
+
+    _request_id, xml = configured_client.create_authn_request(SSO)
+
+    policy = pgxml.parse_authn_request(xml).name_id_policy
+    assert policy.format == TRANSIENT
+    assert "AllowCreate" not in xml
+
+
 def test_prepare_honors_response_binding_separately_from_acs_lookup():
     """prepare_for_authenticate forwards both pysaml2 binding options."""
     redirect_acs = ACS + "/redirect"
@@ -1280,6 +1325,36 @@ def test_expired_assertion_raises_compat_lifetime_exception(client):
         client.parse_authn_request_response(
             raw, BINDING_HTTP_POST, {session_id: "return"}
         )
+
+
+def test_assertion_age_classifier_includes_clock_skew():
+    """Compatibility expiry classification matches native skew handling."""
+    cfg = security.SecurityConfig()
+    cfg.max_assertion_age_seconds = 300
+    cfg.clock_skew_seconds = 60
+    within_skew = (datetime.now(timezone.utc) - timedelta(seconds=330)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    xml = re.sub(
+        r'(<saml:Assertion[^>]*IssueInstant=")[^"]+',
+        rf"\g<1>{within_skew}",
+        _auth_response("id-skew-grace"),
+        count=1,
+    )
+
+    _raise_compat_time_error(pgxml.parse_response(xml), cfg)
+
+    outside_skew = (datetime.now(timezone.utc) - timedelta(seconds=370)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    xml = re.sub(
+        r'(<saml:Assertion[^>]*IssueInstant=")[^"]+',
+        rf"\g<1>{outside_skew}",
+        xml,
+        count=1,
+    )
+    with pytest.raises(ResponseLifetimeExceed):
+        _raise_compat_time_error(pgxml.parse_response(xml), cfg)
 
 
 def test_future_assertion_raises_compat_too_early_exception(client):

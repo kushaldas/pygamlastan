@@ -934,6 +934,21 @@ def test_create_authn_request():
     assert "<samlp:AuthnRequest" in req.to_xml()
 
 
+def test_create_authn_request_can_omit_allow_create():
+    """An optional AllowCreate value remains absent from serialized XML."""
+    opts = profiles.AuthnRequestOptions(
+        SP,
+        acs_url=ACS,
+        name_id_format=core.NAMEID_TRANSIENT,
+        allow_create=None,
+    )
+
+    req = profiles.create_authn_request(opts)
+
+    assert req.name_id_policy.format == core.NAMEID_TRANSIENT
+    assert "AllowCreate" not in req.to_xml()
+
+
 def test_authn_request_options_preserves_legacy_positional_order():
     """New scoping/request-ID options are appended so old positional callers
     still bind requester_ids, ACS index, and extensions to their original slots."""

@@ -48,7 +48,7 @@ from .response import (
     StatusRequestDenied,
     UnsolicitedResponse,
 )
-from .saml import NameID
+from .saml import NAMEID_FORMAT_TRANSIENT, NameID
 from .s_utils import UnsupportedBinding
 from .sigver import MissingKey
 from .validate import ResponseLifetimeExceed, ToEarly
@@ -195,8 +195,8 @@ def _raise_compat_time_error(parsed: Any, config: _security.SecurityConfig) -> N
     skew = timedelta(seconds=config.clock_skew_seconds)
 
     for assertion in parsed.assertions:
-        if now - assertion.issue_instant > timedelta(
-            seconds=config.max_assertion_age_seconds
+        if now - assertion.issue_instant > (
+            timedelta(seconds=config.max_assertion_age_seconds) + skew
         ):
             raise ResponseLifetimeExceed(
                 "SAML assertion exceeds the configured maximum age"
@@ -537,6 +537,14 @@ class Saml2Client:
         force = str(force_value).lower() in ("true", "1", "yes")
         allow_value = self.config.allow_create if allow_create is None else allow_create
         allow = str(allow_value).lower() in ("true", "1", "yes")
+        effective_nameid_format = (
+            self.config.name_id_policy_format
+            if nameid_format is None
+            else nameid_format
+        )
+        native_allow_create = (
+            None if effective_nameid_format == NAMEID_FORMAT_TRANSIENT else allow
+        )
 
         context = (
             self.config.requested_authn_context
@@ -559,8 +567,8 @@ class Saml2Client:
             acs_url=acs_url,
             protocol_binding=binding,
             force_authn=force,
-            name_id_format=nameid_format or self.config.name_id_format,
-            allow_create=allow,
+            name_id_format=effective_nameid_format,
+            allow_create=native_allow_create,
             authn_context_class_refs=class_refs,
             authn_context_comparison=comparison,
             provider_name=kwargs.get("provider_name") or self.config.name,

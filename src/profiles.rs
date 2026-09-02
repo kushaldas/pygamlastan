@@ -263,6 +263,7 @@ fn process_response_with_stores(
 #[pyclass(module = "pygamlastan.profiles", name = "AuthnRequestOptions")]
 pub struct AuthnRequestOptions {
     inner: gwb::AuthnRequestOptions,
+    allow_create: Option<bool>,
     idp_list: Vec<String>,
     request_id: Option<SamlId>,
 }
@@ -286,7 +287,7 @@ impl AuthnRequestOptions {
         force_authn: Option<bool>,
         is_passive: Option<bool>,
         name_id_format: Option<String>,
-        allow_create: bool,
+        allow_create: Option<bool>,
         sp_name_qualifier: Option<String>,
         authn_context_class_refs: Option<Vec<String>>,
         authn_context_comparison: Option<String>,
@@ -307,7 +308,7 @@ impl AuthnRequestOptions {
             force_authn,
             is_passive,
             name_id_format,
-            allow_create,
+            allow_create: allow_create.unwrap_or(false),
             sp_name_qualifier,
             authn_context_class_refs: authn_context_class_refs.unwrap_or_default(),
             authn_context_comparison: parse_comparison(authn_context_comparison)?,
@@ -320,6 +321,7 @@ impl AuthnRequestOptions {
         };
         Ok(AuthnRequestOptions {
             inner: o,
+            allow_create,
             idp_list: idp_list.unwrap_or_default(),
             request_id: request_id
                 .map(SamlId::from_string)
@@ -333,6 +335,12 @@ impl AuthnRequestOptions {
 #[pyfunction]
 fn create_authn_request(options: &AuthnRequestOptions) -> PyResult<AuthnRequest> {
     let mut req = gsp::create_authn_request(&options.inner).map_err(profile_err)?;
+    if let Some(policy) = req.name_id_policy.as_mut() {
+        // gamlastan represents an omitted AllowCreate as false and its XML
+        // serializer omits false values. Keep the Python-facing Option until
+        // request construction so callers can deliberately request omission.
+        policy.allow_create = options.allow_create.unwrap_or(false);
+    }
     if let Some(request_id) = &options.request_id {
         // Compatibility consumers sometimes persist and later extract the ID
         // using pysaml2's historical alphanumeric/hyphen grammar. Keep the
