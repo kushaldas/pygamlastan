@@ -103,11 +103,11 @@ def entity_descriptor(config: SPConfig) -> _EntityDescriptorDoc:
             f"    <md:SingleLogoutService Binding={quoteattr(binding)} Location={quoteattr(url)}/>\n"
         )
 
-    # Advertise the SP's actual signing behaviour: it can sign AuthnRequests when
-    # a key is configured, and it expects signed responses/assertions when
-    # want_response_signed is set, so IdPs negotiate the right behaviour.
-    authn_requests_signed = "true" if config.key_file else "false"
-    want_assertions_signed = "true" if config.want_response_signed else "false"
+    # Advertise the dedicated protocol flags, not merely the presence of a key:
+    # a configured key makes signing possible but does not mean this SP promises
+    # to sign AuthnRequests or requires assertions themselves to be signed.
+    authn_requests_signed = "true" if config.authn_requests_signed else "false"
+    want_assertions_signed = "true" if config.want_assertions_signed else "false"
 
     xml = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'

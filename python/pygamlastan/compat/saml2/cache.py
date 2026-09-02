@@ -8,8 +8,9 @@ This is a faithful dict-backed reimplementation of that contract: the same
 ``self._db[code(name_id)][entity_id] = (not_on_or_after, info)`` layout and the
 same method semantics, so a subclass that sets ``self._db`` to a MutableMapping
 (as eduID's ``IdentityCache`` does) gets working storage and expiry. The
-pygamlastan SP flow itself derives logout targets from config/metadata rather
-than this cache, but the store is real so subclasses behave as on pysaml2.
+client exposes this store through ``client.users`` and uses its issuers and
+session indexes for Single Logout, falling back to config/metadata only when no
+identity-cache records exist.
 """
 
 from __future__ import annotations
@@ -86,8 +87,35 @@ class Cache:
         self._db: dict[str, dict[str, tuple[Any, dict[str, Any]]]] = {}
         self._sync = False
 
+    def _flush(self) -> None:
+        if self._sync:
+            sync = getattr(self._db, "sync", None)
+            if callable(sync):
+                sync()
+
+    def _coded_key(self, name_id: Any) -> str:
+        direct = code(name_id)
+        if direct in self._db:
+            return direct
+        # Compatibility for callers holding only NameID.text (including
+        # djangosaml2's historical session format).  Match a stored structured
+        # identifier by its text when that match is unambiguous.
+        if isinstance(name_id, str):
+            matches = []
+            for stored in self._db:
+                try:
+                    if decode(stored).text == name_id:
+                        matches.append(stored)
+                except ValueError:
+                    continue
+            if len(matches) == 1:
+                return matches[0]
+        return direct
+
     def delete(self, name_id: Any) -> None:
-        del self._db[code(name_id)]
+        """Delete every cached issuer record for ``name_id``."""
+        del self._db[self._coded_key(name_id)]
+        self._flush()
 
     def get_identity(
         self, name_id: Any, entities: Any = None, check_not_on_or_after: bool = True
@@ -97,7 +125,7 @@ class Cache:
         # list is honoured as a request to aggregate over no entities.
         if entities is None:
             try:
-                entities = list(self._db[code(name_id)].keys())
+                entities = list(self._db[self._coded_key(name_id)].keys())
             except KeyError:
                 return {}, []
 
@@ -125,7 +153,12 @@ class Cache:
     def get(
         self, name_id: Any, entity_id: Any, check_not_on_or_after: bool = True
     ) -> dict[str, Any] | None:
-        cni = code(name_id)
+        """Return one issuer's session information for a subject.
+
+        :raises ToOld: if the record is expired and expiry checking is enabled.
+        :raises KeyError: if the subject or issuer is not present.
+        """
+        cni = self._coded_key(name_id)
         timestamp, info = self._db[cni][entity_id]
         info = dict(info)
         if check_not_on_or_after and _expired(timestamp):
@@ -135,6 +168,7 @@ class Cache:
         return info or None
 
     def set(self, name_id: Any, entity_id: Any, info: Any, not_on_or_after: Any = 0) -> None:
+        """Store session information under the subject and issuer keys."""
         info = dict(info)
         if "name_id" in info and not isinstance(info["name_id"], str):
             # Encode the NameID actually carried in the payload (not the key
@@ -145,19 +179,24 @@ class Cache:
         if cni not in self._db:
             self._db[cni] = {}
         self._db[cni][entity_id] = (not_on_or_after, info)
+        self._flush()
 
     def reset(self, name_id: Any, entity_id: Any) -> None:
+        """Expire and empty one subject/issuer record."""
         self.set(name_id, entity_id, {}, 0)
 
     def entities(self, name_id: Any) -> list[str]:
-        return list(self._db[code(name_id)].keys())
+        """Return the entity IDs that supplied information about ``name_id``."""
+        return list(self._db[self._coded_key(name_id)].keys())
 
     def receivers(self, name_id: Any) -> list[str]:
+        """Alias for :meth:`entities`, matching pysaml2's cache contract."""
         return self.entities(name_id)
 
     def active(self, name_id: Any, entity_id: Any) -> bool:
+        """Report whether a non-empty subject/issuer record is still valid."""
         try:
-            timestamp, info = self._db[code(name_id)][entity_id]
+            timestamp, info = self._db[self._coded_key(name_id)][entity_id]
         except KeyError:
             return False
         if not info:
@@ -165,4 +204,26 @@ class Cache:
         return _valid(timestamp)
 
     def subjects(self) -> list[Any]:
+        """Return all cached subjects as decoded :class:`~saml.NameID` objects."""
         return [decode(c) for c in self._db.keys()]
+
+    # Names used by pysaml2's Population wrapper and Saml2Client.
+    def issuers_of_info(self, name_id: Any) -> list[str]:
+        """Return issuers known for a subject, or an empty list if unknown."""
+        try:
+            return self.entities(name_id)
+        except KeyError:
+            return []
+
+    def get_info_from(
+        self, name_id: Any, entity_id: str, check_not_on_or_after: bool = True
+    ) -> dict[str, Any] | None:
+        """Population-compatible alias for :meth:`get`."""
+        return self.get(name_id, entity_id, check_not_on_or_after)
+
+    def remove_person(self, name_id: Any) -> None:
+        """Remove a subject if present; absence is deliberately idempotent."""
+        try:
+            self.delete(name_id)
+        except KeyError:
+            return

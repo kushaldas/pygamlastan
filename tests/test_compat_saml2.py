@@ -9,7 +9,9 @@ eduID integration is verified separately in the eduid-developer env.
 """
 
 import base64
+import html
 import itertools
+import re
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 
@@ -124,6 +126,15 @@ def _logout_response(req_id: str) -> str:
 </samlp:LogoutResponse>"""
 
 
+def _signed_logout_response(req_id: str, cert_b64: str, private_key: bytes) -> str:
+    """A LogoutResponse with an enveloped signature over its root element."""
+    unsigned = _logout_response(req_id)
+    template = _signature_template("id-lr-1", cert_b64)
+    issuer_end = unsigned.index("</saml:Issuer>") + len("</saml:Issuer>")
+    templated = unsigned[:issuer_end] + template + unsigned[issuer_end:]
+    return crypto.SamlSigner.from_pem(private_key).sign_enveloped(templated)
+
+
 def _logout_request(
     req_id: str,
     issuer: str = IDP,
@@ -140,14 +151,21 @@ def _logout_request(
 </samlp:LogoutRequest>"""
 
 
-def _failed_response(req_id: str, resp_id: str | None = None) -> str:
+def _failed_response(
+    req_id: str, resp_id: str | None = None, sub_status: str | None = None
+) -> str:
     if resp_id is None:
         resp_id = "fail-" + _fresh_ids()[0]
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    nested = (
+        f'<samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:{sub_status}"/>'
+        if sub_status
+        else ""
+    )
     return f"""<?xml version='1.0' encoding='UTF-8'?>
 <samlp:Response xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" Destination="{ACS}" ID="{resp_id}" InResponseTo="{req_id}" IssueInstant="{ts}" Version="2.0">
   <saml:Issuer Format="urn:oasis:names:tc:SAML:2.0:nameid-format:entity">{IDP}</saml:Issuer>
-  <samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Responder"/></samlp:Status>
+  <samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Responder">{nested}</samlp:StatusCode></samlp:Status>
 </samlp:Response>"""
 
 
@@ -176,6 +194,19 @@ def _signed_auth_response(req_id: str, cert_b64: str, priv: bytes) -> str:
     idx = unsigned.index(marker) + len(marker)
     spliced = unsigned[:idx] + template + unsigned[idx:]
     return crypto.SamlSigner.from_pem(priv).sign_enveloped(spliced)
+
+
+def _assertion_signed_auth_response(req_id: str, cert_b64: str, priv: bytes) -> str:
+    """The test AuthnResponse with only its Assertion directly signed."""
+    resp_id, assertion_id = _fresh_ids()
+    unsigned = _auth_response(req_id, resp_id=resp_id, assert_id=assertion_id)
+    template = _signature_template(assertion_id, cert_b64)
+    assertion_start = unsigned.index("<saml:Assertion")
+    issuer_end = unsigned.index("</saml:Issuer>", assertion_start) + len(
+        "</saml:Issuer>"
+    )
+    templated = unsigned[:issuer_end] + template + unsigned[issuer_end:]
+    return crypto.SamlSigner.from_pem(priv).sign_enveloped(templated)
 
 
 def _idp_metadata(*cert_der_b64s: str) -> str:
@@ -209,6 +240,44 @@ def test_bindings_are_saml_urns():
     assert saml2.BINDING_HTTP_REDIRECT.endswith("HTTP-Redirect")
 
 
+def test_djangosaml2_import_surface_is_present():
+    """Every pysaml2 symbol imported by djangosaml2 resolves from the shim."""
+    from pygamlastan.compat.saml2.client_base import LogoutError
+    from pygamlastan.compat.saml2.mdstore import MetaDataMDX, SourceNotFound
+    from pygamlastan.compat.saml2.response import (
+        RequestVersionTooLow,
+        SignatureError,
+        StatusAuthnFailed,
+        StatusNoAuthnContext,
+        StatusRequestDenied,
+    )
+    from pygamlastan.compat.saml2.s_utils import UnknownSystemEntity, UnsupportedBinding
+    from pygamlastan.compat.saml2.sigver import MissingKey
+    from pygamlastan.compat.saml2.validate import ResponseLifetimeExceed, ToEarly
+
+    assert saml2.saml.NAMESPACE.endswith(":assertion")
+    assert saml2.samlp.NAMESPACE.endswith(":protocol")
+    assert saml2.md.NAMESPACE.endswith(":metadata")
+    assert saml2.xmldsig.SIG_RSA_SHA256.endswith("rsa-sha256")
+    assert saml2.xmlenc.NAMESPACE.endswith("xmlenc#")
+    for exception in (
+        LogoutError,
+        SourceNotFound,
+        RequestVersionTooLow,
+        SignatureError,
+        StatusAuthnFailed,
+        StatusNoAuthnContext,
+        StatusRequestDenied,
+        UnknownSystemEntity,
+        UnsupportedBinding,
+        MissingKey,
+        ResponseLifetimeExceed,
+        ToEarly,
+    ):
+        assert issubclass(exception, Exception)
+    assert isinstance(MetaDataMDX(), MetaDataMDX)
+
+
 def test_spconfig_load_and_only_idp():
     cfg = SPConfig().load(CONF)
     assert cfg.entityid == SP
@@ -216,6 +285,60 @@ def test_spconfig_load_and_only_idp():
     assert cfg.single_sign_on_service(IDP, BINDING_HTTP_REDIRECT) == SSO
     assert cfg.single_logout_service(IDP, BINDING_HTTP_REDIRECT) == IDPSLO
     assert cfg.want_response_signed is False
+    assert cfg.want_logout_response_signed is False
+
+
+def test_metadata_store_has_djangosaml2_query_shape(tmp_path):
+    """Loaded metadata supports djangosaml2's name/service/store navigation."""
+    path = tmp_path / "idp.xml"
+    path.write_text(_idp_metadata(), encoding="utf-8")
+    cfg = SPConfig().load(
+        {
+            "entityid": SP,
+            "service": {
+                "sp": {
+                    "endpoints": {
+                        "assertion_consumer_service": [(ACS, BINDING_HTTP_POST)]
+                    }
+                }
+            },
+            "metadata": {"local": [str(path)]},
+        }
+    )
+    assert str(path) in cfg.metadata.metadata
+    assert cfg.metadata.name(IDP) == IDP
+    services = cfg.metadata.service(
+        IDP, "idpsso_descriptor", "single_sign_on_service"
+    )
+    assert services[BINDING_HTTP_REDIRECT][0]["location"] == SSO
+    assert IDP in cfg.metadata.with_descriptor("idpsso")
+
+
+def test_missing_metadata_file_raises_source_not_found(tmp_path):
+    """Configuration exposes pysaml2's metadata-source exception contract."""
+    from pygamlastan.compat.saml2.mdstore import SourceNotFound
+
+    missing = tmp_path / "missing.xml"
+    with pytest.raises(SourceNotFound, match="missing.xml"):
+        SPConfig().load({"metadata": {"local": [str(missing)]}})
+
+
+def test_logout_security_options_are_independent_and_explicit():
+    """AuthnResponse policy does not implicitly weaken or strengthen SLO."""
+    conf = {
+        "entityid": SP,
+        "service": {
+            "sp": {
+                "endpoints": {
+                    "assertion_consumer_service": [(ACS, BINDING_HTTP_POST)]
+                },
+                "want_response_signed": False,
+            }
+        },
+    }
+    cfg = SPConfig().load(conf)
+    assert cfg.want_logout_response_signed is False
+    assert cfg.allow_unsigned_logout_requests is False
 
 
 def test_prepare_for_authenticate_redirect(client):
@@ -258,6 +381,12 @@ def test_parse_authn_response_session_info(client):
     assert si["name_id"].text == "abc123hash"
     assert si["name_id"].format == TRANSIENT
 
+    # djangosaml2 checks bearer confirmation expiry through this pysaml2
+    # object graph before completing authentication.
+    confirmations = resp.assertion.subject.subject_confirmation
+    assert confirmations[0].method == saml2.saml.SCM_BEARER
+    assert confirmations[0].subject_confirmation_data.not_on_or_after is not None
+
 
 def test_parse_authn_response_unsolicited_rejected(client):
     session_id, _ = client.prepare_for_authenticate(entityid=IDP, binding=BINDING_HTTP_REDIRECT)
@@ -290,10 +419,99 @@ def test_global_logout_builds_redirect(client):
     assert info["headers"][0][1].startswith(IDPSLO + "?SAMLRequest=")
 
 
+def test_global_logout_carries_reason_and_expiry(client):
+    """The lower-level request preserves pysaml2's reason/expire arguments."""
+    nid = NameID(text="abc123hash", format=TRANSIENT, sp_name_qualifier=SP)
+    expiry = datetime.now(timezone.utc) + timedelta(minutes=10)
+    _binding, info = client.global_logout(
+        nid, reason="urn:example:logout", expire=expiry
+    )[IDP]
+    query = dict(info["headers"])["Location"].split("?", 1)[1]
+    request = pgxml.parse_logout_request(
+        pgbindings.redirect_decode(query).saml_text
+    )
+    assert request.reason == "urn:example:logout"
+    assert request.not_on_or_after == expiry.replace(microsecond=0)
+
+
+def test_global_logout_rejects_expired_deadline(client):
+    """An already-expired logout operation does not contact federation peers."""
+    from pygamlastan.compat.saml2.client_base import LogoutError
+
+    nid = NameID(text="abc123hash", format=TRANSIENT, sp_name_qualifier=SP)
+    with pytest.raises(LogoutError, match="already passed"):
+        client.global_logout(nid, expire=datetime.now(timezone.utc) - timedelta(seconds=1))
+
+
+def test_global_logout_persists_and_consumes_correlation_state():
+    """djangosaml2's session state adapter correlates a real LogoutResponse."""
+    state: dict[str, dict[str, str]] = {}
+    client = Saml2Client(SPConfig().load(CONF), state_cache=state)
+    nid = NameID(text="abc123hash", format=TRANSIENT, sp_name_qualifier=SP)
+    binding, info = client.global_logout(nid)[IDP]
+    assert binding == BINDING_HTTP_REDIRECT
+    query = dict(info["headers"])["Location"].split("?", 1)[1]
+    request = pgbindings.redirect_decode(query)
+    request_id = pgxml.parse_logout_request(request.saml_text).id
+    assert state[request_id]["entity_id"] == IDP
+
+    encoded = deflate_and_base64_encode(_logout_response(request_id))
+    response = client.parse_logout_request_response(encoded, BINDING_HTTP_REDIRECT)
+    assert response.status_ok()
+    assert request_id not in state
+
+
+def test_create_authn_request_adapts_djangosaml2_scoping(client):
+    """Mutable pysaml2 scoping objects reach the typed native request builder."""
+    scoping = saml2.samlp.Scoping(
+        proxy_count=1,
+        idp_list=saml2.samlp.IDPList(
+            idp_entry=[saml2.samlp.IDPEntry(provider_id=IDP)]
+        ),
+    )
+    request_id, xml = client.create_authn_request(SSO, scoping=scoping)
+    request = pgxml.parse_authn_request(xml)
+    assert request.id == request_id
+    assert request.scoping.proxy_count == 1
+    assert request.scoping.idp_list == [IDP]
+
+
 def test_parse_logout_request_response_status_ok(client):
     encoded = deflate_and_base64_encode(_logout_response("req-1"))
     resp = client.parse_logout_request_response(encoded, BINDING_HTTP_REDIRECT)
     assert resp.status_ok() is True
+
+
+def test_signed_logout_response_is_verified_and_correlated(rsa_keypair, tmp_path):
+    """want_logout_response_signed verifies the exact correlated response."""
+    private_key, _cert_pem, cert_der_b64 = rsa_keypair
+    base = _signed_client(tmp_path, cert_der_b64)
+    base.config.want_logout_response_signed = True
+    state: dict[str, dict[str, str]] = {}
+    client = Saml2Client(base.config, state_cache=state)
+    nid = NameID(text="abc123hash", format=TRANSIENT, sp_name_qualifier=SP)
+    _binding, info = client.global_logout(nid)[IDP]
+    query = dict(info["headers"])["Location"].split("?", 1)[1]
+    request_id = pgxml.parse_logout_request(
+        pgbindings.redirect_decode(query).saml_text
+    ).id
+    xml = _signed_logout_response(request_id, cert_der_b64, private_key)
+    encoded = deflate_and_base64_encode(xml)
+    assert client.parse_logout_request_response(encoded).status_ok()
+    assert request_id not in state
+
+
+def test_signed_logout_response_policy_rejects_unsigned(rsa_keypair, tmp_path):
+    """An unsigned response cannot consume outstanding signed-SLO state."""
+    _private_key, _cert_pem, cert_der_b64 = rsa_keypair
+    base = _signed_client(tmp_path, cert_der_b64)
+    base.config.want_logout_response_signed = True
+    state = {"request-id": {"entity_id": IDP}}
+    client = Saml2Client(base.config, state_cache=state)
+    encoded = deflate_and_base64_encode(_logout_response("request-id"))
+    with pytest.raises(AssertionError):
+        client.parse_logout_request_response(encoded)
+    assert "request-id" in state
 
 
 def test_handle_logout_request_redirects_to_idp(client):
@@ -409,6 +627,14 @@ def test_prepare_relay_state_present(client):
     assert params["RelayState"] == "hello world"
 
 
+def test_prepare_uses_pysaml2_compatible_request_id(client):
+    """The request ID remains readable by djangosaml2's legacy extractor."""
+    session_id, _info = client.prepare_for_authenticate(
+        entityid=IDP, binding=BINDING_HTTP_REDIRECT
+    )
+    assert re.fullmatch(r"[a-z0-9-]+", session_id, re.I)
+
+
 @pytest.mark.parametrize(
     "value,expected",
     [("true", True), ("false", False), (True, True), (False, False), ("1", True)],
@@ -430,11 +656,44 @@ def test_status_error_on_failed_response(client):
         client.parse_authn_request_response(raw, BINDING_HTTP_POST, {session_id: "r"})
 
 
-def test_decode_rejects_foreign_string():
-    # Strings not produced by this shim's code() are rejected (we control both
-    # ends; a foreign value means a corrupt/incompatible session).
-    with pytest.raises(ValueError):
-        decode("0=foo,2=urn:something")
+@pytest.mark.parametrize(
+    "sub_status,exception_name",
+    [
+        ("AuthnFailed", "StatusAuthnFailed"),
+        ("NoAuthnContext", "StatusNoAuthnContext"),
+        ("RequestDenied", "StatusRequestDenied"),
+    ],
+)
+def test_nested_failure_status_uses_specific_exception(
+    client, sub_status, exception_name
+):
+    """djangosaml2 receives the specific exception from a nested status code."""
+    from pygamlastan.compat.saml2 import response as response_module
+
+    session_id, _ = client.prepare_for_authenticate(
+        entityid=IDP, binding=BINDING_HTTP_REDIRECT
+    )
+    raw = base64.b64encode(
+        _failed_response(session_id, sub_status=sub_status).encode()
+    ).decode()
+    exception = getattr(response_module, exception_name)
+    with pytest.raises(exception):
+        client.parse_authn_request_response(
+            raw, BINDING_HTTP_POST, {session_id: "return"}
+        )
+
+
+def test_decode_accepts_legacy_pysaml2_string():
+    """Existing pysaml2 sessions remain readable during a rolling upgrade."""
+    value = decode("0=idp.example,2=urn:something,4=legacy-subject")
+    assert value.text == "legacy-subject"
+    assert value.name_qualifier == "idp.example"
+    assert value.format == "urn:something"
+
+
+def test_decode_accepts_bare_subject_string():
+    """djangosaml2 historically persisted just ``NameID.text`` in sessions."""
+    assert decode("legacy-subject").text == "legacy-subject"
 
 
 def test_ava_multivalue_and_extra_attributes():
@@ -457,6 +716,23 @@ def test_ava_multivalue_and_extra_attributes():
     ava = {la.name: list(la.values) for la in conv.to_local(attrs)}
     assert ava["eduPersonScopedAffiliation"] == ["staff@eduid.se", "member@eduid.se"]
     assert ava["displayName"] == ["Hubba Bubba"]
+
+
+def test_legacy_nil_attribute_text_is_recovered(client):
+    """Match pysaml2 for legacy IdPs that emit nil values containing text."""
+    session_id, _ = client.prepare_for_authenticate(
+        entityid=IDP, binding=BINDING_HTTP_REDIRECT
+    )
+    xml = _auth_response(session_id).replace(
+        "<saml:AttributeValue>hubba-bubba@eduid.se</saml:AttributeValue>",
+        '<saml:AttributeValue xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+        'xsi:nil="true">hubba-bubba@eduid.se</saml:AttributeValue>',
+    )
+    raw = base64.b64encode(xml.encode()).decode()
+    response = client.parse_authn_request_response(
+        raw, BINDING_HTTP_POST, {session_id: "return"}
+    )
+    assert response.ava["eduPersonPrincipalName"] == ["hubba-bubba@eduid.se"]
 
 
 # --------------------------------------------------------------------------- #
@@ -524,6 +800,53 @@ def test_signed_response_tampered_rejected(rsa_keypair, tmp_path):
     raw = base64.b64encode(tampered.encode("utf-8")).decode("ascii")
     with pytest.raises(AssertionError):
         client.parse_authn_request_response(raw, BINDING_HTTP_POST, {session_id: "r"})
+
+
+def _assertion_signed_client(tmp_path, cert_der_b64: str) -> Saml2Client:
+    path = tmp_path / "assertion-signing-idp.xml"
+    path.write_text(_idp_metadata(cert_der_b64), encoding="utf-8")
+    conf = {
+        "entityid": SP,
+        "service": {
+            "sp": {
+                "endpoints": {
+                    "assertion_consumer_service": [(ACS, BINDING_HTTP_POST)]
+                },
+                "want_response_signed": False,
+                "want_assertions_signed": True,
+            }
+        },
+        "metadata": {"local": [str(path)]},
+    }
+    return Saml2Client(SPConfig().load(conf))
+
+
+def test_direct_assertion_signature_policy_accepted(rsa_keypair, tmp_path):
+    """want_assertions_signed accepts an Assertion-signed response envelope."""
+    private_key, _cert_pem, cert_der_b64 = rsa_keypair
+    client = _assertion_signed_client(tmp_path, cert_der_b64)
+    session_id, _ = client.prepare_for_authenticate(binding=BINDING_HTTP_REDIRECT)
+    xml = _assertion_signed_auth_response(session_id, cert_der_b64, private_key)
+    raw = base64.b64encode(xml.encode()).decode()
+    response = client.parse_authn_request_response(
+        raw, BINDING_HTTP_POST, {session_id: "return"}
+    )
+    assert response.session_id() == session_id
+
+
+def test_direct_assertion_signature_policy_rejects_response_only_signature(
+    rsa_keypair, tmp_path
+):
+    """A signed Response does not satisfy want_assertions_signed by itself."""
+    private_key, _cert_pem, cert_der_b64 = rsa_keypair
+    client = _assertion_signed_client(tmp_path, cert_der_b64)
+    session_id, _ = client.prepare_for_authenticate(binding=BINDING_HTTP_REDIRECT)
+    xml = _signed_auth_response(session_id, cert_der_b64, private_key)
+    raw = base64.b64encode(xml.encode()).decode()
+    with pytest.raises(AssertionError):
+        client.parse_authn_request_response(
+            raw, BINDING_HTTP_POST, {session_id: "return"}
+        )
 
 
 def test_metadata_includes_signing_cert(rsa_keypair, tmp_path):
@@ -682,6 +1005,7 @@ def _client_with_key(rsa_keypair, tmp_path):
             "sp": {
                 "endpoints": {"assertion_consumer_service": [(ACS, BINDING_HTTP_POST)]},
                 "idp": {IDP: {"single_sign_on_service": {BINDING_HTTP_REDIRECT: SSO}}},
+                "authn_requests_signed": True,
             }
         },
         "key_file": str(key_file),
@@ -690,7 +1014,7 @@ def _client_with_key(rsa_keypair, tmp_path):
 
 
 def test_prepare_authn_request_signs_redirect_with_key(rsa_keypair, tmp_path):
-    """With a key configured, a Redirect AuthnRequest is signed by default."""
+    """AuthnRequestsSigned signs Redirect requests with a detached signature."""
     client = _client_with_key(rsa_keypair, tmp_path)
     _sid, info = client.prepare_for_authenticate(entityid=IDP, binding=BINDING_HTTP_REDIRECT)
     params = dict(urllib.parse.parse_qsl(dict(info["headers"])["Location"].split("?", 1)[1]))
@@ -699,11 +1023,19 @@ def test_prepare_authn_request_signs_redirect_with_key(rsa_keypair, tmp_path):
     assert "Signature" in params
 
 
-def test_prepare_authn_request_post_with_key_raises(rsa_keypair, tmp_path):
-    """A signing key plus HTTP-POST fails fast: POST request signing is unsupported."""
+def test_prepare_authn_request_signs_post_with_key(rsa_keypair, tmp_path):
+    """AuthnRequestsSigned produces a verifiable enveloped POST signature."""
+    _priv, cert_pem, _der = rsa_keypair
     client = _client_with_key(rsa_keypair, tmp_path)
-    with pytest.raises(ValueError, match="only supported over HTTP-Redirect"):
-        client.prepare_for_authenticate(entityid=IDP, binding=BINDING_HTTP_POST)
+    session_id, info = client.prepare_for_authenticate(
+        entityid=IDP, binding=BINDING_HTTP_POST
+    )
+    match = re.search(r'name="SAMLRequest" value="([^"]+)"', info["data"])
+    assert match is not None
+    xml = base64.b64decode(html.unescape(match.group(1))).decode("utf-8")
+    result = crypto.SamlVerifier.from_cert(cert_pem).verify_enveloped(xml)
+    assert result.is_valid()
+    assert session_id in result.signed_reference_ids()
 
 
 # --------------------------------------------------------------------------- #
@@ -1009,13 +1341,14 @@ def _two_idp_config() -> dict:
     }
 
 
-def test_parse_ambiguous_idp_requires_explicit_expected():
-    """With multiple IdPs, the expected IdP is NOT taken from the unverified
-    Response issuer; parse refuses unless given expected_idp explicitly."""
+def test_parse_multi_idp_accepts_configured_issuer():
+    """A multi-IdP SP can select a configured issuer from the response."""
     client = Saml2Client(SPConfig().load(_two_idp_config()))
     raw = base64.b64encode(_auth_response("id-req-x").encode("utf-8")).decode("ascii")
-    with pytest.raises(ValueError):
-        client.parse_authn_request_response(raw, BINDING_HTTP_POST, {"id-req-x": "r"})
+    resp = client.parse_authn_request_response(
+        raw, BINDING_HTTP_POST, {"id-req-x": "r"}
+    )
+    assert resp.session_info()["issuer"] == IDP
 
 
 def test_parse_ambiguous_idp_accepts_explicit_expected():
@@ -1029,8 +1362,7 @@ def test_parse_ambiguous_idp_accepts_explicit_expected():
 
 
 def test_metadata_signing_flags_reflect_config(rsa_keypair, tmp_path):
-    """SP metadata advertises AuthnRequestsSigned from key_file and
-    WantAssertionsSigned from want_response_signed, instead of hard-coded false."""
+    """SP metadata advertises the two dedicated pysaml2 signing settings."""
     priv, _cert_pem, _der = rsa_keypair
     key_file = tmp_path / "sp.key"
     key_file.write_bytes(priv)
@@ -1040,6 +1372,8 @@ def test_metadata_signing_flags_reflect_config(rsa_keypair, tmp_path):
             "sp": {
                 "endpoints": {"assertion_consumer_service": [(ACS, BINDING_HTTP_POST)]},
                 "want_response_signed": True,
+                "want_assertions_signed": True,
+                "authn_requests_signed": True,
             }
         },
         "key_file": str(key_file),
@@ -1454,7 +1788,7 @@ def test_handle_logout_request_no_cert_fails_closed_by_default():
     unsigned requests."""
     conf = {**CONF}
     sp = {**CONF["service"]["sp"]}
-    del sp["allow_unsigned_logout_requests"]
+    sp["allow_unsigned_logout_requests"] = False
     conf["service"] = {"sp": sp}
     client = Saml2Client(SPConfig().load(conf))
     assert client.config.allow_unsigned_logout_requests is False

@@ -88,8 +88,12 @@ names an SP consumer touches:
      - ``NameID`` / ``Subject`` value objects and the ``NAMEID_FORMAT_*`` /
        ``NAME_FORMAT_URI`` constants.
    * - ``...saml2.response``
-     - ``AuthnResponse`` / ``LogoutResponse`` wrappers and the ``StatusError`` /
-       ``UnsolicitedResponse`` exceptions.
+     - ``AuthnResponse`` / ``LogoutResponse`` wrappers and the status,
+       signature, lifetime, and unsolicited-response exceptions used by
+       djangosaml2.
+   * - ``...saml2.mdstore``
+     - ``MetadataStore`` / ``MetaDataMDX`` / ``SourceNotFound`` and the
+       ``name`` / ``service`` / descriptor queries used by discovery views.
    * - ``...saml2.metadata``
      - ``entity_descriptor(config)`` - build this SP's own metadata document.
    * - ``...saml2.cache``
@@ -98,13 +102,18 @@ names an SP consumer touches:
    * - ``...saml2.s_utils``
      - ``deflate_and_base64_encode`` (and its inverse) for the Redirect binding.
    * - ``...saml2.sigver``
-     - ``get_xmlsec_binary`` - returns ``None`` (no external signer).
+     - ``get_xmlsec_binary`` (returns ``None``) and ``MissingKey``.
+   * - ``...saml2.samlp``
+     - Mutable ``AuthnRequest`` / ``Scoping`` / ``IDPList`` / ``IDPEntry``
+       compatibility values for custom POST and IdP-scoping flows.
+   * - ``...saml2.client_base`` / ``...saml2.validate``
+     - The logout and response-validation exception types imported by
+       djangosaml2.
+   * - ``...saml2.md`` / ``...saml2.xmldsig`` / ``...saml2.xmlenc``
+     - Namespace and algorithm constants used by metadata serialization.
    * - ``...saml2.server``
      - Placeholder ``Server`` (IdP adapter is a later phase); imports cleanly,
        raises ``NotImplementedError`` if constructed.
-   * - ``...saml2.attributemaps``
-     - Empty package so ``attribute_map_dir`` style config keeps importing; the
-       directory value is accepted and ignored.
 
 Configuration: ``SPConfig``
 ---------------------------
@@ -160,6 +169,12 @@ The relevant keys:
   automatically.
 * ``service.sp.want_response_signed`` - the security switch (see
   `Security model`_); defaults to ``True``.
+* ``service.sp.authn_requests_signed`` / ``logout_requests_signed`` /
+  ``logout_responses_signed`` - independent outbound signing switches.
+* ``service.sp.want_assertions_signed`` /
+  ``want_logout_response_signed`` - independent inbound requirements. In
+  particular, requiring signed AuthnResponses does not implicitly require
+  signed LogoutResponses.
 * ``metadata.local`` - local metadata files (single entity or a federation
   aggregate). The IdP's signing certificate and, as a fallback, its SSO/SLO
   endpoints are read from here.
@@ -201,9 +216,11 @@ redirect dict: its ``headers`` list contains a ``("Location", url)`` pair.
    outstanding_cache[session_id] = "my-authn-ref"
 
 ``binding`` selects how the request is delivered: ``BINDING_HTTP_REDIRECT``
-returns a ``Location`` URL (signed when ``sigalg`` is supplied and a ``key_file``
-is configured); ``BINDING_HTTP_POST`` returns ``method="POST"`` with an
-auto-submit form in ``data``.
+returns a ``Location`` URL; ``BINDING_HTTP_POST`` returns ``method="POST"`` with
+an auto-submit form in ``data``. Set ``authn_requests_signed=True`` (and provide
+``key_file``) to produce the binding-appropriate detached Redirect signature or
+enveloped POST XML signature. Merely configuring a key does not advertise or
+enable request signing.
 
 Processing the Response
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -265,11 +282,11 @@ opaque string and decode it back when needed:
    ...
    subject = decode(session["name_id"])         # back to a NameID
 
-The encoding is the shim's own (a ``pgc1:`` prefixed value), not pysaml2's wire
-form; it never leaves the deployment, so only the round-trip matters. Unlike
-pysaml2, ``decode`` **raises** on a string it did not produce, rather than
-silently returning a blank NameID - a corrupt or cross-library session value is
-surfaced instead of hidden.
+New values use the shim's own ``pgc1:``-prefixed encoding. ``decode`` also reads
+pysaml2's legacy comma-index encoding and djangosaml2's historical bare
+``NameID.text`` value, so existing login sessions survive a rolling migration.
+A malformed ``pgc1:`` payload still raises ``ValueError`` rather than silently
+turning corrupted state into a blank subject.
 
 Single Logout
 ~~~~~~~~~~~~~~
@@ -280,11 +297,17 @@ The three SLO methods mirror pysaml2:
 
    # SP-initiated: build LogoutRequests for each federated IdP that has an SLO.
    logouts = client.global_logout(decode(session["name_id"]))
-   for idp_entity_id, (request_id, http_info) in logouts.items():
+   for idp_entity_id, (binding, http_info) in logouts.items():
        location = dict(http_info["headers"])["Location"]   # redirect to IdP SLO
 
-   # We started the logout: parse the IdP's LogoutResponse.
-   resp = client.parse_logout_request_response(form["SAMLResponse"], BINDING_HTTP_REDIRECT)
+   # We started the logout: parse the IdP's correlated LogoutResponse. Construct
+   # the client with djangosaml2's StateCache so the outgoing request ID survives
+   # across web requests.
+   resp = client.parse_logout_request_response(
+       form["SAMLResponse"], BINDING_HTTP_REDIRECT,
+       # For a signed Redirect response also forward sig_alg, signature, and
+       # the exact signed_query, as shown for LogoutRequest below.
+   )
    if resp.status_ok():
        ...   # logout confirmed
 
@@ -316,6 +339,14 @@ The three SLO methods mirror pysaml2:
    # When Destination is present, it must match an SLO endpoint configured for
    # the received binding. Register the same URL for both bindings if both are
    # accepted there.
+
+.. warning::
+
+   Detached Redirect signatures cannot be reconstructed from the decoded
+   ``SAMLRequest`` or ``SAMLResponse`` value. A framework adapter—including
+   djangosaml2's logout view—must forward ``SigAlg``, ``Signature``, and the
+   exact percent-encoded signed query substring to the shim. Dropping those
+   fields cannot be repaired inside a SAML library and correctly fails closed.
 
 Generating SP metadata
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -361,11 +392,11 @@ onto pygamlastan's :doc:`safe entry points <security>`:
   is reachable **only** when the settings explicitly opt out of signatures. Never
   set this in production.
 
-The expected IdP is the unambiguous configured/known IdP, or - when more than
-one is configured - an explicit ``expected_idp=<entity id>`` keyword to
-``parse_authn_request_response``. It is never taken from the unverified Response
-issuer, so a signed response from an unintended (but known) IdP cannot be
-accepted in a multi-IdP deployment.
+With several configured IdPs, the claimed issuer may select only an already
+configured metadata entity. In signed mode the exact response must then verify
+against that entity's trusted certificates before the claim is used. Callers
+that record the selected IdP with the outstanding request can instead pass
+``expected_idp=<entity id>`` explicitly.
 
 Replay / solicited-response protection is two-layered. The response's
 ``InResponseTo`` must be present in the ``outstanding`` set you pass in (an
@@ -389,11 +420,14 @@ What is and is not covered
 --------------------------
 
 **Covered (SP flow):** ``Saml2Client.prepare_for_authenticate`` (Redirect and
-POST), ``parse_authn_request_response`` with the full ``session_info`` dict,
+POST, including signed requests), lower-level ``sso_location`` /
+``create_authn_request``, ``parse_authn_request_response`` with the full
+``session_info`` and assertion-confirmation object graph,
 ``global_logout`` / ``parse_logout_request_response`` / ``handle_logout_request``,
-``SPConfig.load``, ``ident.code`` / ``decode``, the ``saml`` / ``response`` value
-and exception types, ``metadata.entity_descriptor``, ``cache.Cache``, and the
-``s_utils`` Redirect helpers.
+``SPConfig.load``, ``MetadataStore``, ``ident.code`` / ``decode``, the schema
+namespace/value and exception modules imported by djangosaml2,
+``metadata.entity_descriptor``, persistent ``cache.Cache`` population methods,
+and the ``s_utils`` Redirect helpers.
 
 **Not covered (yet):** the IdP ``server.Server`` (a later phase - the placeholder
 imports but raises ``NotImplementedError``), ECP/PAOS, artifact resolution,
@@ -401,9 +435,10 @@ virtual organisations, and pysaml2's on-disk attribute-map files (attribute
 conversion uses :doc:`attribute_map <../api/attribute_map>` instead). If your
 integration depends on any of these, address it before migrating.
 
-**Deliberate divergences from pysaml2:** ``decode`` is strict (raises on foreign
-input); the signed/unsigned response path is gated entirely on
-``want_response_signed``; and assertion replay is enforced through a
-process-lifetime replay cache in addition to the outstanding-query
-solicited-response check. These are pinned by the shim's test suite
-(``tests/test_compat_saml2.py``).
+**Deliberate divergences from pysaml2:** malformed native ``pgc1:`` session
+values fail closed; the signed/unsigned response path is gated entirely on
+``want_response_signed``; assertion and IdP-initiated logout replay is enforced
+through a process-lifetime replay cache; and SP-initiated LogoutResponses are
+correlated against the state cache. Test fixtures must therefore use fresh SAML
+IDs and echo the actual outgoing request ID. These rules are pinned by the shim's
+test suite (``tests/test_compat_saml2.py``).

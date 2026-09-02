@@ -8,7 +8,8 @@ use pyo3::types::PyModule;
 
 use gamlastan::core::assertion::name_id::NameIdOrEncryptedId;
 use gamlastan::core::assertion::types::Assertion as GAssertion;
-use gamlastan::core::protocol::request::AuthnContextComparison;
+use gamlastan::core::identifiers::SamlId;
+use gamlastan::core::protocol::request::{AuthnContextComparison, Scoping};
 use gamlastan::core::protocol::response::Response as GResponse;
 use gamlastan::core::protocol::ResponseRef;
 use gamlastan::profiles::sso::{idp as gidp, sp as gsp, web_browser as gwb};
@@ -262,6 +263,8 @@ fn process_response_with_stores(
 #[pyclass(module = "pygamlastan.profiles", name = "AuthnRequestOptions")]
 pub struct AuthnRequestOptions {
     inner: gwb::AuthnRequestOptions,
+    idp_list: Vec<String>,
+    request_id: Option<SamlId>,
 }
 
 #[pymethods]
@@ -271,8 +274,8 @@ impl AuthnRequestOptions {
         sp_entity_id, acs_url=None, acs_index=None, protocol_binding=None,
         force_authn=None, is_passive=None, name_id_format=None, allow_create=true,
         sp_name_qualifier=None, authn_context_class_refs=None, authn_context_comparison=None,
-        provider_name=None, destination=None, proxy_count=None, requester_ids=None,
-        attribute_consuming_service_index=None, extensions=None,
+        provider_name=None, destination=None, proxy_count=None, idp_list=None, requester_ids=None,
+        attribute_consuming_service_index=None, extensions=None, request_id=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -290,9 +293,11 @@ impl AuthnRequestOptions {
         provider_name: Option<String>,
         destination: Option<String>,
         proxy_count: Option<u32>,
+        idp_list: Option<Vec<String>>,
         requester_ids: Option<Vec<String>>,
         attribute_consuming_service_index: Option<u16>,
         extensions: Option<String>,
+        request_id: Option<String>,
     ) -> PyResult<Self> {
         let o = gwb::AuthnRequestOptions {
             sp_entity_id,
@@ -313,14 +318,39 @@ impl AuthnRequestOptions {
             attribute_consuming_service_index,
             extensions,
         };
-        Ok(AuthnRequestOptions { inner: o })
+        Ok(AuthnRequestOptions {
+            inner: o,
+            idp_list: idp_list.unwrap_or_default(),
+            request_id: request_id
+                .map(SamlId::from_string)
+                .transpose()
+                .map_err(profile_err)?,
+        })
     }
 }
 
 /// Build a SAML AuthnRequest (unsigned) from options.
 #[pyfunction]
 fn create_authn_request(options: &AuthnRequestOptions) -> PyResult<AuthnRequest> {
-    let req = gsp::create_authn_request(&options.inner).map_err(profile_err)?;
+    let mut req = gsp::create_authn_request(&options.inner).map_err(profile_err)?;
+    if let Some(request_id) = &options.request_id {
+        // Compatibility consumers sometimes persist and later extract the ID
+        // using pysaml2's historical alphanumeric/hyphen grammar. Keep the
+        // native random default unless a caller explicitly supplies an ID.
+        req.base.id = request_id.as_str().to_string();
+    }
+    if !options.idp_list.is_empty() {
+        match req.scoping.as_mut() {
+            Some(scoping) => scoping.idp_list = options.idp_list.clone(),
+            None => {
+                req.scoping = Some(Scoping {
+                    proxy_count: None,
+                    idp_list: options.idp_list.clone(),
+                    requester_ids: Vec::new(),
+                });
+            }
+        }
+    }
     Ok(AuthnRequest::wrap(req))
 }
 

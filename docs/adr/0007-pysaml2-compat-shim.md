@@ -18,10 +18,12 @@ that call a small, stable slice of the pysaml2 API:
 - `saml2.config.SPConfig().load(dict)` over the existing `saml2_settings.py`;
 - `saml2.ident.code` / `decode` (NameID <-> session-storable string);
 - `saml2.saml.{NameID, Subject, NAMEID_FORMAT_*, NAME_FORMAT_URI}`;
-- `saml2.response.{AuthnResponse, LogoutResponse, StatusError, UnsolicitedResponse}`;
+- `saml2.response` wrappers, assertion confirmation objects, and status /
+  signature / lifetime exception types;
 - `saml2.metadata.entity_descriptor`, `saml2.cache.Cache`,
   `saml2.s_utils.deflate_and_base64_encode`, `saml2.sigver.get_xmlsec_binary`,
-  and `saml2.server` (imported at load time by shared code).
+  metadata-store queries, mutable `samlp.Scoping` values, and the schema
+  namespace modules imported by djangosaml2.
 
 We had two questions: **how** to migrate eduID without rewriting its Flask views
 and session logic, and **where** the migration code should live.
@@ -30,8 +32,9 @@ and session logic, and **where** the migration code should live.
 
 **Provide a thin pysaml2-API-compatible facade backed by pygamlastan, and ship
 it inside the pygamlastan distribution** as `pygamlastan.compat.saml2`, mirroring
-the pysaml2 module layout (`client`, `config`, `ident`, `response`, `saml`,
-`cache`, `metadata`, `s_utils`, `sigver`, `server`, `typing`, `attributemaps`).
+the pysaml2 module layout (`client`, `client_base`, `config`, `ident`, `response`,
+`saml`, `samlp`, `cache`, `metadata`, `mdstore`, `md`, `s_utils`, `sigver`,
+`validate`, `xmldsig`, `xmlenc`, `server`, `typing`).
 Consumers migrate by swapping `from saml2 import X` for
 `from pygamlastan.compat.saml2 import X`; the surrounding view/session code is
 left untouched.
@@ -50,9 +53,10 @@ Rationale for the two choices:
   `python/pygamlastan/`, so no packaging change is needed).
 
 **Scope: SP flow first.** Web Browser SSO (AuthnRequest creation, response
-processing) and Single Logout are implemented. The IdP `server.Server` is a
-Phase 2 placeholder that raises `NotImplementedError` but imports cleanly, so
-shared modules that `from saml2 import server` keep loading.
+processing) and Single Logout are implemented, including djangosaml2's custom
+POST request builder, metadata discovery facade, session-backed identity/state
+caches, and multi-IdP selection. The IdP `server.Server` remains a Phase 2
+placeholder that raises `NotImplementedError` but imports cleanly.
 
 **Security posture is config-driven and maps onto the safe entry points.** The
 shim honours pysaml2's `want_response_signed`:
@@ -75,28 +79,26 @@ shim honours pysaml2's `want_response_signed`:
   `SecurityConfig.permissive()`. The unsigned path is reachable **only** when the
   settings explicitly opt out of signatures.
 
-Solicited-response / replay protection mirrors pysaml2's SP model: the caller's
-outstanding-query set is checked for the response's `InResponseTo` (an unknown
-one raises `UnsolicitedResponse`), and the entry is consumed on success. The
-binding-level replay cache is therefore not used here
-(`unsafe_no_replay_cache=True`); a persistent-id store can be wired later for
-deployments that need cross-request `persistent` NameID uniqueness.
+Solicited-response and replay protection are both enforced. The caller's
+outstanding-query set is checked for `InResponseTo` (an unknown value raises
+`UnsolicitedResponse`), while assertion and IdP-initiated logout IDs pass through
+a process-lifetime replay cache. The cache keys include message kind, local SP,
+and trusted IdP; callers may inject a shared backend for multi-process
+deployments. SP-initiated logout stores the generated request ID in the supplied
+state cache and accepts only a correlated LogoutResponse.
 
-**NameID `code`/`decode` use the shim's own encoding.** pysaml2 serialises a
-NameID to a private comma-separated quoted-attribute string. That wire form never
-leaves the deployment (it is stored in the user session and handed back to the
-same library), so the shim uses a self-describing `pgc1:`-prefixed
-base64url(JSON) encoding instead. Both ends are the shim, so only the round-trip
-matters. Unlike pysaml2's lenient `decode` (which never raises and returns an
-empty NameID on bad input), the shim's `decode` raises on a string it did not
-produce - a corrupt or cross-library session value is surfaced rather than
-silently turned into a blank subject.
+**NameID `code`/`decode` support rolling migration.** New values use a
+self-describing `pgc1:`-prefixed base64url(JSON) encoding. `decode` also accepts
+pysaml2's legacy comma-index representation and djangosaml2's historical bare
+subject text, so sessions created before the dependency swap remain usable.
+Malformed `pgc1:` data still fails with `ValueError`.
 
-**SP metadata is templated.** pygamlastan does not (yet) ship an SP-metadata
-*builder*, so `metadata.entity_descriptor(config)` renders a minimal,
-schema-valid `<md:EntityDescriptor>` from the configured entityID, ACS/SLO
-endpoints and signing certificate (the same approach the `django-sp` example
-uses), returning an object with `.to_string()` / `.to_xml()`.
+**SP metadata generation and IdP metadata navigation are adapted separately.**
+`metadata.entity_descriptor(config)` renders the local SP descriptor from the
+configured entityID, endpoints, signing flags, and certificate. Parsed native
+IdP `EntityDescriptor` values live behind a read-only `MetadataStore` facade
+with the `.metadata`, `.name()`, `.service()`, and descriptor queries used by
+djangosaml2; this avoids recreating pysaml2's general XML object model.
 
 ## Consequences
 
@@ -115,11 +117,12 @@ uses), returning an object with `.to_string()` / `.to_xml()`.
   `attribute_map.AttributeConverterSet.with_default_maps()` instead. Anything
   outside the implemented SP surface must be addressed before a consumer that
   relies on it can migrate.
-- Behavioural divergences from pysaml2 are deliberate and documented (strict
-  `decode`; signed/unsigned gating on `want_response_signed`; no binding-level
-  replay cache). They are pinned by `tests/test_compat_saml2.py`, which exercises
-  the AuthnRequest round-trip, the signed and unsigned response paths, Single
-  Logout, NameID code/decode, and SP metadata generation.
+- Behavioural divergences from pysaml2 are deliberate and documented: malformed
+  native session encodings fail closed; assertion/logout replay is enforced;
+  LogoutResponses must correlate with stored state; and Redirect signatures are
+  verified only from the exact signed query string. They are pinned by
+  `tests/test_compat_saml2.py`, including djangosaml2's import, metadata,
+  assertion-confirmation, scoping, cache, and state contracts.
 - Full end-to-end acceptance is the existing eduID SP test suites, run in the
   eduid-developer environment; the in-repo tests verify the pygamlastan-facing
   core without the Flask/Mongo stack.

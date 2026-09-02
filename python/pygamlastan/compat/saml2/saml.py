@@ -17,6 +17,9 @@ from pygamlastan.core import (
 )
 from pygamlastan.core import NameId as _CoreNameId
 
+NAMESPACE = "urn:oasis:names:tc:SAML:2.0:assertion"
+SCM_BEARER = "urn:oasis:names:tc:SAML:2.0:cm:bearer"
+
 # pysaml2 spells these NAMEID_FORMAT_* / NAME_FORMAT_*; the values are the
 # standard SAML URNs, identical to pygamlastan's own constants.
 NAMEID_FORMAT_TRANSIENT = NAMEID_TRANSIENT
@@ -54,7 +57,10 @@ class NameID:
             ("sp_provided_id", sp_provided_id),
         ):
             if value is not None and not isinstance(value, str):
-                raise TypeError(f"NameID.{field} must be str or None, got {type(value).__name__}")
+                raise TypeError(
+                    f"NameID.{field} must be str or None, "
+                    f"got {type(value).__name__}"
+                )
         # pysaml2 sometimes carries surrounding whitespace from XML text nodes.
         self.text = text.strip() if isinstance(text, str) else text
         self.format = format
@@ -92,6 +98,23 @@ class NameID:
             f"sp_name_qualifier={self.sp_name_qualifier!r}>"
         )
 
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, NameID):
+            return NotImplemented
+        return (
+            self.text,
+            self.format,
+            self.name_qualifier,
+            self.sp_name_qualifier,
+            self.sp_provided_id,
+        ) == (
+            other.text,
+            other.format,
+            other.name_qualifier,
+            other.sp_name_qualifier,
+            other.sp_provided_id,
+        )
+
 
 class Subject:
     """pysaml2-shaped Subject wrapper around a :class:`NameID`."""
@@ -101,3 +124,17 @@ class Subject:
 
     def __repr__(self) -> str:
         return f"<Subject name_id={self.name_id!r}>"
+
+
+__all__ = [
+    "NAMESPACE",
+    "SCM_BEARER",
+    "NAMEID_FORMAT_TRANSIENT",
+    "NAMEID_FORMAT_PERSISTENT",
+    "NAMEID_FORMAT_UNSPECIFIED",
+    "NAMEID_FORMAT_ENTITY",
+    "NAME_FORMAT_URI",
+    "NAME_FORMAT_BASIC",
+    "NameID",
+    "Subject",
+]

@@ -13,6 +13,8 @@ from typing import Any
 from pygamlastan import metadata as _md
 from pygamlastan.core import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT
 
+from .mdstore import MetadataStore, SourceNotFound
+
 
 class SPConfig:
     """A minimal SP configuration parsed from an eduID-style settings dict."""
@@ -27,54 +29,126 @@ class SPConfig:
         #                          "single_logout_service": {binding: url}}}
         self.idp: dict[str, dict[str, dict[str, str]]] = {}
         self.want_response_signed: bool = True
+        self.want_assertions_signed: bool = False
+        self.want_logout_response_signed: bool = False
+        self.authn_requests_signed: bool = False
+        self.logout_requests_signed: bool = False
+        self.logout_responses_signed: bool = False
+        self.force_authn: bool = False
+        self.allow_create: bool = False
+        self.name_id_format: str | None = None
+        self.requested_authn_context: Any = None
+        self.signing_algorithm: str | None = None
+        self.digest_algorithm: str | None = None
         # Explicit development opt-out: accept an unverified LogoutRequest for
-        # an IdP that publishes no signing certificate. Off by default - a
-        # production metadata omission must fail closed, not silently
-        # downgrade the session-destroying endpoint to unsigned requests.
+        # an IdP that publishes no signing certificate. This is independent of
+        # response-signature policy and stays off unless directly configured.
         self.allow_unsigned_logout_requests: bool = False
         self.key_file: str | None = None
         self.cert_file: str | None = None
         # parsed metadata EntityDescriptors keyed by entity id
-        self.metadata: dict[str, _md.EntityDescriptor] = {}
+        self.metadata = MetadataStore()
+        self.preferred_binding = {
+            "single_logout_service": [BINDING_HTTP_REDIRECT, BINDING_HTTP_POST]
+        }
+        self._sp: dict[str, Any] = {}
+        self.raw: dict[str, Any] = {}
 
     # -- loading ----------------------------------------------------------
 
     def load(self, conf: dict[str, Any]) -> SPConfig:
+        """Load a pysaml2-style service-provider configuration mapping."""
+        self.raw = dict(conf)
         self.entityid = conf.get("entityid")
         sp = conf.get("service", {}).get("sp", {})
+        self._sp = dict(sp)
         self.name = sp.get("name")
 
         endpoints = sp.get("endpoints", {})
-        self.acs_endpoints = [tuple(e) for e in endpoints.get("assertion_consumer_service", [])]
+        self.acs_endpoints = [
+            tuple(e) for e in endpoints.get("assertion_consumer_service", [])
+        ]
         self.slo_endpoints = [tuple(e) for e in endpoints.get("single_logout_service", [])]
 
         self.idp = dict(sp.get("idp", {}))
-        # pysaml2 defaults want_response_signed to True.
+        # The shim deliberately defaults to signed AuthnResponses. Deployments
+        # accepting unsigned test responses must opt out in their SP settings.
         self.want_response_signed = bool(sp.get("want_response_signed", True))
+        self.want_assertions_signed = bool(sp.get("want_assertions_signed", False))
+        # pysaml2 treats logout-response signing as its own setting; requiring
+        # signed AuthnResponses must not silently change the SLO contract.
+        self.want_logout_response_signed = bool(
+            sp.get("want_logout_response_signed", False)
+        )
+        self.authn_requests_signed = bool(sp.get("authn_requests_signed", False))
+        self.logout_requests_signed = bool(sp.get("logout_requests_signed", False))
+        self.logout_responses_signed = bool(sp.get("logout_responses_signed", False))
+        self.force_authn = bool(sp.get("force_authn", False))
+        self.allow_create = bool(
+            sp.get("allow_create", sp.get("name_id_format_allow_create", False))
+        )
+        self.name_id_format = sp.get("name_id_format") or sp.get(
+            "name_id_policy_format"
+        )
+        self.requested_authn_context = sp.get("requested_authn_context")
+        self.signing_algorithm = sp.get("signing_algorithm")
+        self.digest_algorithm = sp.get("digest_algorithm")
         self.allow_unsigned_logout_requests = bool(
             sp.get("allow_unsigned_logout_requests", False)
         )
+
+        # Private attributes are part of the de-facto pysaml2 configuration
+        # contract consumed by djangosaml2.
+        self._sp_authn_requests_signed = self.authn_requests_signed
+        self._sp_signing_algorithm = self.signing_algorithm
+        self._sp_digest_algorithm = self.digest_algorithm
+        self._sp_force_authn = self.force_authn
+        self._sp_allow_create = self.allow_create
 
         self.key_file = conf.get("key_file")
         self.cert_file = conf.get("cert_file")
 
         # Reset before (re)loading so a reused SPConfig instance does not
         # accumulate stale metadata across load() calls.
-        self.metadata = {}
+        self.metadata = MetadataStore()
         for path in conf.get("metadata", {}).get("local", []):
             self._load_metadata_file(path)
 
         return self
 
     def _load_metadata_file(self, path: str) -> None:
-        with open(path, encoding="utf-8") as fh:
-            xml = fh.read()
+        try:
+            with open(path, encoding="utf-8") as fh:
+                xml = fh.read()
+        except OSError as exc:
+            raise SourceNotFound(f"could not read metadata source {path!r}: {exc}") from exc
         try:
             entities = _md.parse_entities(xml)
         except Exception:
             entities = [_md.parse_entity(xml)]
-        for ed in entities:
-            self.metadata[ed.entity_id] = ed
+        self.metadata.add_source(path, list(entities))
+
+    def getattr(self, attribute: str, context: str | None = None) -> Any:
+        """Read a setting using pysaml2's optional service context."""
+        if context == "sp":
+            return self._sp.get(attribute)
+        return self.raw.get(attribute, getattr(self, attribute, None))
+
+    def endpoint(
+        self, service: str, binding: str | None = None, context: str = "sp"
+    ) -> list[str]:
+        """Return configured endpoint URLs for a service and optional binding."""
+        if context != "sp":
+            return []
+        endpoints = {
+            "assertion_consumer_service": self.acs_endpoints,
+            "single_logout_service": self.slo_endpoints,
+        }.get(service, [])
+        return [
+            url
+            for url, item_binding in endpoints
+            if binding is None or item_binding == binding
+        ]
 
     # -- accessors used by the client / metadata shims --------------------
 
@@ -89,6 +163,7 @@ class SPConfig:
         return self.acs_endpoints[0]
 
     def slo(self, binding: str | None = None) -> tuple[str, str] | None:
+        """Return the SP logout endpoint, preferring ``binding`` when present."""
         if binding is not None:
             for url, b in self.slo_endpoints:
                 if b == binding:
@@ -113,6 +188,7 @@ class SPConfig:
     def single_sign_on_service(
         self, idp_entity_id: str | None, binding: str = BINDING_HTTP_REDIRECT
     ) -> str:
+        """Resolve an IdP SSO endpoint from explicit config or metadata."""
         idp_entity_id = idp_entity_id or self.only_idp()
         cfg = self.idp.get(idp_entity_id or "", {}).get("single_sign_on_service", {})
         if binding in cfg:
@@ -127,6 +203,7 @@ class SPConfig:
     def single_logout_service(
         self, idp_entity_id: str | None, binding: str = BINDING_HTTP_REDIRECT
     ) -> str:
+        """Resolve an IdP logout endpoint from explicit config or metadata."""
         idp_entity_id = idp_entity_id or self.only_idp()
         cfg = self.idp.get(idp_entity_id or "", {}).get("single_logout_service", {})
         if binding in cfg:
