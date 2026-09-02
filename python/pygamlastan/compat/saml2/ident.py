@@ -13,14 +13,17 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import urllib.parse
 
 from .saml import NameID
 
 _PREFIX = "pgc1:"  # pygamlastan-compat v1 marker
 
 
-def code(name_id: NameID) -> str:
+def code(name_id: NameID | str) -> str:
     """Serialise a :class:`NameID` to an opaque, session-storable string."""
+    if isinstance(name_id, str):
+        name_id = NameID(text=name_id)
     payload = {
         "v": name_id.text,
         "f": name_id.format,
@@ -40,7 +43,32 @@ def decode(value: str) -> NameID:
     need not know the encoding details.
     """
     if not value.startswith(_PREFIX):
-        raise ValueError("not a pygamlastan-compat encoded NameID")
+        # Seamless rolling migrations must be able to read sessions written by
+        # pysaml2.  Its private format is a comma-separated list of numeric
+        # field indexes (0=name_qualifier, 1=sp_name_qualifier, 2=format,
+        # 3=sp_provided_id, 4=text).  A bare value is also accepted because
+        # older djangosaml2 deployments and custom session stores sometimes
+        # persisted only NameID.text.
+        fields = [
+            "name_qualifier",
+            "sp_name_qualifier",
+            "format",
+            "sp_provided_id",
+            "text",
+        ]
+        parsed: dict[str, str] = {}
+        for part in value.split(","):
+            index, separator, encoded = part.partition("=")
+            if not separator:
+                continue
+            try:
+                field = fields[int(index)]
+            except (ValueError, IndexError):
+                continue
+            parsed[field] = urllib.parse.unquote(encoded)
+        if parsed:
+            return NameID(**parsed)
+        return NameID(text=value)
     body = value[len(_PREFIX) :]
     # Restore any stripped padding, then decode strictly: validate=True makes any
     # non-alphabet character (e.g. injected punctuation) fail closed instead of

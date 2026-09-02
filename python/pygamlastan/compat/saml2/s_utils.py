@@ -7,6 +7,16 @@ from __future__ import annotations
 import base64
 import zlib
 
+from . import SAMLError
+
+
+class UnknownSystemEntity(SAMLError):
+    """A requested entity is absent from configured metadata."""
+
+
+class UnsupportedBinding(Exception):
+    """No endpoint supports the requested SAML binding."""
+
 
 def deflate_and_base64_encode(value: str | bytes) -> str:
     """RFC 1951 raw-DEFLATE then base64, as the SAML Redirect binding requires."""
@@ -30,3 +40,11 @@ def decode_base64_and_inflate(value: str | bytes) -> bytes:
     if len(compact) % 4:
         compact += "=" * (4 - len(compact) % 4)
     return zlib.decompress(base64.b64decode(compact, validate=True), -15)
+
+
+__all__ = [
+    "UnknownSystemEntity",
+    "UnsupportedBinding",
+    "decode_base64_and_inflate",
+    "deflate_and_base64_encode",
+]

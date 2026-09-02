@@ -4,7 +4,7 @@ Reproduces the SP-side methods eduID calls:
 
 * ``prepare_for_authenticate`` -> ``(session_id, http_info)``
 * ``parse_authn_request_response`` -> :class:`~.response.AuthnResponse`
-* ``global_logout`` -> ``{idp_entity_id: (request_id, http_info)}``
+* ``global_logout`` -> ``{idp_entity_id: (binding, http_info)}``
 * ``parse_logout_request_response`` -> :class:`~.response.LogoutResponse`
 * ``handle_logout_request`` -> ``http_info``
 
@@ -17,24 +17,42 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
+import secrets
 import threading
 import time
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from pygamlastan import SamlCryptoError
 from pygamlastan import bindings as _bindings
+from pygamlastan import logout as _logout
 from pygamlastan import profiles as _profiles
 from pygamlastan import security as _security
 from pygamlastan import xml as _xml
-from pygamlastan import logout as _logout
 from pygamlastan.core import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT
-from pygamlastan import SamlCryptoError
 from pygamlastan.crypto import SamlSigner, SamlVerifier
 
+from .client_base import LogoutError
 from .config import SPConfig
-from .response import AuthnResponse, LogoutResponse, StatusError, UnsolicitedResponse
-from .saml import NameID
+from .ident import code, decode
+from .response import (
+    AuthnResponse,
+    LogoutResponse,
+    RequestVersionTooLow,
+    SignatureError,
+    StatusAuthnFailed,
+    StatusError,
+    StatusNoAuthnContext,
+    StatusRequestDenied,
+    UnsolicitedResponse,
+)
+from .saml import NAMEID_FORMAT_TRANSIENT, NameID
+from .s_utils import UnsupportedBinding
+from .sigver import MissingKey
+from .validate import ResponseLifetimeExceed, ToEarly
+from .xmldsig import DIGEST_SHA256
 
 
 def _redirect_http_info(url: str) -> dict[str, Any]:
@@ -55,6 +73,197 @@ def _post_http_info(url: str, html: str) -> dict[str, Any]:
         "headers": [("Content-type", "text/html")],
         "data": html,
     }
+
+
+def _signature_template(
+    element_id: str, signature_algorithm: str, digest_algorithm: str
+) -> str:
+    """Build the enveloped XML-DSig template consumed by ``SamlSigner``.
+
+    All three values originate from typed configuration or a generated SAML ID.
+    XML attribute escaping is nevertheless applied so the helper remains safe if
+    a custom ID generator or algorithm registry is introduced later.
+    """
+    from xml.sax.saxutils import quoteattr
+
+    return (
+        '<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">'
+        "<ds:SignedInfo>"
+        '<ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>'
+        f"<ds:SignatureMethod Algorithm={quoteattr(signature_algorithm)}/>"
+        f"<ds:Reference URI={quoteattr('#' + element_id)}><ds:Transforms>"
+        '<ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/>'
+        '<ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>'
+        "</ds:Transforms>"
+        f"<ds:DigestMethod Algorithm={quoteattr(digest_algorithm)}/>"
+        "<ds:DigestValue/></ds:Reference></ds:SignedInfo>"
+        "<ds:SignatureValue/></ds:Signature>"
+    )
+
+
+def _sign_enveloped_request(
+    xml: str,
+    element_id: str,
+    signer: SamlSigner,
+    signature_algorithm: str | None,
+    digest_algorithm: str | None,
+) -> str:
+    """Insert a signature template after Issuer and sign the request root."""
+    issuer_end = re.search(r"</(?:[A-Za-z_][\w.-]*:)?Issuer\s*>", xml)
+    if issuer_end is None:
+        raise ValueError("cannot sign a SAML request without an Issuer element")
+    template = _signature_template(
+        element_id,
+        signature_algorithm or signer.signature_method_uri(),
+        digest_algorithm or DIGEST_SHA256,
+    )
+    templated = xml[: issuer_end.end()] + template + xml[issuer_end.end() :]
+    return signer.sign_enveloped(templated)
+
+
+def _legacy_nil_attributes(xml: str, assertion_id: str) -> list[Any]:
+    """Recover contradictory nil values from the authenticated assertion.
+
+    Older pysaml2 accepted an ``AttributeValue`` that simultaneously declared
+    itself nil and contained text.  A schema-aware parser correctly represents
+    that value as null, but djangosaml2's long-standing test fixtures—and some
+    legacy IdPs—expect the text to win.  This adapter runs only after the native
+    hardened parser has accepted the document and never changes the bytes used
+    for signature verification. Recovered values retain only their wire name
+    and NameFormat; FriendlyName is deliberately ignored so the strict native
+    attribute converter remains the authority for local names.
+    """
+    from xml.etree import ElementTree
+
+    from pygamlastan.core import Attribute
+
+    assertion_namespace = "urn:oasis:names:tc:SAML:2.0:assertion"
+    nil_attribute = "{http://www.w3.org/2001/XMLSchema-instance}nil"
+    root = ElementTree.fromstring(xml)
+    matching_assertions = [
+        item
+        for item in root.iter(f"{{{assertion_namespace}}}Assertion")
+        if item.get("ID") == assertion_id
+    ]
+    if len(matching_assertions) != 1:
+        return []
+    assertion = matching_assertions[0]
+    recovered: list[Any] = []
+    for attribute in assertion.iter(f"{{{assertion_namespace}}}Attribute"):
+        wire_name = attribute.get("Name")
+        if not wire_name:
+            continue
+        values: list[str] = []
+        for value in attribute.findall(f"{{{assertion_namespace}}}AttributeValue"):
+            nil = (value.get(nil_attribute) or "").lower()
+            text = (value.text or "").strip()
+            if nil in {"true", "1"} and text:
+                values.append(text)
+        if values:
+            recovered.append(
+                Attribute(
+                    wire_name,
+                    values=values,
+                    name_format=attribute.get("NameFormat"),
+                )
+            )
+    return recovered
+
+
+def _validate_response_version(xml: str) -> None:
+    """Translate pysaml2's response-version check to its public exceptions.
+
+    The hardened native parser has already accepted this document before this
+    helper runs, so using ElementTree to read the root attribute does not create
+    a second, less-safe XML entry point.
+    """
+    from xml.etree import ElementTree
+
+    value = ElementTree.fromstring(xml).get("Version")
+    if value == "2.0":
+        return
+    try:
+        version = tuple(int(part) for part in (value or "").split("."))
+    except ValueError as exc:
+        raise StatusError(f"invalid SAML response version {value!r}") from exc
+    if version < (2, 0):
+        raise RequestVersionTooLow(f"deprecated SAML response version {value}")
+    raise StatusError(f"unsupported SAML response version {value!r}")
+
+
+def _raise_compat_time_error(parsed: Any, config: _security.SecurityConfig) -> None:
+    """Raise pysaml2's dedicated exception for a native time-check failure.
+
+    Native profile processing reports all validation failures through one
+    ``SamlProfileError``. Inspecting the already-parsed typed timestamps keeps
+    djangosaml2's exception contract without classifying errors from strings.
+    This helper is called only after native validation has failed.
+    """
+    now = datetime.now(timezone.utc)
+    skew = timedelta(seconds=config.clock_skew_seconds)
+
+    for assertion in parsed.assertions:
+        if now - assertion.issue_instant > (
+            timedelta(seconds=config.max_assertion_age_seconds) + skew
+        ):
+            raise ResponseLifetimeExceed(
+                "SAML assertion exceeds the configured maximum age"
+            )
+
+        conditions = assertion.conditions
+        if conditions is not None:
+            if (
+                conditions.not_on_or_after is not None
+                and now - skew >= conditions.not_on_or_after
+            ):
+                raise ResponseLifetimeExceed("SAML assertion conditions have expired")
+            if (
+                conditions.not_before is not None
+                and now + skew < conditions.not_before
+            ):
+                raise ToEarly("SAML assertion conditions are not valid yet")
+
+        subject = assertion.subject
+        if subject is not None:
+            for confirmation in subject.subject_confirmations:
+                data = confirmation.subject_confirmation_data
+                if data is None:
+                    continue
+                if (
+                    data.not_on_or_after is not None
+                    and now - skew >= data.not_on_or_after
+                ):
+                    raise ResponseLifetimeExceed(
+                        "SAML subject confirmation has expired"
+                    )
+                if data.not_before is not None and now + skew < data.not_before:
+                    raise ToEarly("SAML subject confirmation is not valid yet")
+
+        for statement in assertion.authn_statements:
+            if (
+                statement.session_not_on_or_after is not None
+                and now - skew >= statement.session_not_on_or_after
+            ):
+                raise ResponseLifetimeExceed("SAML authentication session has expired")
+
+
+def _logout_deadline(value: Any) -> datetime | None:
+    """Normalize pysaml2's common ``expire`` forms to an aware datetime."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(f"invalid logout expiry {value!r}") from exc
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+    raise TypeError(
+        "logout expiry must be a datetime, epoch timestamp, ISO string, or None"
+    )
 
 
 def _nameid_key(name_id: Any) -> tuple[str, str | None, str | None, str | None, str | None] | None:
@@ -218,7 +427,13 @@ def _maybe_cleanup_replay_cache(cache: Any) -> None:
 
 
 class Saml2Client:
-    """pysaml2-compatible SP client backed by pygamlastan."""
+    """pysaml2-compatible SP client backed by pygamlastan.
+
+    ``identity_cache`` and ``state_cache`` are real collaborators, not ignored
+    constructor decoration: accepted identities are persisted for attribute
+    display/logout, while outbound LogoutRequest IDs are persisted so a later
+    response can be authenticated and correlated by a newly-created client.
+    """
 
     def __init__(
         self,
@@ -231,16 +446,19 @@ class Saml2Client:
         replay_cache: Any = None,
     ) -> None:
         self.config = config
-        # Caches are accepted for API parity; the pygamlastan SP flow derives
-        # logout targets from config/metadata rather than pysaml2's identity
-        # bookkeeping, so they are not consulted here.
         self.identity_cache = identity_cache
         self.state_cache = state_cache
+        # pysaml2 exposes its population facade as ``client.users``.  The cache
+        # shim implements that read/write surface directly.
+        self.users = identity_cache
+        self.state = state_cache if state_cache is not None else {}
         self._signer: SamlSigner | None = None
         # Default to the shared process-lifetime cache; ``replay_cache`` lets a
         # multi-process deployment supply a shared implementation (any object
         # with ``check_and_insert(id, expiry) -> bool`` and ``cleanup()``).
-        self._replay_cache = replay_cache if replay_cache is not None else _PROCESS_REPLAY_CACHE
+        self._replay_cache = (
+            replay_cache if replay_cache is not None else _PROCESS_REPLAY_CACHE
+        )
 
     # -- signing helper ---------------------------------------------------
 
@@ -259,6 +477,134 @@ class Saml2Client:
 
     # -- AuthnRequest -----------------------------------------------------
 
+    def sso_location(
+        self,
+        entityid: str | None = None,
+        binding: str = BINDING_HTTP_REDIRECT,
+    ) -> str:
+        """Return the IdP SSO endpoint for ``binding``.
+
+        ``TypeError`` mirrors pysaml2's signal for an ambiguous IdP, while an
+        explicitly selected but unsupported binding is reported as
+        :class:`UnsupportedBinding`.
+        """
+        idp = entityid or self.config.only_idp()
+        if idp is None:
+            raise TypeError("Unable to determine which IdP to use")
+        try:
+            return self.config.single_sign_on_service(idp, binding)
+        except ValueError as exc:
+            raise UnsupportedBinding(str(exc)) from exc
+
+    @staticmethod
+    def _scoping_values(scoping: Any) -> tuple[int | None, list[str], list[str]]:
+        """Convert mutable pysaml2 ``Scoping`` objects to typed native fields."""
+        if scoping is None:
+            return None, [], []
+        proxy_count = getattr(scoping, "proxy_count", None)
+        idp_list: list[str] = []
+        container = getattr(scoping, "idp_list", None)
+        entries = getattr(container, "idp_entry", []) if container is not None else []
+        for entry in entries:
+            provider_id = getattr(entry, "provider_id", None)
+            if provider_id:
+                idp_list.append(str(provider_id))
+        requester_ids: list[str] = []
+        for requester in getattr(scoping, "requester_id", []):
+            value = getattr(requester, "text", requester)
+            if value:
+                requester_ids.append(str(value))
+        return proxy_count, idp_list, requester_ids
+
+    def create_authn_request(
+        self,
+        destination: str,
+        binding: str = BINDING_HTTP_POST,
+        sign: bool | None = None,
+        sigalg: str | None = None,
+        sign_alg: str | None = None,
+        digest_alg: str | None = None,
+        force_authn: str | bool | None = None,
+        requested_authn_context: Any = None,
+        nameid_format: str | None = None,
+        allow_create: str | bool | None = None,
+        scoping: Any = None,
+        service_url_binding: str | None = None,
+        **kwargs: Any,
+    ) -> tuple[str, str]:
+        """Create an AuthnRequest and return ``(request_id, XML)``.
+
+        This is the lower-level API used by djangosaml2's custom HTTP-POST
+        template. ``binding`` describes the requested response protocol, while
+        ``service_url_binding`` optionally selects which configured ACS URL to
+        include. When signing is enabled an enveloped XML signature is produced
+        over this exact request document.
+        """
+        acs_url, _acs_binding = self.config.acs(service_url_binding or binding)
+        force_value = self.config.force_authn if force_authn is None else force_authn
+        force = str(force_value).lower() in ("true", "1", "yes")
+        allow_value = self.config.allow_create if allow_create is None else allow_create
+        allow = str(allow_value).lower() in ("true", "1", "yes")
+        effective_nameid_format = (
+            self.config.name_id_policy_format
+            if nameid_format is None
+            else nameid_format
+        )
+        native_allow_create = (
+            None if effective_nameid_format == NAMEID_FORMAT_TRANSIENT else allow
+        )
+
+        context = (
+            self.config.requested_authn_context
+            if requested_authn_context is None
+            else requested_authn_context
+        )
+        class_refs: list[str] | None = None
+        comparison: str | None = None
+        if isinstance(context, dict):
+            reference = context.get("authn_context_class_ref")
+            if isinstance(reference, str):
+                class_refs = [reference]
+            elif reference is not None:
+                class_refs = [str(item) for item in reference]
+            comparison = context.get("comparison", "exact")
+
+        proxy_count, idp_list, requester_ids = self._scoping_values(scoping)
+        options = _profiles.AuthnRequestOptions(
+            sp_entity_id=self._require_entityid(),
+            acs_url=acs_url,
+            protocol_binding=binding,
+            force_authn=force,
+            name_id_format=effective_nameid_format,
+            allow_create=native_allow_create,
+            authn_context_class_refs=class_refs,
+            authn_context_comparison=comparison,
+            provider_name=kwargs.get("provider_name") or self.config.name,
+            destination=destination,
+            proxy_count=proxy_count,
+            idp_list=idp_list,
+            requester_ids=requester_ids,
+            # pysaml2 uses letter-prefixed request IDs. djangosaml2 persists
+            # them with an intentionally narrow legacy parser, so ask the
+            # native builder for that interoperable form instead of rewriting
+            # serialized XML after construction.
+            request_id="id-" + secrets.token_hex(16),
+        )
+        request = _profiles.create_authn_request(options)
+        xml = request.to_xml()
+
+        should_sign = self.config.authn_requests_signed if sign is None else bool(sign)
+        if should_sign:
+            signer = self._get_signer()
+            xml = _sign_enveloped_request(
+                xml,
+                request.id,
+                signer,
+                sigalg or sign_alg or self.config.signing_algorithm,
+                digest_alg or self.config.digest_algorithm,
+            )
+        return request.id, xml
+
     def prepare_for_authenticate(
         self,
         entityid: str | None = None,
@@ -267,67 +613,54 @@ class Saml2Client:
         sigalg: str | None = None,
         digest_alg: str | None = None,
         subject: Any = None,
-        force_authn: str | bool = "false",
+        force_authn: str | bool | None = None,
         requested_authn_context: Any = None,
+        sign: bool | None = None,
+        response_binding: str = BINDING_HTTP_POST,
         **kwargs: Any,
     ) -> tuple[str, dict[str, Any]]:
+        """Build and bind an AuthnRequest using pysaml2's return shape."""
         idp = entityid or self.config.only_idp()
         if idp is None:
             # pysaml2 raises TypeError here; eduID catches it to mean
             # "unable to know which IdP to use".
             raise TypeError("Unable to determine which IdP to use")
 
-        # Prefer the SSO endpoint published for the requested binding; fall back
-        # to Redirect (the only binding gamlastan currently encodes a request
-        # for) if the IdP does not advertise the requested one.
+        effective_binding = binding
         try:
-            sso_url = self.config.single_sign_on_service(idp, binding)
-        except ValueError:
-            sso_url = self.config.single_sign_on_service(idp, BINDING_HTTP_REDIRECT)
-        # Request HTTP-POST as the response ACS by default (the SAML Web SSO
-        # norm), but config.acs falls back to the first configured ACS endpoint
-        # when no POST ACS is declared, so an SP with only a different binding
-        # can still build a request.
-        acs_url, acs_binding = self.config.acs(BINDING_HTTP_POST)
+            sso_url = self.sso_location(idp, effective_binding)
+        except UnsupportedBinding:
+            # Some older configurations publish only a Redirect endpoint but
+            # callers still ask the binding layer for POST first.  Preserve
+            # pysaml2's endpoint fallback; djangosaml2 normally detects and
+            # switches the binding itself before reaching this method.
+            effective_binding = BINDING_HTTP_REDIRECT
+            sso_url = self.sso_location(idp, effective_binding)
 
-        force = str(force_authn).lower() in ("true", "1", "yes")
-
-        class_refs: list[str] | None = None
-        comparison: str | None = None
-        if requested_authn_context:
-            ref = requested_authn_context.get("authn_context_class_ref")
-            if isinstance(ref, str):
-                class_refs = [ref]
-            elif ref is not None:
-                class_refs = list(ref)
-            comparison = requested_authn_context.get("comparison", "exact")
-
-        options = _profiles.AuthnRequestOptions(
-            sp_entity_id=self._require_entityid(),
-            acs_url=acs_url,
-            protocol_binding=acs_binding,
-            force_authn=force,
-            authn_context_class_refs=class_refs,
-            authn_context_comparison=comparison,
-            destination=sso_url,
+        # The response protocol and the binding used to select the ACS URL are
+        # independent pysaml2 options. Most callers leave service_url_binding
+        # unset, in which case create_authn_request uses response_binding for
+        # both values.
+        service_url_binding = kwargs.pop("service_url_binding", None)
+        session_id, xml = self.create_authn_request(
+            sso_url,
+            binding=response_binding,
+            service_url_binding=service_url_binding,
+            sign=False,
+            force_authn=force_authn,
+            requested_authn_context=requested_authn_context,
+            sigalg=sigalg,
+            digest_alg=digest_alg,
+            **kwargs,
         )
-        request = _profiles.create_authn_request(options)
-        session_id = request.id
-        xml = request.to_xml()
 
         rs = relay_state or None
-        if binding == BINDING_HTTP_REDIRECT:
-            # Sign whenever a key is configured (the generated SP metadata
-            # advertises AuthnRequestsSigned="true" when key_file is set, so an
-            # IdP relying on metadata expects signed requests). Derive a default
-            # sig_alg from the key - as global_logout does - but honour an
-            # explicit sigalg override.
-            signer = None
-            effective_sigalg = sigalg
-            if sigalg or self.config.key_file:
-                signer = self._get_signer()
-                if effective_sigalg is None:
-                    effective_sigalg = signer.signature_method_uri()
+        should_sign = self.config.authn_requests_signed if sign is None else bool(sign)
+        if effective_binding == BINDING_HTTP_REDIRECT:
+            signer = self._get_signer() if should_sign else None
+            effective_sigalg = sigalg or self.config.signing_algorithm
+            if signer is not None and effective_sigalg is None:
+                effective_sigalg = signer.signature_method_uri()
             url = _bindings.redirect_encode(
                 xml.encode("utf-8"),
                 True,
@@ -337,21 +670,21 @@ class Saml2Client:
                 sig_alg=effective_sigalg,
             )
             return session_id, _redirect_http_info(url)
-        elif binding == BINDING_HTTP_POST:
-            # The bindings post_encode API cannot sign, but the generated SP
-            # metadata advertises AuthnRequestsSigned="true" when a key is
-            # configured. Rather than silently emit an unsigned POST request that
-            # an IdP may reject on the metadata's word, fail fast and steer the
-            # caller to HTTP-Redirect (where request signing is implemented).
-            if sigalg or self.config.key_file:
-                raise ValueError(
-                    "signed AuthnRequests are only supported over HTTP-Redirect; "
-                    "use binding=BINDING_HTTP_REDIRECT (HTTP-POST request signing "
-                    "is not implemented)"
+        elif effective_binding == BINDING_HTTP_POST:
+            if should_sign:
+                signer = self._get_signer()
+                xml = _sign_enveloped_request(
+                    xml,
+                    session_id,
+                    signer,
+                    sigalg or self.config.signing_algorithm,
+                    digest_alg or self.config.digest_algorithm,
                 )
             html = _bindings.post_encode(xml.encode("utf-8"), True, sso_url, relay_state=rs)
             return session_id, _post_http_info(sso_url, html)
-        raise ValueError(f"unsupported binding for AuthnRequest: {binding}")
+        raise UnsupportedBinding(
+            f"unsupported binding for AuthnRequest: {effective_binding}"
+        )
 
     # -- Response processing ----------------------------------------------
 
@@ -362,6 +695,7 @@ class Saml2Client:
         outstanding: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> AuthnResponse:
+        """Decode, authenticate, validate, and adapt an IdP AuthnResponse."""
         sp_entity_id = self._require_entityid()
         # Decode per the binding the response arrived over (HTTP-POST is base64,
         # HTTP-Redirect is DEFLATE+base64) inside the try, so a malformed
@@ -374,6 +708,8 @@ class Saml2Client:
             # eduID treats parse failures as a bad response.
             raise StatusError(f"could not parse SAML response: {e}") from e
 
+        _validate_response_version(xml)
+
         in_response_to = parsed.in_response_to
         if outstanding is not None and in_response_to not in outstanding:
             raise UnsolicitedResponse(
@@ -384,16 +720,16 @@ class Saml2Client:
         # arrived over (config.acs falls back to the first configured ACS when the
         # exact binding is absent), rather than assuming HTTP-POST.
         acs_url, _ = self.config.acs(binding)
-        # The expected IdP must be trusted, never taken from the unverified
-        # Response issuer: with several IdPs that would let a signed response from
-        # an unintended (but known) IdP be accepted. Use an explicit caller hint
-        # or the unambiguous configured IdP; otherwise refuse.
         expected_idp = kwargs.get("expected_idp") or self.config.only_idp()
         if expected_idp is None:
+            # The legacy outstanding-query mapping stores only the return URL,
+            # not the IdP selected for the request. Trusting the response's
+            # claimed issuer here would let any configured IdP answer another
+            # IdP's outstanding request. Require the caller to supply the
+            # request-correlated entity ID when the configuration is ambiguous.
             raise ValueError(
-                "Cannot determine the expected IdP for response processing: more "
-                "than one IdP is configured/known. Pass expected_idp=<entity id> "
-                "(deriving it from the unverified Response issuer would be unsafe)."
+                "Cannot determine the IdP targeted by this outstanding request; "
+                "pass expected_idp=<entity id>"
             )
 
         # Both branches below insert into the replay cache; give expired
@@ -406,7 +742,7 @@ class Saml2Client:
             expected_idp,
         )
 
-        if self.config.want_response_signed:
+        if self.config.want_response_signed or self.config.want_assertions_signed:
             # Use the safe-by-construction entry point: process_response_verified
             # performs XML-DSig verification over the EXACT bytes internally and
             # feeds only the cryptographically verified IDs into validation, so
@@ -414,8 +750,9 @@ class Saml2Client:
             # it). `want_response_signed` maps to a required Response-envelope
             # signature; it does not imply direct Assertion signatures.
             cfg = _security.SecurityConfig()
-            cfg.require_signed_assertions = False
-            cfg.require_signed_responses = True
+            cfg.clock_skew_seconds = self.config.accepted_time_diff
+            cfg.require_signed_assertions = self.config.want_assertions_signed
+            cfg.require_signed_responses = self.config.want_response_signed
             cfg.require_encrypted_assertions = False
             # During key rollover the IdP metadata publishes the old and new
             # signing certificates simultaneously, so try each until one
@@ -425,7 +762,11 @@ class Saml2Client:
             # change the validation outcome.
             result = None
             crypto_error: SamlCryptoError | None = None
-            for cert in self.config.idp_signing_certs(expected_idp):
+            try:
+                signing_certs = self.config.idp_signing_certs(expected_idp)
+            except ValueError as exc:
+                raise MissingKey(str(exc)) from exc
+            for cert in signing_certs:
                 verifier = SamlVerifier.from_cert(cert)
                 try:
                     result = _profiles.process_response_verified(
@@ -449,16 +790,14 @@ class Saml2Client:
                     # surfaces as StatusError for pysaml2 parity (only after the
                     # signature has been verified); anything else stays AssertionError.
                     if not parsed.is_success():
-                        raise StatusError(
-                            "SAML response status not Success: "
-                            f"{parsed.status.status_code.value}"
-                        ) from e
+                        self._raise_on_failed_status(parsed)
+                    _raise_compat_time_error(parsed, cfg)
                     raise AssertionError(f"SAML response validation failed: {e}") from e
             if result is None:
                 # No published certificate verified the signature; eduID's
                 # get_authn_response catches AssertionError as "SAML response
                 # is not verified".
-                raise AssertionError(
+                raise SignatureError(
                     f"SAML response is not verified: {crypto_error}"
                 ) from crypto_error
         else:
@@ -466,6 +805,7 @@ class Saml2Client:
             # settings explicitly set want_response_signed=False.
             self._raise_on_failed_status(parsed)
             cfg = _security.SecurityConfig.permissive()
+            cfg.clock_skew_seconds = self.config.accepted_time_diff
             try:
                 result = _profiles.process_response(
                     parsed,
@@ -479,72 +819,372 @@ class Saml2Client:
                     unsafe_no_persistent_id_store=True,
                 )
             except Exception as e:
+                _raise_compat_time_error(parsed, cfg)
                 raise AssertionError(f"SAML response processing failed: {e}") from e
 
-        return AuthnResponse(result, in_response_to)
+        assertions = list(parsed.assertions)
+        assertion = next(
+            (item for item in assertions if item.id == result.assertion_id),
+            None,
+        )
+        if assertion is None:
+            raise AssertionError(
+                f"processed assertion {result.assertion_id!r} is absent from response"
+            )
+        came_from = outstanding.get(in_response_to) if outstanding is not None else None
+        wrapped = AuthnResponse(
+            result,
+            in_response_to,
+            assertion=assertion,
+            came_from=came_from,
+            legacy_attributes=_legacy_nil_attributes(xml, result.assertion_id),
+        )
+        if self.identity_cache is not None:
+            session_info = wrapped.session_info()
+            self.identity_cache.set(
+                session_info["name_id"],
+                session_info["issuer"],
+                session_info,
+                session_info["not_on_or_after"],
+            )
+        return wrapped
 
     @staticmethod
     def _raise_on_failed_status(parsed: Any) -> None:
+        """Translate common SAML status codes to pysaml2 exception classes."""
         if not parsed.is_success():
-            raise StatusError(
-                f"SAML response status not Success: {parsed.status.status_code.value}"
-            )
+            status_code = parsed.status.status_code
+            values = []
+            while status_code is not None:
+                values.append(status_code.value)
+                status_code = status_code.sub_status
+            message = f"SAML response status not Success: {' / '.join(values)}"
+            if any(value.endswith(":AuthnFailed") for value in values):
+                raise StatusAuthnFailed(message)
+            if any(value.endswith(":NoAuthnContext") for value in values):
+                raise StatusNoAuthnContext(message)
+            if any(value.endswith(":RequestDenied") for value in values):
+                raise StatusRequestDenied(message)
+            raise StatusError(message)
 
     # -- Single Logout ----------------------------------------------------
 
     def global_logout(
-        self, name_id: NameID, reason: str = "", expire: Any = None, sign: Any = None
+        self,
+        name_id: NameID | str,
+        reason: str = "",
+        expire: Any = None,
+        sign: Any = None,
+        sign_alg: str | None = None,
+        digest_alg: str | None = None,
     ) -> dict[str, tuple[str, dict[str, Any]]]:
-        """Build SP-initiated LogoutRequests for each federated IdP with an SLO.
+        """Begin SP-initiated logout for every issuer holding identity data.
 
-        IdPs are discovered from both the ``idp`` config block and parsed
-        metadata, so metadata-only deployments are covered too.
+        The mapping follows pysaml2 exactly: each value is
+        ``(binding, http_info)``. Session-backed identity data determines the
+        preferred peers; configuration and metadata are the fallback.
         """
-        sp_entity_id = self._require_entityid()
-        # Fail closed on a missing/blank subject rather than emitting
-        # LogoutRequests with an empty NameID, matching _nameid_key's posture.
+        if isinstance(name_id, str):
+            name_id = decode(name_id)
         if _nameid_key(name_id) is None:
             raise ValueError("global_logout requires a NameID with a non-empty identifier")
-        core_name_id = name_id.to_core()
-        # When signing is requested, _get_signer raises if no key_file is
-        # configured - fail fast rather than silently sending unsigned.
-        signer = self._get_signer() if sign else None
-        sig_alg = signer.signature_method_uri() if signer is not None else None
+        candidate_idps: list[str] = []
+        if self.users is not None:
+            issuers = getattr(self.users, "issuers_of_info", None)
+            if callable(issuers):
+                candidate_idps = list(issuers(name_id))
+        if not candidate_idps:
+            candidate_idps = list(self.config.idp) + [
+                entity_id
+                for entity_id, entity in self.config.metadata.items()
+                if entity.is_idp() and entity_id not in self.config.idp
+            ]
+        return self.do_logout(
+            name_id,
+            candidate_idps,
+            reason,
+            expire,
+            sign=sign,
+            sign_alg=sign_alg,
+            digest_alg=digest_alg,
+        )
 
-        candidate_idps = list(self.config.idp) + [
-            eid for eid in self.config.metadata if eid not in self.config.idp
-        ]
-        out: dict[str, tuple[str, dict[str, Any]]] = {}
-        for idp in candidate_idps:
-            try:
-                slo_url = self.config.single_logout_service(idp, BINDING_HTTP_REDIRECT)
-            except ValueError:
-                continue
+    def do_logout(
+        self,
+        name_id: NameID,
+        entity_ids: list[str],
+        reason: str,
+        expire: Any,
+        sign: bool | None = None,
+        expected_binding: str | None = None,
+        sign_alg: str | None = None,
+        digest_alg: str | None = None,
+        **kwargs: Any,
+    ) -> dict[str, tuple[str, dict[str, Any]]]:
+        """Create bound LogoutRequests for selected IdPs.
+
+        djangosaml2 subclasses this method to force a preferred binding. Only
+        browser bindings are returned; the shim never performs hidden SOAP I/O.
+        """
+        sp_entity_id = self._require_entityid()
+        deadline = _logout_deadline(expire)
+        if deadline is not None and deadline <= datetime.now(timezone.utc):
+            raise LogoutError("the requested logout expiry has already passed")
+        core_name_id = name_id.to_core()
+        should_sign = self.config.logout_requests_signed if sign is None else bool(sign)
+        signer = self._get_signer() if should_sign else None
+        signature_algorithm = sign_alg or self.config.signing_algorithm
+        if signer is not None and signature_algorithm is None:
+            signature_algorithm = signer.signature_method_uri()
+
+        preferred = list(self.config.preferred_binding["single_logout_service"])
+        candidates = []
+        for candidate in ([expected_binding] if expected_binding else []) + preferred:
+            if candidate in (BINDING_HTTP_REDIRECT, BINDING_HTTP_POST):
+                if candidate not in candidates:
+                    candidates.append(candidate)
+
+        selected_endpoints: list[tuple[str, str, str]] = []
+        unhandled: list[str] = []
+        for idp in entity_ids:
+            selected: tuple[str, str] | None = None
+            for candidate in candidates:
+                try:
+                    selected = (
+                        candidate,
+                        self.config.single_logout_service(idp, candidate),
+                    )
+                    break
+                except ValueError:
+                    continue
+            if selected is None:
+                unhandled.append(idp)
+            else:
+                selected_endpoints.append((idp, *selected))
+        if unhandled:
+            raise LogoutError(f"no configured SLO endpoint for {unhandled!r}")
+
+        responses: dict[str, tuple[str, dict[str, Any]]] = {}
+        for idp, binding, slo_url in selected_endpoints:
+            session_indexes: list[str] | None = None
+            if self.users is not None:
+                getter = getattr(self.users, "get_info_from", None)
+                if callable(getter):
+                    try:
+                        info = getter(name_id, idp, False) or {}
+                    except KeyError:
+                        info = {}
+                    session_index = info.get("session_index")
+                    session_indexes = [session_index] if session_index else None
+
             options = _logout.SpLogoutRequestOptions(
                 sp_entity_id=sp_entity_id,
                 name_id=core_name_id,
+                session_indexes=session_indexes,
                 reason=reason or None,
                 destination=slo_url,
+                not_on_or_after=deadline,
             )
-            request = _logout.create_sp_logout_request(options)
-            # redirect_encode requires a sig_alg whenever a signer is given;
-            # derive it from the signer's own signature method.
-            url = _bindings.redirect_encode(
-                request.to_xml().encode("utf-8"),
-                True,
-                slo_url,
-                signer=signer,
-                sig_alg=sig_alg,
-            )
-            out[idp] = (request.id, _redirect_http_info(url))
-        return out
+            try:
+                request = _logout.create_sp_logout_request(options)
+            except Exception as exc:
+                raise LogoutError(f"could not create LogoutRequest for {idp}: {exc}") from exc
+
+            xml = request.to_xml()
+            relay_state = request.id
+            if binding == BINDING_HTTP_REDIRECT:
+                url = _bindings.redirect_encode(
+                    xml.encode("utf-8"),
+                    True,
+                    slo_url,
+                    relay_state=relay_state,
+                    signer=signer,
+                    sig_alg=signature_algorithm,
+                )
+                http_info = _redirect_http_info(url)
+            elif binding == BINDING_HTTP_POST:
+                if signer is not None:
+                    xml = _sign_enveloped_request(
+                        xml,
+                        request.id,
+                        signer,
+                        signature_algorithm,
+                        digest_alg or self.config.digest_algorithm,
+                    )
+                html = _bindings.post_encode(
+                    xml.encode("utf-8"), True, slo_url, relay_state=relay_state
+                )
+                http_info = _post_http_info(slo_url, html)
+            else:
+                continue
+
+            # A later request creates a fresh client around the same session
+            # adapter. Persist local state needed to authenticate correlation.
+            self.state[request.id] = {
+                "entity_id": idp,
+                "operation": "SLO",
+                "name_id": code(name_id),
+                "binding": binding,
+                "reason": reason,
+                # Django's default JSON session serializer cannot persist a
+                # datetime object; keep the state cache transport-neutral.
+                "not_on_or_after": deadline.isoformat() if deadline else None,
+                "sign": should_sign,
+            }
+            responses[idp] = (binding, http_info)
+
+        sync = getattr(self.state, "sync", None)
+        if callable(sync):
+            sync()
+        return responses
+
+    def _verify_logout_response_signature(
+        self,
+        xml: str,
+        parsed: Any,
+        expected_idp: str,
+        binding: str,
+        kwargs: dict[str, Any],
+    ) -> None:
+        """Verify an enveloped or detached signature over a LogoutResponse."""
+        try:
+            certs = self.config.idp_signing_certs(expected_idp)
+        except ValueError as exc:
+            raise MissingKey(str(exc)) from exc
+        if not certs:
+            raise MissingKey(f"no signing certificate configured for {expected_idp!r}")
+        try:
+            verifiers = [SamlVerifier.from_cert(cert) for cert in certs]
+        except Exception as exc:
+            raise MissingKey(
+                f"invalid signing certificate configured for {expected_idp!r}: {exc}"
+            ) from exc
+        verified = False
+
+        sig_alg = kwargs.get("sig_alg") or kwargs.get("sigalg")
+        signature = kwargs.get("signature")
+        signed_query = kwargs.get("signed_query")
+        if binding == BINDING_HTTP_REDIRECT and any((sig_alg, signature, signed_query)):
+            if not (sig_alg and signature and signed_query):
+                raise SignatureError(
+                    "sig_alg, signature and signed_query are all required for Redirect verification"
+                )
+            params = {
+                urllib.parse.unquote(key): urllib.parse.unquote(value)
+                for key, _, value in (
+                    part.partition("=") for part in signed_query.split("&")
+                )
+            }
+            if params.get("SigAlg") != sig_alg or "SAMLResponse" not in params:
+                raise SignatureError("signed query does not describe this LogoutResponse")
+            try:
+                query_xml = self._decode_message(
+                    params["SAMLResponse"], BINDING_HTTP_REDIRECT
+                )
+            except Exception as exc:
+                raise SignatureError(
+                    f"could not decode signed Redirect LogoutResponse: {exc}"
+                ) from exc
+            if query_xml != xml:
+                raise SignatureError("signed query carries a different LogoutResponse")
+            try:
+                raw_signature = base64.b64decode(signature, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise SignatureError(f"invalid Redirect signature encoding: {exc}") from exc
+            for verifier in verifiers:
+                try:
+                    if verifier.verify_redirect_query(
+                        signed_query.encode("utf-8"), raw_signature, sig_alg
+                    ):
+                        verified = True
+                        break
+                except Exception:
+                    continue
+
+        # Requiring the root ID among verified references prevents a wrapped
+        # sibling element from authenticating the consumed LogoutResponse.
+        for verifier in verifiers:
+            try:
+                results = verifier.verify_all_enveloped(xml)
+            except Exception:
+                continue
+            if results and all(result.is_valid() for result in results):
+                signed_ids = {
+                    reference
+                    for result in results
+                    for reference in result.signed_reference_ids()
+                }
+                if parsed.id in signed_ids:
+                    verified = True
+                    break
+        if not verified:
+            raise SignatureError("LogoutResponse signature is missing or invalid")
 
     def parse_logout_request_response(
         self, response: str, binding: str = BINDING_HTTP_REDIRECT, **kwargs: Any
     ) -> LogoutResponse:
-        xml = self._decode_message(response, binding)
-        parsed = _xml.parse_logout_response(xml)
-        return LogoutResponse(parsed.is_success(), in_response_to=parsed.in_response_to)
+        """Authenticate, correlate, and adapt an IdP LogoutResponse.
+
+        Correlation is enforced whenever a state cache was supplied. Signed
+        production configurations additionally require a detached Redirect
+        signature or an enveloped XML signature.
+        """
+        try:
+            xml = self._decode_message(response, binding)
+            parsed = _xml.parse_logout_response(xml)
+        except Exception as exc:
+            raise StatusError(f"could not parse LogoutResponse: {exc}") from exc
+
+        request_id = parsed.in_response_to
+        state = self.state.get(request_id) if request_id is not None else None
+        if self.state_cache is not None and state is None:
+            raise StatusError(
+                f"LogoutResponse InResponseTo {request_id!r} is not outstanding"
+            )
+        expected_idp = kwargs.get("expected_idp")
+        if expected_idp is None and state is not None:
+            expected_idp = state.get("entity_id")
+        expected_idp = expected_idp or self.config.only_idp()
+        if expected_idp is None:
+            raise StatusError("cannot determine the IdP for LogoutResponse")
+        issuer = parsed.issuer.value if parsed.issuer is not None else None
+        if issuer != expected_idp:
+            raise StatusError(
+                f"LogoutResponse issuer {issuer!r} does not match {expected_idp!r}"
+            )
+
+        # The hardened native parser already rejected DTD/entity constructs.
+        # ElementTree reads only a root attribute missing from the native value.
+        import xml.etree.ElementTree as ET
+
+        destination = ET.fromstring(xml).attrib.get("Destination")
+        if destination is not None:
+            local_destinations = {
+                url
+                for url, endpoint_binding in self.config.slo_endpoints
+                if endpoint_binding == binding
+            }
+            if destination not in local_destinations:
+                raise StatusError(
+                    f"LogoutResponse Destination {destination!r} is not a local SLO endpoint"
+                )
+        if self.config.want_logout_response_signed:
+            try:
+                self._verify_logout_response_signature(
+                    xml, parsed, expected_idp, binding, kwargs
+                )
+            except (MissingKey, SignatureError) as exc:
+                raise StatusError(
+                    f"LogoutResponse signature verification failed: {exc}"
+                ) from exc
+        if not parsed.is_success():
+            raise StatusError("LogoutResponse status is not Success")
+        if state is not None and request_id is not None:
+            del self.state[request_id]
+            sync = getattr(self.state, "sync", None)
+            if callable(sync):
+                sync()
+        return LogoutResponse(True, in_response_to=request_id)
 
     def handle_logout_request(
         self,
@@ -568,16 +1208,7 @@ class Saml2Client:
         XML-DSig is verified directly.
         """
         sp_entity_id = self._require_entityid()
-        # The expected IdP must be trusted, never taken from the unverified
-        # request Issuer: with several IdPs that would let a signed request from
-        # an unintended (but known) IdP authorize a logout. Use an explicit
-        # caller hint or the unambiguous configured IdP; otherwise refuse.
         expected_idp = kwargs.get("expected_idp") or self.config.only_idp()
-        if expected_idp is None:
-            raise ValueError(
-                "Cannot determine the expected IdP for LogoutRequest processing: "
-                "more than one IdP is configured/known. Pass expected_idp=<entity id>."
-            )
         # Decode, parse, verify, and validate inside one guard so transport/XML
         # failures (bad base64/DEFLATE/UTF-8, non-XML), signature failures, and
         # validation failures all surface uniformly as
@@ -591,6 +1222,17 @@ class Saml2Client:
         try:
             xml = self._decode_message(request, binding)
             parsed = _xml.parse_logout_request(xml)
+            if expected_idp is None:
+                issuer = parsed.issuer.value if parsed.issuer is not None else None
+                known_idps = set(self.config.idp) | set(self.config.metadata)
+                if issuer not in known_idps:
+                    raise ValueError(
+                        "Cannot determine a configured IdP for LogoutRequest processing"
+                    )
+                # As with AuthnResponse processing, the issuer selects only a
+                # configured trust anchor. Signature verification below must
+                # authenticate the exact request before that issuer is trusted.
+                expected_idp = issuer
             # Destination binding: a present Destination must name one of THIS
             # SP's configured SLO endpoints for the received binding. Without
             # this, a request validly signed by the trusted IdP but addressed
@@ -695,16 +1337,66 @@ class Saml2Client:
             raise ValueError(
                 "LogoutRequest replay detected: this request ID was already processed"
             )
-        issuer = parsed.issuer.value if parsed.issuer is not None else self.config.only_idp()
-        slo_url = self.config.single_logout_service(issuer, BINDING_HTTP_REDIRECT)
+        issuer = parsed.issuer.value if parsed.issuer is not None else expected_idp
+        response_bindings = {
+            BINDING_HTTP_POST: [BINDING_HTTP_POST, BINDING_HTTP_REDIRECT],
+            BINDING_HTTP_REDIRECT: [BINDING_HTTP_REDIRECT, BINDING_HTTP_POST],
+        }.get(binding)
+        if response_bindings is None:
+            raise UnsupportedBinding(
+                f"unsupported binding for LogoutResponse: {binding}"
+            )
+        response_binding = None
+        slo_url = None
+        for candidate in response_bindings:
+            try:
+                slo_url = self.config.single_logout_response_service(
+                    issuer, candidate
+                )
+                response_binding = candidate
+                break
+            except ValueError:
+                continue
+        if response_binding is None or slo_url is None:
+            raise UnsupportedBinding(
+                f"no supported SingleLogoutService response endpoint for {issuer!r}"
+            )
         resp = _logout.create_logout_response_success(
             sp_entity_id, parsed.id, destination=slo_url
         )
+        response_signer = (
+            self._get_signer() if self.config.logout_responses_signed else None
+        )
+        xml = resp.to_xml()
+        if response_binding == BINDING_HTTP_POST:
+            if response_signer is not None:
+                xml = _sign_enveloped_request(
+                    xml,
+                    resp.id,
+                    response_signer,
+                    self.config.signing_algorithm,
+                    self.config.digest_algorithm,
+                )
+            html = _bindings.post_encode(
+                xml.encode("utf-8"),
+                False,
+                slo_url,
+                relay_state=relay_state or None,
+            )
+            return _post_http_info(slo_url, html)
+
+        response_sig_alg = None
+        if response_signer is not None:
+            response_sig_alg = (
+                self.config.signing_algorithm or response_signer.signature_method_uri()
+            )
         url = _bindings.redirect_encode(
-            resp.to_xml().encode("utf-8"),
+            xml.encode("utf-8"),
             False,
             slo_url,
             relay_state=relay_state or None,
+            signer=response_signer,
+            sig_alg=response_sig_alg,
         )
         return _redirect_http_info(url)
 
@@ -756,7 +1448,7 @@ class Saml2Client:
         # a known IdP without metadata keys could have a partial tuple
         # accepted as "unsigned". A genuinely unsigned request (no signature
         # fields at all) may still reach the fallback.
-        sig_alg = kwargs.get("sig_alg")
+        sig_alg = kwargs.get("sig_alg") or kwargs.get("sigalg")
         signature = kwargs.get("signature")
         signed_query = kwargs.get("signed_query")
         if (

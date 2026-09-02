@@ -10,7 +10,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from . import SAMLError
+
+
+class MissingKey(SAMLError):
+    """No trusted verification key is available for the peer."""
+
 
 def get_xmlsec_binary(paths: Any = None) -> None:
     """No-op: pygamlastan signs/verifies in-process, with no xmlsec1 binary."""
     return None
+
+
+__all__ = ["MissingKey", "get_xmlsec_binary"]

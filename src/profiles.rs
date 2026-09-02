@@ -8,7 +8,8 @@ use pyo3::types::PyModule;
 
 use gamlastan::core::assertion::name_id::NameIdOrEncryptedId;
 use gamlastan::core::assertion::types::Assertion as GAssertion;
-use gamlastan::core::protocol::request::AuthnContextComparison;
+use gamlastan::core::identifiers::SamlId;
+use gamlastan::core::protocol::request::{AuthnContextComparison, Scoping};
 use gamlastan::core::protocol::response::Response as GResponse;
 use gamlastan::core::protocol::ResponseRef;
 use gamlastan::profiles::sso::{idp as gidp, sp as gsp, web_browser as gwb};
@@ -262,6 +263,9 @@ fn process_response_with_stores(
 #[pyclass(module = "pygamlastan.profiles", name = "AuthnRequestOptions")]
 pub struct AuthnRequestOptions {
     inner: gwb::AuthnRequestOptions,
+    allow_create: Option<bool>,
+    idp_list: Vec<String>,
+    request_id: Option<SamlId>,
 }
 
 #[pymethods]
@@ -272,7 +276,7 @@ impl AuthnRequestOptions {
         force_authn=None, is_passive=None, name_id_format=None, allow_create=true,
         sp_name_qualifier=None, authn_context_class_refs=None, authn_context_comparison=None,
         provider_name=None, destination=None, proxy_count=None, requester_ids=None,
-        attribute_consuming_service_index=None, extensions=None,
+        attribute_consuming_service_index=None, extensions=None, idp_list=None, request_id=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -283,7 +287,7 @@ impl AuthnRequestOptions {
         force_authn: Option<bool>,
         is_passive: Option<bool>,
         name_id_format: Option<String>,
-        allow_create: bool,
+        allow_create: Option<bool>,
         sp_name_qualifier: Option<String>,
         authn_context_class_refs: Option<Vec<String>>,
         authn_context_comparison: Option<String>,
@@ -293,6 +297,8 @@ impl AuthnRequestOptions {
         requester_ids: Option<Vec<String>>,
         attribute_consuming_service_index: Option<u16>,
         extensions: Option<String>,
+        idp_list: Option<Vec<String>>,
+        request_id: Option<String>,
     ) -> PyResult<Self> {
         let o = gwb::AuthnRequestOptions {
             sp_entity_id,
@@ -302,7 +308,7 @@ impl AuthnRequestOptions {
             force_authn,
             is_passive,
             name_id_format,
-            allow_create,
+            allow_create: allow_create.unwrap_or(false),
             sp_name_qualifier,
             authn_context_class_refs: authn_context_class_refs.unwrap_or_default(),
             authn_context_comparison: parse_comparison(authn_context_comparison)?,
@@ -313,14 +319,46 @@ impl AuthnRequestOptions {
             attribute_consuming_service_index,
             extensions,
         };
-        Ok(AuthnRequestOptions { inner: o })
+        Ok(AuthnRequestOptions {
+            inner: o,
+            allow_create,
+            idp_list: idp_list.unwrap_or_default(),
+            request_id: request_id
+                .map(SamlId::from_string)
+                .transpose()
+                .map_err(profile_err)?,
+        })
     }
 }
 
 /// Build a SAML AuthnRequest (unsigned) from options.
 #[pyfunction]
 fn create_authn_request(options: &AuthnRequestOptions) -> PyResult<AuthnRequest> {
-    let req = gsp::create_authn_request(&options.inner).map_err(profile_err)?;
+    let mut req = gsp::create_authn_request(&options.inner).map_err(profile_err)?;
+    if let Some(policy) = req.name_id_policy.as_mut() {
+        // gamlastan represents an omitted AllowCreate as false and its XML
+        // serializer omits false values. Keep the Python-facing Option until
+        // request construction so callers can deliberately request omission.
+        policy.allow_create = options.allow_create.unwrap_or(false);
+    }
+    if let Some(request_id) = &options.request_id {
+        // Compatibility consumers sometimes persist and later extract the ID
+        // using pysaml2's historical alphanumeric/hyphen grammar. Keep the
+        // native random default unless a caller explicitly supplies an ID.
+        req.base.id = request_id.as_str().to_string();
+    }
+    if !options.idp_list.is_empty() {
+        match req.scoping.as_mut() {
+            Some(scoping) => scoping.idp_list = options.idp_list.clone(),
+            None => {
+                req.scoping = Some(Scoping {
+                    proxy_count: None,
+                    idp_list: options.idp_list.clone(),
+                    requester_ids: Vec::new(),
+                });
+            }
+        }
+    }
     Ok(AuthnRequest::wrap(req))
 }
 

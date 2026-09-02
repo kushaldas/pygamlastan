@@ -15,7 +15,7 @@ class AuthnRequestOptions:
         force_authn: bool | None = ...,
         is_passive: bool | None = ...,
         name_id_format: str | None = ...,
-        allow_create: bool = ...,
+        allow_create: bool | None = ...,
         sp_name_qualifier: str | None = ...,
         authn_context_class_refs: list[str] | None = ...,
         authn_context_comparison: str | None = ...,
@@ -25,6 +25,8 @@ class AuthnRequestOptions:
         requester_ids: list[str] | None = ...,
         attribute_consuming_service_index: int | None = ...,
         extensions: str | None = ...,
+        idp_list: list[str] | None = ...,
+        request_id: str | None = ...,
     ) -> None: ...
 
 class AuthnResult:
