@@ -141,6 +141,27 @@ def _signed_logout_response(req_id: str, cert_b64: str, private_key: bytes) -> s
     return crypto.SamlSigner.from_pem(private_key).sign_enveloped(templated)
 
 
+def _redirect_signed_logout_response(
+    req_id: str, private_key: bytes, relay_state: str | None = None
+) -> tuple[str, str, str, str]:
+    """Build the exact detached-signature inputs for a Redirect response."""
+    signer = crypto.SamlSigner.from_pem(private_key)
+    sig_alg = signer.signature_method_uri()
+    encoded = deflate_and_base64_encode(_logout_response(req_id))
+    parts = ["SAMLResponse=" + urllib.parse.quote(encoded, safe="")]
+    if relay_state is not None:
+        parts.append("RelayState=" + urllib.parse.quote(relay_state, safe=""))
+    parts.append("SigAlg=" + urllib.parse.quote(sig_alg, safe=""))
+    signed_query = "&".join(parts)
+    signature = signer.sign_redirect_query(signed_query.encode("utf-8"), sig_alg)
+    return (
+        encoded,
+        sig_alg,
+        base64.b64encode(signature).decode("ascii"),
+        signed_query,
+    )
+
+
 def _logout_request(
     req_id: str,
     issuer: str = IDP,
@@ -658,16 +679,109 @@ def test_signed_logout_response_is_verified_and_correlated(rsa_keypair, tmp_path
 
 
 def test_signed_logout_response_policy_rejects_unsigned(rsa_keypair, tmp_path):
-    """An unsigned response cannot consume outstanding signed-SLO state."""
+    """Unsigned responses become StatusError without consuming SLO state."""
     _private_key, _cert_pem, cert_der_b64 = rsa_keypair
     base = _signed_client(tmp_path, cert_der_b64)
     base.config.want_logout_response_signed = True
     state = {"request-id": {"entity_id": IDP}}
     client = Saml2Client(base.config, state_cache=state)
     encoded = deflate_and_base64_encode(_logout_response("request-id"))
-    with pytest.raises(AssertionError):
+    with pytest.raises(StatusError, match="signature verification failed"):
         client.parse_logout_request_response(encoded)
     assert "request-id" in state
+
+
+def test_detached_redirect_logout_response_is_verified(rsa_keypair, tmp_path):
+    """A valid exact Redirect query authenticates and consumes correlation state."""
+    private_key, _cert_pem, cert_der_b64 = rsa_keypair
+    base = _signed_client(tmp_path, cert_der_b64)
+    base.config.want_logout_response_signed = True
+    state = {"redirect-response": {"entity_id": IDP}}
+    signed_client = Saml2Client(base.config, state_cache=state)
+    encoded, sig_alg, signature, signed_query = _redirect_signed_logout_response(
+        "redirect-response", private_key, relay_state="relay value"
+    )
+
+    response = signed_client.parse_logout_request_response(
+        encoded,
+        BINDING_HTTP_REDIRECT,
+        sig_alg=sig_alg,
+        signature=signature,
+        signed_query=signed_query,
+    )
+
+    assert response.status_ok()
+    assert "redirect-response" not in state
+
+
+def test_tampered_redirect_logout_response_retains_state(rsa_keypair, tmp_path):
+    """A tampered detached signature becomes StatusError and preserves state."""
+    private_key, _cert_pem, cert_der_b64 = rsa_keypair
+    base = _signed_client(tmp_path, cert_der_b64)
+    base.config.want_logout_response_signed = True
+    state = {"tampered-response": {"entity_id": IDP}}
+    signed_client = Saml2Client(base.config, state_cache=state)
+    encoded, sig_alg, signature, signed_query = _redirect_signed_logout_response(
+        "tampered-response", private_key
+    )
+    tampered = bytearray(base64.b64decode(signature))
+    tampered[0] ^= 1
+
+    with pytest.raises(StatusError, match="signature verification failed"):
+        signed_client.parse_logout_request_response(
+            encoded,
+            BINDING_HTTP_REDIRECT,
+            sig_alg=sig_alg,
+            signature=base64.b64encode(tampered).decode("ascii"),
+            signed_query=signed_query,
+        )
+
+    assert "tampered-response" in state
+
+
+def test_incomplete_redirect_logout_signature_retains_state(rsa_keypair, tmp_path):
+    """A partial detached-signature tuple fails without consuming state."""
+    private_key, _cert_pem, cert_der_b64 = rsa_keypair
+    base = _signed_client(tmp_path, cert_der_b64)
+    base.config.want_logout_response_signed = True
+    state = {"incomplete-response": {"entity_id": IDP}}
+    signed_client = Saml2Client(base.config, state_cache=state)
+    encoded, sig_alg, _signature, signed_query = _redirect_signed_logout_response(
+        "incomplete-response", private_key
+    )
+
+    with pytest.raises(StatusError, match="all required"):
+        signed_client.parse_logout_request_response(
+            encoded,
+            BINDING_HTTP_REDIRECT,
+            sig_alg=sig_alg,
+            signed_query=signed_query,
+        )
+
+    assert "incomplete-response" in state
+
+
+def test_logout_response_missing_key_is_statuserror(client):
+    """A missing response verification key is compatible with LogoutView."""
+    client.config.want_logout_response_signed = True
+    client.state_cache = client.state = {
+        "missing-key-response": {"entity_id": IDP}
+    }
+    encoded = deflate_and_base64_encode(_logout_response("missing-key-response"))
+
+    with pytest.raises(StatusError, match="signature verification failed"):
+        client.parse_logout_request_response(encoded)
+
+    assert "missing-key-response" in client.state
+
+
+def test_consumed_logout_response_is_statuserror(client):
+    """A stale correlation failure follows djangosaml2's handled error path."""
+    client.state_cache = client.state = {}
+    encoded = deflate_and_base64_encode(_logout_response("already-consumed"))
+
+    with pytest.raises(StatusError, match="not outstanding"):
+        client.parse_logout_request_response(encoded)
 
 
 def test_handle_logout_request_redirects_to_idp(client):

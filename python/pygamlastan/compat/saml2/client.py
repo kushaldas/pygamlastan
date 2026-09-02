@@ -1028,7 +1028,14 @@ class Saml2Client:
             certs = self.config.idp_signing_certs(expected_idp)
         except ValueError as exc:
             raise MissingKey(str(exc)) from exc
-        verifiers = [SamlVerifier.from_cert(cert) for cert in certs]
+        if not certs:
+            raise MissingKey(f"no signing certificate configured for {expected_idp!r}")
+        try:
+            verifiers = [SamlVerifier.from_cert(cert) for cert in certs]
+        except Exception as exc:
+            raise MissingKey(
+                f"invalid signing certificate configured for {expected_idp!r}: {exc}"
+            ) from exc
         verified = False
 
         sig_alg = kwargs.get("sig_alg") or kwargs.get("sigalg")
@@ -1047,9 +1054,14 @@ class Saml2Client:
             }
             if params.get("SigAlg") != sig_alg or "SAMLResponse" not in params:
                 raise SignatureError("signed query does not describe this LogoutResponse")
-            query_xml = self._decode_message(
-                params["SAMLResponse"], BINDING_HTTP_REDIRECT
-            )
+            try:
+                query_xml = self._decode_message(
+                    params["SAMLResponse"], BINDING_HTTP_REDIRECT
+                )
+            except Exception as exc:
+                raise SignatureError(
+                    f"could not decode signed Redirect LogoutResponse: {exc}"
+                ) from exc
             if query_xml != xml:
                 raise SignatureError("signed query carries a different LogoutResponse")
             try:
@@ -1103,7 +1115,7 @@ class Saml2Client:
         request_id = parsed.in_response_to
         state = self.state.get(request_id) if request_id is not None else None
         if self.state_cache is not None and state is None:
-            raise UnsolicitedResponse(
+            raise StatusError(
                 f"LogoutResponse InResponseTo {request_id!r} is not outstanding"
             )
         expected_idp = kwargs.get("expected_idp")
@@ -1134,9 +1146,14 @@ class Saml2Client:
                     f"LogoutResponse Destination {destination!r} is not a local SLO endpoint"
                 )
         if self.config.want_logout_response_signed:
-            self._verify_logout_response_signature(
-                xml, parsed, expected_idp, binding, kwargs
-            )
+            try:
+                self._verify_logout_response_signature(
+                    xml, parsed, expected_idp, binding, kwargs
+                )
+            except (MissingKey, SignatureError) as exc:
+                raise StatusError(
+                    f"LogoutResponse signature verification failed: {exc}"
+                ) from exc
         if not parsed.is_success():
             raise StatusError("LogoutResponse status is not Success")
         if state is not None and request_id is not None:
