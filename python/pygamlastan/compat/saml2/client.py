@@ -121,8 +121,8 @@ def _sign_enveloped_request(
     return signer.sign_enveloped(templated)
 
 
-def _legacy_nil_attributes(xml: str) -> list[Any]:
-    """Recover text from contradictory ``xsi:nil=true`` AttributeValues.
+def _legacy_nil_attributes(xml: str, assertion_id: str) -> list[Any]:
+    """Recover contradictory nil values from the authenticated assertion.
 
     Older pysaml2 accepted an ``AttributeValue`` that simultaneously declared
     itself nil and contained text.  A schema-aware parser correctly represents
@@ -140,8 +140,16 @@ def _legacy_nil_attributes(xml: str) -> list[Any]:
     assertion_namespace = "urn:oasis:names:tc:SAML:2.0:assertion"
     nil_attribute = "{http://www.w3.org/2001/XMLSchema-instance}nil"
     root = ElementTree.fromstring(xml)
+    matching_assertions = [
+        item
+        for item in root.iter(f"{{{assertion_namespace}}}Assertion")
+        if item.get("ID") == assertion_id
+    ]
+    if len(matching_assertions) != 1:
+        return []
+    assertion = matching_assertions[0]
     recovered: list[Any] = []
-    for attribute in root.iter(f"{{{assertion_namespace}}}Attribute"):
+    for attribute in assertion.iter(f"{{{assertion_namespace}}}Attribute"):
         wire_name = attribute.get("Name")
         if not wire_name:
             continue
@@ -829,7 +837,7 @@ class Saml2Client:
             in_response_to,
             assertion=assertion,
             came_from=came_from,
-            legacy_attributes=_legacy_nil_attributes(xml),
+            legacy_attributes=_legacy_nil_attributes(xml, result.assertion_id),
         )
         if self.identity_cache is not None:
             session_info = wrapped.session_info()
@@ -888,8 +896,8 @@ class Saml2Client:
         if not candidate_idps:
             candidate_idps = list(self.config.idp) + [
                 entity_id
-                for entity_id in self.config.metadata
-                if entity_id not in self.config.idp
+                for entity_id, entity in self.config.metadata.items()
+                if entity.is_idp() and entity_id not in self.config.idp
             ]
         return self.do_logout(
             name_id,
@@ -1025,6 +1033,9 @@ class Saml2Client:
             }
             responses[idp] = (binding, http_info)
 
+        sync = getattr(self.state, "sync", None)
+        if callable(sync):
+            sync()
         return responses
 
     def _verify_logout_response_signature(
@@ -1170,6 +1181,9 @@ class Saml2Client:
             raise StatusError("LogoutResponse status is not Success")
         if state is not None and request_id is not None:
             del self.state[request_id]
+            sync = getattr(self.state, "sync", None)
+            if callable(sync):
+                sync()
         return LogoutResponse(True, in_response_to=request_id)
 
     def handle_logout_request(

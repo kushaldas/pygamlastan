@@ -544,7 +544,7 @@ def test_identity_cache_uses_conditions_expiry_without_session_expiry():
 
 
 def test_response_adapter_uses_the_processed_authn_assertion(monkeypatch, client):
-    """The djangosaml2-facing assertion matches the one selected natively."""
+    """Adapters and legacy recovery use only the natively selected assertion."""
     session_id, _ = client.prepare_for_authenticate(
         entityid=IDP, binding=BINDING_HTTP_REDIRECT
     )
@@ -555,14 +555,14 @@ def test_response_adapter_uses_the_processed_authn_assertion(monkeypatch, client
     <saml:Issuer Format="urn:oasis:names:tc:SAML:2.0:nameid-format:entity">{IDP}</saml:Issuer>
     <saml:AttributeStatement>
       <saml:Attribute Name="urn:oid:0.9.2342.19200300.100.1.3" NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:uri">
-        <saml:AttributeValue>attribute-only@example.org</saml:AttributeValue>
+        <saml:AttributeValue xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:nil="true">attribute-only@example.org</saml:AttributeValue>
       </saml:Attribute>
     </saml:AttributeStatement>
   </saml:Assertion>
   """
     xml = xml.replace("  <saml:Assertion ", f"  {attribute_only}<saml:Assertion ", 1)
     raw = base64.b64encode(xml.encode("utf-8")).decode("ascii")
-    result = SimpleNamespace(assertion_id=authenticated_id)
+    result = SimpleNamespace(assertion_id=authenticated_id, attributes=[])
     monkeypatch.setattr(
         "pygamlastan.compat.saml2.client._profiles.process_response",
         lambda *args, **kwargs: result,
@@ -574,6 +574,7 @@ def test_response_adapter_uses_the_processed_authn_assertion(monkeypatch, client
 
     assert response.assertion.id == authenticated_id
     assert response.assertion.subject is not None
+    assert response.ava == {}
 
 
 def test_parse_authn_response_unsolicited_rejected(client):
@@ -664,20 +665,41 @@ def test_global_logout_rejects_expired_deadline(client):
 
 def test_global_logout_persists_and_consumes_correlation_state():
     """djangosaml2's session state adapter correlates a real LogoutResponse."""
-    state: dict[str, dict[str, str]] = {}
-    client = Saml2Client(SPConfig().load(CONF), state_cache=state)
+    session: dict[str, dict[str, object]] = {}
+
+    class SessionState(dict):
+        """Snapshot adapter matching djangosaml2's explicit sync behavior."""
+
+        def __init__(self) -> None:
+            super().__init__(session.get("state", {}))
+            self.sync_calls = 0
+
+        def sync(self) -> None:
+            session["state"] = dict(self)
+            self.sync_calls += 1
+
+    request_state = SessionState()
+    client = Saml2Client(SPConfig().load(CONF), state_cache=request_state)
     nid = NameID(text="abc123hash", format=TRANSIENT, sp_name_qualifier=SP)
     binding, info = client.global_logout(nid)[IDP]
     assert binding == BINDING_HTTP_REDIRECT
     query = dict(info["headers"])["Location"].split("?", 1)[1]
     request = pgbindings.redirect_decode(query)
     request_id = pgxml.parse_logout_request(request.saml_text).id
-    assert state[request_id]["entity_id"] == IDP
+    assert request_state.sync_calls == 1
+    assert session["state"][request_id]["entity_id"] == IDP
 
     encoded = deflate_and_base64_encode(_logout_response(request_id))
-    response = client.parse_logout_request_response(encoded, BINDING_HTTP_REDIRECT)
+    response_state = SessionState()
+    response_client = Saml2Client(
+        SPConfig().load(CONF), state_cache=response_state
+    )
+    response = response_client.parse_logout_request_response(
+        encoded, BINDING_HTTP_REDIRECT
+    )
     assert response.status_ok()
-    assert request_id not in state
+    assert response_state.sync_calls == 1
+    assert request_id not in session["state"]
 
 
 def test_create_authn_request_adapts_djangosaml2_scoping(client):
@@ -1869,6 +1891,36 @@ def test_global_logout_discovers_metadata_only_idp(tmp_path):
     logouts = client.global_logout(nid)
     assert IDP in logouts
     assert dict(logouts[IDP][1]["headers"])["Location"].startswith(IDPSLO)
+
+
+def test_global_logout_ignores_sp_descriptors_in_metadata_fallback(tmp_path):
+    """Federation SP entries are not treated as logout target IdPs."""
+    idp_xml = _idp_metadata("dummybase64==").split("?>", 1)[1]
+    sp_xml = entity_descriptor(SPConfig().load(CONF)).to_xml().split("?>", 1)[-1]
+    aggregate = f"""<md:EntitiesDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata">
+{idp_xml}
+{sp_xml}
+</md:EntitiesDescriptor>"""
+    md_path = tmp_path / "aggregate.xml"
+    md_path.write_text(aggregate, encoding="utf-8")
+    conf = {
+        "entityid": SP,
+        "service": {
+            "sp": {
+                "endpoints": {
+                    "assertion_consumer_service": [(ACS, BINDING_HTTP_POST)],
+                    "single_logout_service": [(SLO, BINDING_HTTP_REDIRECT)],
+                }
+            }
+        },
+        "metadata": {"local": [str(md_path)]},
+    }
+    client = Saml2Client(SPConfig().load(conf))
+    name_id = NameID(text="abc123hash", format=TRANSIENT, sp_name_qualifier=SP)
+
+    logouts = client.global_logout(name_id)
+
+    assert list(logouts) == [IDP]
 
 
 def test_spconfig_reload_clears_metadata(tmp_path):

@@ -403,11 +403,14 @@ onto pygamlastan's :doc:`safe entry points <security>`:
   is reachable **only** when the settings explicitly opt out of signatures. Never
   set this in production.
 
-With several configured IdPs, the claimed issuer may select only an already
-configured metadata entity. In signed mode the exact response must then verify
-against that entity's trusted certificates before the claim is used. Callers
-that record the selected IdP with the outstanding request can instead pass
-``expected_idp=<entity id>`` explicitly.
+With several configured IdPs, the response issuer is not allowed to select its
+own trust anchor. The caller must record the selected IdP with the outstanding
+request and pass that request-correlated value as ``expected_idp=<entity id>``.
+The default djangosaml2 outstanding-query cache stores only the return URL, so a
+multi-IdP integration must extend its login and ACS adapter to persist and pass
+the selected entity ID. Without that value the shim fails closed with
+``ValueError``; single-IdP configurations continue to resolve the IdP
+automatically.
 
 Replay / solicited-response protection is two-layered. The response's
 ``InResponseTo`` must be present in the ``outstanding`` set you pass in (an
