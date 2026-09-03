@@ -66,8 +66,19 @@ class MetadataStore(Mapping[str, EntityDescriptor]):
 
     def add_source(self, source: str, entities: list[EntityDescriptor]) -> None:
         """Register the entities parsed from one local metadata source."""
+        seen: set[str] = set()
+        duplicates: set[str] = set()
+        for entity in entities:
+            if entity.entity_id in seen:
+                duplicates.add(entity.entity_id)
+            seen.add(entity.entity_id)
+        if duplicates:
+            raise ValueError(
+                "duplicate metadata entity id(s): " + ", ".join(sorted(duplicates))
+            )
+
         local = _LocalMetadataSource(entities)
-        duplicates = set(local.entities).intersection(self._entities)
+        duplicates = seen.intersection(self._entities)
         if duplicates:
             raise ValueError(
                 "duplicate metadata entity id(s): " + ", ".join(sorted(duplicates))

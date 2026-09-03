@@ -19,7 +19,8 @@ from types import SimpleNamespace
 import pytest
 
 from pygamlastan import bindings as pgbindings
-from pygamlastan import crypto, metadata as md, security
+from pygamlastan import crypto, profiles, security
+from pygamlastan import metadata as md
 from pygamlastan import xml as pgxml
 from pygamlastan.compat import saml2
 from pygamlastan.compat.saml2 import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT
@@ -265,6 +266,51 @@ def _encrypted_signed_auth_response(req_id: str, cert_b64: str, priv: bytes) -> 
     return crypto.SamlSigner.from_pem(priv).sign_enveloped(templated)
 
 
+def _encrypted_assertion_signed_auth_response(
+    req_id: str, cert_b64: str, priv: bytes, *, pad_issuer: bool = False
+) -> str:
+    """Build an unsigned Response whose encrypted Assertion is signed."""
+    resp_id, assertion_id = _fresh_ids()
+    unsigned = _auth_response(req_id, resp_id=resp_id, assert_id=assertion_id)
+    assertion_start = unsigned.index("<saml:Assertion")
+    assertion_end = unsigned.index("</saml:Assertion>") + len("</saml:Assertion>")
+    assertion = unsigned[assertion_start:assertion_end].replace(
+        "<saml:Assertion ",
+        '<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ',
+        1,
+    )
+    if pad_issuer:
+        assertion = assertion.replace(f">{IDP}</saml:Issuer>", f">  {IDP}  </saml:Issuer>", 1)
+    issuer_end = assertion.index("</saml:Issuer>") + len("</saml:Issuer>")
+    templated = (
+        assertion[:issuer_end]
+        + _signature_template(assertion_id, cert_b64)
+        + assertion[issuer_end:]
+    )
+    signed_assertion = crypto.SamlSigner.from_pem(priv).sign_enveloped(templated)
+
+    template = (
+        '<xenc:EncryptedData xmlns:xenc="http://www.w3.org/2001/04/xmlenc#" '
+        'Type="http://www.w3.org/2001/04/xmlenc#Element">'
+        '<xenc:EncryptionMethod Algorithm="http://www.w3.org/2009/xmlenc11#aes256-gcm"/>'
+        '<ds:KeyInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#">'
+        '<xenc:EncryptedKey>'
+        '<xenc:EncryptionMethod Algorithm="http://www.w3.org/2001/04/xmlenc#rsa-oaep-mgf1p"/>'
+        '<xenc:CipherData><xenc:CipherValue/></xenc:CipherData>'
+        '</xenc:EncryptedKey></ds:KeyInfo>'
+        '<xenc:CipherData><xenc:CipherValue/></xenc:CipherData>'
+        '</xenc:EncryptedData>'
+    )
+    encrypted = crypto.SamlEncryptor.for_certificate(
+        base64.b64decode(cert_b64)
+    ).encrypt(template, signed_assertion.encode())
+    wrapper = (
+        '<saml:EncryptedAssertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">'
+        f"{encrypted}</saml:EncryptedAssertion>"
+    )
+    return unsigned[:assertion_start] + wrapper + unsigned[assertion_end:]
+
+
 def _assertion_signed_auth_response(req_id: str, cert_b64: str, priv: bytes) -> str:
     """The test AuthnResponse with only its Assertion directly signed."""
     resp_id, assertion_id = _fresh_ids()
@@ -479,6 +525,20 @@ def test_metadata_store_has_djangosaml2_query_shape(tmp_path):
         BINDING_HTTP_POST,
     ) == []
     assert IDP in cfg.metadata.with_descriptor("idpsso")
+
+
+def test_metadata_store_rejects_duplicate_ids_within_one_aggregate(tmp_path):
+    entity = _idp_metadata().split("?>", 1)[1]
+    aggregate = f"""<md:EntitiesDescriptor
+        xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata">
+      {entity}
+      {entity}
+    </md:EntitiesDescriptor>"""
+    path = tmp_path / "duplicate-entities.xml"
+    path.write_text(aggregate, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=f"duplicate metadata entity id.*{IDP}"):
+        SPConfig().load({"metadata": {"local": [str(path)]}})
 
 
 def test_missing_metadata_file_raises_source_not_found(tmp_path):
@@ -1392,6 +1452,63 @@ def test_signed_encrypted_assertion_is_decrypted_and_validated(rsa_keypair, tmp_
     )
     assert response.ava["eduPersonPrincipalName"] == ["hubba-bubba@eduid.se"]
     assert response.assertion.subject.name_id.text == "abc123hash"
+
+
+def test_encrypted_signed_assertion_satisfies_assertion_signature_policy(
+    rsa_keypair, tmp_path
+):
+    private_key, cert_pem, cert_der_b64 = rsa_keypair
+    key_path = tmp_path / "sp-encryption.key"
+    cert_path = tmp_path / "sp-encryption.crt"
+    key_path.write_bytes(private_key)
+    cert_path.write_bytes(cert_pem)
+
+    original = _signed_client(tmp_path, cert_der_b64).config
+    original.want_response_signed = False
+    original.want_assertions_signed = True
+    original.encryption_keypairs = [
+        {"key_file": str(key_path), "cert_file": str(cert_path)}
+    ]
+    client = Saml2Client(original)
+    session_id, _ = client.prepare_for_authenticate(binding=BINDING_HTTP_REDIRECT)
+    signed = _encrypted_assertion_signed_auth_response(
+        session_id, cert_der_b64, private_key, pad_issuer=True
+    )
+
+    raw = base64.b64encode(signed.encode()).decode()
+    response = client.parse_authn_request_response(
+        raw, BINDING_HTTP_POST, {session_id: "return"}
+    )
+    assert response.session_info()["issuer"] == IDP
+    assert response.ava["eduPersonPrincipalName"] == ["hubba-bubba@eduid.se"]
+
+
+def test_verified_encrypted_response_satisfies_encryption_requirement(rsa_keypair):
+    private_key, cert_pem, cert_der_b64 = rsa_keypair
+    request_id = "encrypted-required"
+    signed = _encrypted_assertion_signed_auth_response(
+        request_id, cert_der_b64, private_key
+    )
+    keys = crypto.KeysManager()
+    keys.add_key_pem(private_key, usage="decrypt")
+    config = security.SecurityConfig()
+    config.require_signed_responses = False
+    config.require_signed_assertions = True
+    config.require_encrypted_assertions = True
+
+    result = profiles.process_response_verified(
+        signed,
+        crypto.SamlVerifier.from_cert(cert_pem),
+        config,
+        SP,
+        ACS,
+        IDP,
+        expected_request_id=request_id,
+        replay_cache=security.InMemoryReplayCache(),
+        decryptor=crypto.SamlDecryptor(keys),
+        unsafe_no_persistent_id_store=True,
+    )
+    assert result.name_id == "abc123hash"
 
 
 def test_signed_response_unsigned_rejected(rsa_keypair, tmp_path):
@@ -3074,7 +3191,11 @@ def test_metadata_generation_includes_full_sp_contract(rsa_keypair, tmp_path):
             "url": [("https://sp.example.org", "en")],
         },
         "contact_person": [
-            {"contact_type": "technical", "email_address": "ops@example.org"}
+            {
+                "contact_type": "technical",
+                "email_address": ["ops@example.org", "security@example.org"],
+                "telephone_number": ["+46-1", "+46-2"],
+            }
         ],
     }
     xml = entity_descriptor(SPConfig().load(conf)).to_xml()
@@ -3088,6 +3209,10 @@ def test_metadata_generation_includes_full_sp_contract(rsa_keypair, tmp_path):
     assert len(entity.signing_certificates("sp")) == 1
     assert len(entity.encryption_certificates("sp")) == 1
     assert entity.name_id_formats("sp") == [TRANSIENT]
+    assert xml.count("<md:EmailAddress>") == 2
+    assert "<md:EmailAddress>ops@example.org</md:EmailAddress>" in xml
+    assert "<md:EmailAddress>security@example.org</md:EmailAddress>" in xml
+    assert xml.count("<md:TelephoneNumber>") == 2
 
 
 def test_signed_remote_metadata_is_verified_before_loading(
@@ -3140,6 +3265,14 @@ def test_signed_remote_metadata_is_verified_before_loading(
         "build_opener",
         lambda *_handlers: RemoteOpener(),
     )
+    native_parse_document = config_module._md.parse_document
+    parsed_bodies = []
+
+    def parse_document(value):
+        parsed_bodies.append(value)
+        return native_parse_document(value)
+
+    monkeypatch.setattr(config_module._md, "parse_document", parse_document)
     conf = {
         **CONF,
         "service": {
@@ -3161,6 +3294,85 @@ def test_signed_remote_metadata_is_verified_before_loading(
     loaded = SPConfig().load(conf)
     assert loaded.only_idp() == IDP
     assert loaded.idp_signing_certs(IDP)
+    assert parsed_bodies == [signed]
+
+
+def test_remote_metadata_accepts_root_signature_with_untrusted_child_signature(
+    rsa_keypair, rsa_keypair2, tmp_path, monkeypatch
+):
+    from pygamlastan.compat.saml2 import config as config_module
+
+    root_key, root_cert, root_cert_b64 = rsa_keypair
+    child_key, _child_cert, child_cert_b64 = rsa_keypair2
+    cert_path = tmp_path / "aggregate-signing.crt"
+    cert_path.write_bytes(root_cert)
+    valid_until = (datetime.now(timezone.utc) + timedelta(days=1)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+    child = _idp_metadata(child_cert_b64).split("?>", 1)[1]
+    child = child.replace(
+        f'entityID="{IDP}"', f'ID="child-root" entityID="{IDP}"', 1
+    )
+    insert_at = child.index(">", child.index("<md:EntityDescriptor")) + 1
+    child = crypto.SamlSigner.from_pem(child_key).sign_enveloped(
+        child[:insert_at]
+        + _signature_template("child-root", child_cert_b64)
+        + child[insert_at:]
+    )
+    aggregate = (
+        '<md:EntitiesDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" '
+        f'ID="aggregate-root" validUntil="{valid_until}">'
+        + child
+        + "</md:EntitiesDescriptor>"
+    )
+    insert_at = aggregate.index(">") + 1
+    signed = crypto.SamlSigner.from_pem(root_key).sign_enveloped(
+        aggregate[:insert_at]
+        + _signature_template("aggregate-root", root_cert_b64)
+        + aggregate[insert_at:]
+    )
+
+    class RemoteResponse:
+        def __init__(self):
+            self.headers = {"Content-Length": str(len(signed.encode()))}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def geturl(self):
+            return "https://metadata.example.org/aggregate.xml"
+
+        def read(self, _limit):
+            return signed.encode()
+
+    class RemoteOpener:
+        def open(self, _request, timeout):
+            assert timeout == 10
+            return RemoteResponse()
+
+    monkeypatch.setattr(
+        config_module.urllib.request,
+        "build_opener",
+        lambda *_handlers: RemoteOpener(),
+    )
+    loaded = SPConfig().load(
+        {
+            **CONF,
+            "metadata": {
+                "remote": [
+                    {
+                        "url": "https://metadata.example.org/aggregate.xml",
+                        "cert": str(cert_path),
+                    }
+                ]
+            },
+        }
+    )
+    assert loaded.only_idp() == IDP
 
 
 def test_remote_metadata_rejects_plain_http(rsa_keypair, tmp_path):

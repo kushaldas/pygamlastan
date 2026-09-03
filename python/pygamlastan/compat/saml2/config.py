@@ -13,7 +13,6 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any
-from xml.etree import ElementTree as ET
 
 from pygamlastan import metadata as _md
 from pygamlastan.core import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT
@@ -34,7 +33,6 @@ def _as_bool(value: Any) -> bool:
 
 
 _MAX_REMOTE_METADATA_BYTES = 32 * 1024 * 1024
-_MD_NS = "urn:oasis:names:tc:SAML:2.0:metadata"
 
 
 class _HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -44,40 +42,6 @@ class _HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
         if urllib.parse.urlsplit(newurl).scheme.lower() != "https":
             raise SourceNotFound("remote metadata redirect must use HTTPS")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-
-def _parse_saml_time(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _effective_entity_expiries(xml: str) -> dict[str, datetime | None]:
-    root = ET.fromstring(xml)
-    result: dict[str, datetime | None] = {}
-
-    def walk(element: ET.Element, inherited: datetime | None) -> None:
-        own_value = element.attrib.get("validUntil")
-        own = _parse_saml_time(own_value) if own_value else None
-        expiry = (
-            min(inherited, own)
-            if inherited is not None and own is not None
-            else (own or inherited)
-        )
-        if element.tag == f"{{{_MD_NS}}}EntityDescriptor":
-            entity_id = element.attrib.get("entityID")
-            if entity_id:
-                result[entity_id] = expiry
-        for child in element:
-            if child.tag in {
-                f"{{{_MD_NS}}}EntityDescriptor",
-                f"{{{_MD_NS}}}EntitiesDescriptor",
-            }:
-                walk(child, expiry)
-
-    walk(root, None)
-    return result
 
 
 class SPConfig:
@@ -235,13 +199,9 @@ class SPConfig:
             raise SourceNotFound(
                 f"could not read metadata source {path!r}: {exc}"
             ) from exc
-        root = ET.fromstring(xml)
-        if root.tag == f"{{{_MD_NS}}}EntitiesDescriptor":
-            entities = _md.parse_entities(xml)
-        else:
-            entities = [_md.parse_entity(xml)]
-        entity_list = list(entities)
-        self._validate_metadata_document(xml, entity_list, require_expiry=False)
+        document = _md.parse_document(xml)
+        entity_list = [item.entity for item in document.entities]
+        self._validate_metadata_document(document, require_expiry=False)
         self.metadata.add_source(path, entity_list)
 
     def _load_remote_metadata(self, source: Any) -> None:
@@ -285,38 +245,33 @@ class SPConfig:
             raise SourceNotFound("remote metadata exceeds the 32 MiB limit")
         try:
             xml = body.decode("utf-8")
-            root = ET.fromstring(xml)
+            document = _md.parse_document(xml)
             results = SamlVerifier.from_cert(cert).verify_all_enveloped(xml)
         except Exception as exc:
             raise SourceNotFound(
                 f"remote metadata verification failed for {url!r}: {exc}"
             ) from exc
-        if not results or not all(result.is_valid() for result in results):
-            raise SourceNotFound(f"remote metadata signature is invalid for {url!r}")
-        root_id = root.attrib.get("ID", "")
-        signed_ids = {
-            item for result in results for item in result.signed_reference_ids()
-        }
-        if "" not in signed_ids and root_id not in signed_ids:
+        root_id = document.root_id or ""
+        root_is_verified = any(
+            result.is_valid() and root_id in set(result.signed_reference_ids())
+            for result in results
+        )
+        if not root_is_verified:
             raise SourceNotFound(
-                f"remote metadata signature does not cover the document root for {url!r}"
+                f"remote metadata has no valid signature covering the document root for {url!r}"
             )
-        if root.tag == f"{{{_MD_NS}}}EntitiesDescriptor":
-            entities = _md.parse_entities(xml)
-        else:
-            entities = [_md.parse_entity(xml)]
-        entity_list = list(entities)
-        self._validate_metadata_document(xml, entity_list, require_expiry=True)
+        entity_list = [item.entity for item in document.entities]
+        self._validate_metadata_document(document, require_expiry=True)
         self.metadata.add_source(url, entity_list)
 
     def _validate_metadata_document(
-        self, xml: str, entities: list[_md.EntityDescriptor], *, require_expiry: bool
+        self, document: _md.MetadataDocument, *, require_expiry: bool
     ) -> None:
-        expiries = _effective_entity_expiries(xml)
         now = datetime.now(timezone.utc)
-        for entity in entities:
+        for item in document.entities:
+            entity = item.entity
             _md.validate_entity(entity)
-            expiry = expiries.get(entity.entity_id)
+            expiry = item.effective_valid_until
             if require_expiry and expiry is None:
                 raise ValueError(
                     f"remote metadata entity {entity.entity_id!r} has no finite validUntil"

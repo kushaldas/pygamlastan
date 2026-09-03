@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from xml.etree import ElementTree as ET
 
 from pygamlastan import metadata as _native_metadata
@@ -183,8 +184,16 @@ def entity_descriptor(config: SPConfig) -> EntityDescriptor:
         )
         for key, tag in contact_fields.items():
             value = contact.get(key)
-            if value:
-                ET.SubElement(element, f"{{{_MD}}}{tag}").text = str(value)
+            values = (
+                value
+                if key in {"email_address", "telephone_number"}
+                and isinstance(value, Sequence)
+                and not isinstance(value, (str, bytes, bytearray))
+                else [value]
+            )
+            for item in values:
+                if item:
+                    ET.SubElement(element, f"{{{_MD}}}{tag}").text = str(item)
 
     xml = ET.tostring(root, encoding="unicode", xml_declaration=True)
     parsed = _native_metadata.parse_entity(xml)
