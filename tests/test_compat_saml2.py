@@ -226,7 +226,13 @@ def _signed_auth_response(req_id: str, cert_b64: str, priv: bytes) -> str:
     return crypto.SamlSigner.from_pem(priv).sign_enveloped(spliced)
 
 
-def _encrypted_signed_auth_response(req_id: str, cert_b64: str, priv: bytes) -> str:
+def _encrypted_signed_auth_response(
+    req_id: str,
+    cert_b64: str,
+    priv: bytes,
+    *,
+    condition_overrides: dict[str, str] | None = None,
+) -> str:
     """Build a root-signed Response carrying one encrypted Assertion."""
     resp_id, assert_id = _fresh_ids()
     unsigned = _auth_response(req_id, resp_id=resp_id, assert_id=assert_id)
@@ -237,6 +243,10 @@ def _encrypted_signed_auth_response(req_id: str, cert_b64: str, priv: bytes) -> 
         '<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ',
         1,
     )
+    for attribute, value in (condition_overrides or {}).items():
+        assertion = re.sub(
+            rf'({re.escape(attribute)}=")[^"]+', rf"\g<1>{value}", assertion
+        )
     cert_der = base64.b64decode(cert_b64)
     template = (
         '<xenc:EncryptedData xmlns:xenc="http://www.w3.org/2001/04/xmlenc#" '
@@ -1545,6 +1555,44 @@ def test_encrypted_signed_assertion_satisfies_assertion_signature_policy(
     assert response.ava["eduPersonPrincipalName"] == ["hubba-bubba@eduid.se"]
 
 
+@pytest.mark.parametrize(
+    ("condition", "offset", "exception"),
+    [
+        ("NotOnOrAfter", timedelta(hours=-1), ResponseLifetimeExceed),
+        ("NotBefore", timedelta(hours=1), ToEarly),
+    ],
+)
+def test_encrypted_assertion_raises_compat_time_exception(
+    rsa_keypair, tmp_path, condition, offset, exception
+):
+    private_key, cert_pem, cert_der_b64 = rsa_keypair
+    key_path = tmp_path / "sp-encryption.key"
+    cert_path = tmp_path / "sp-encryption.crt"
+    key_path.write_bytes(private_key)
+    cert_path.write_bytes(cert_pem)
+
+    config = _signed_client(tmp_path, cert_der_b64).config
+    config.key_file = str(key_path)
+    config.cert_file = str(cert_path)
+    client = Saml2Client(config)
+    session_id, _ = client.prepare_for_authenticate(binding=BINDING_HTTP_REDIRECT)
+    condition_value = (datetime.now(timezone.utc) + offset).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    signed = _encrypted_signed_auth_response(
+        session_id,
+        cert_der_b64,
+        private_key,
+        condition_overrides={condition: condition_value},
+    )
+    raw = base64.b64encode(signed.encode()).decode()
+
+    with pytest.raises(exception):
+        client.parse_authn_request_response(
+            raw, BINDING_HTTP_POST, {session_id: "return"}
+        )
+
+
 def test_verified_encrypted_response_satisfies_encryption_requirement(rsa_keypair):
     private_key, cert_pem, cert_der_b64 = rsa_keypair
     request_id = "encrypted-required"
@@ -1765,6 +1813,40 @@ def test_metadata_honors_primary_cert_key_usage(
     descriptor = md.parse_entity(entity_descriptor(SPConfig().load(conf)).to_xml())
     assert len(descriptor.signing_certificates("sp")) == signing_certs
     assert len(descriptor.encryption_certificates("sp")) == encryption_certs
+
+
+def test_metadata_always_advertises_dedicated_encryption_cert(
+    rsa_keypair, rsa_keypair2, tmp_path
+):
+    primary_key, primary_cert, _primary_der = rsa_keypair
+    encryption_key, encryption_cert, _encryption_der = rsa_keypair2
+    primary_key_file = tmp_path / "sp.key"
+    primary_cert_file = tmp_path / "sp.crt"
+    encryption_key_file = tmp_path / "sp-encryption.key"
+    encryption_cert_file = tmp_path / "sp-encryption.crt"
+    primary_key_file.write_bytes(primary_key)
+    primary_cert_file.write_bytes(primary_cert)
+    encryption_key_file.write_bytes(encryption_key)
+    encryption_cert_file.write_bytes(encryption_cert)
+    conf = {
+        "entityid": SP,
+        "service": {
+            "sp": {"endpoints": {"assertion_consumer_service": [(ACS, BINDING_HTTP_POST)]}}
+        },
+        "key_file": str(primary_key_file),
+        "cert_file": str(primary_cert_file),
+        "metadata_key_usage": "signing",
+        "encryption_keypairs": [
+            {
+                "key_file": str(encryption_key_file),
+                "cert_file": str(encryption_cert_file),
+            }
+        ],
+    }
+
+    descriptor = md.parse_entity(entity_descriptor(SPConfig().load(conf)).to_xml())
+    assert len(descriptor.signing_certificates("sp")) == 1
+    assert len(descriptor.encryption_certificates("sp")) == 1
 
 
 def test_metadata_unreadable_cert_file_raises():

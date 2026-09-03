@@ -27,7 +27,7 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from pygamlastan import SamlCryptoError
+from pygamlastan import SamlCryptoError, SamlXmlError
 from pygamlastan import bindings as _bindings
 from pygamlastan import logout as _logout
 from pygamlastan import profiles as _profiles
@@ -223,7 +223,44 @@ def _validate_response_version(xml: str) -> None:
     raise StatusError(f"unsupported SAML response version {value!r}")
 
 
-def _raise_compat_time_error(parsed: Any, config: _security.SecurityConfig) -> None:
+def _decrypted_assertions_for_time_error(
+    response_xml: str, decryptor: SamlDecryptor
+) -> list[Any]:
+    """Decrypt assertions again so compatibility errors can inspect their times.
+
+    This is called only after native parsing, signature verification, and profile
+    validation have run. ElementTree therefore handles an already-accepted
+    document, and the decrypted plaintext is parsed through pygamlastan's secure
+    native assertion parser before any timestamp is inspected.
+    """
+    from xml.etree import ElementTree
+
+    assertion_ns = "urn:oasis:names:tc:SAML:2.0:assertion"
+    encryption_ns = "http://www.w3.org/2001/04/xmlenc#"
+    try:
+        root = ElementTree.fromstring(response_xml)
+        assertions: list[Any] = []
+        for wrapper in root.iter(f"{{{assertion_ns}}}EncryptedAssertion"):
+            encrypted_data = wrapper.find(f"{{{encryption_ns}}}EncryptedData")
+            if encrypted_data is None:
+                continue
+            plaintext = decryptor.decrypt(
+                ElementTree.tostring(encrypted_data, encoding="unicode")
+            )
+            assertions.append(_xml.parse_assertion(plaintext))
+    except (ElementTree.ParseError, SamlCryptoError, SamlXmlError):
+        # Preserve the original validation failure when the diagnostic-only
+        # second decryption cannot be completed.
+        return []
+    return assertions
+
+
+def _raise_compat_time_error(
+    parsed: Any,
+    config: _security.SecurityConfig,
+    *,
+    assertions: list[Any] | None = None,
+) -> None:
     """Raise pysaml2's dedicated exception for a native time-check failure.
 
     Native profile processing reports all validation failures through one
@@ -234,7 +271,7 @@ def _raise_compat_time_error(parsed: Any, config: _security.SecurityConfig) -> N
     now = datetime.now(timezone.utc)
     skew = timedelta(seconds=config.clock_skew_seconds)
 
-    for assertion in parsed.assertions:
+    for assertion in parsed.assertions if assertions is None else assertions:
         if now - assertion.issue_instant > (
             timedelta(seconds=config.max_assertion_age_seconds) + skew
         ):
@@ -847,7 +884,16 @@ class Saml2Client:
             except Exception as e:
                 if not parsed.is_success():
                     self._raise_on_failed_status(parsed)
-                _raise_compat_time_error(parsed, cfg)
+                assertions = None
+                if (
+                    not parsed.assertions
+                    and parsed.encrypted_assertion_count
+                    and self._decryptor is not None
+                ):
+                    assertions = _decrypted_assertions_for_time_error(
+                        xml, self._decryptor
+                    )
+                _raise_compat_time_error(parsed, cfg, assertions=assertions)
                 raise AssertionError(f"SAML response validation failed: {e}") from e
         else:
             # Unsigned responses are only acceptable in dev/test, where the
