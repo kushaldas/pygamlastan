@@ -7,7 +7,8 @@ use pyo3::types::{PyBytes, PyModule};
 use gamlastan::idp::policy::sp_attribute_requirements;
 use gamlastan::metadata::types as gmt;
 use gamlastan::metadata::types::{
-    EntityDescriptor as GEntityDescriptor, KeyDescriptor, UiInfo as GUiInfo, UiLogo as GUiLogo,
+    EntitiesDescriptor as GEntitiesDescriptor, EntityDescriptor as GEntityDescriptor,
+    KeyDescriptor, MetadataChild, UiInfo as GUiInfo, UiLogo as GUiLogo,
 };
 use gamlastan::metadata::{EntitiesDescriptorRef, EntityDescriptorRef};
 use gamlastan::xml::{parse_saml, parse_secure_metadata, SamlSerialize};
@@ -382,6 +383,120 @@ fn parse_entities(xml: &str) -> PyResult<Vec<EntityDescriptor>> {
         .collect())
 }
 
+#[pyclass(module = "pygamlastan.metadata", name = "MetadataEntity", frozen)]
+pub struct MetadataEntity {
+    entity: GEntityDescriptor,
+    effective_valid_until: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[pymethods]
+impl MetadataEntity {
+    #[getter]
+    fn entity(&self) -> EntityDescriptor {
+        EntityDescriptor::wrap(self.entity.clone())
+    }
+
+    #[getter]
+    fn effective_valid_until(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.effective_valid_until
+    }
+}
+
+#[pyclass(module = "pygamlastan.metadata", name = "MetadataDocument", frozen)]
+pub struct MetadataDocument {
+    #[pyo3(get)]
+    root_kind: String,
+    #[pyo3(get)]
+    root_id: Option<String>,
+    #[pyo3(get)]
+    has_signature: bool,
+    entities: Vec<MetadataEntity>,
+}
+
+#[pymethods]
+impl MetadataDocument {
+    #[getter]
+    fn entities(&self) -> Vec<MetadataEntity> {
+        self.entities
+            .iter()
+            .map(|item| MetadataEntity {
+                entity: item.entity.clone(),
+                effective_valid_until: item.effective_valid_until,
+            })
+            .collect()
+    }
+}
+
+fn earlier(
+    parent: Option<chrono::DateTime<chrono::Utc>>,
+    child: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    match (parent, child) {
+        (Some(parent), Some(child)) => Some(std::cmp::min(parent, child)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn flatten_entities(
+    aggregate: &GEntitiesDescriptor,
+    inherited: Option<chrono::DateTime<chrono::Utc>>,
+    output: &mut Vec<MetadataEntity>,
+) {
+    let effective = earlier(inherited, aggregate.valid_until);
+    for child in &aggregate.children {
+        match child {
+            MetadataChild::Entity(entity) => output.push(MetadataEntity {
+                effective_valid_until: earlier(effective, entity.valid_until),
+                entity: entity.as_ref().clone(),
+            }),
+            MetadataChild::Entities(nested) => flatten_entities(nested, effective, output),
+        }
+    }
+}
+
+/// Parse either metadata root while retaining aggregate validity ancestry and
+/// the root identity needed to bind XML signature verification.
+#[pyfunction]
+fn parse_document(xml: &str) -> PyResult<MetadataDocument> {
+    let doc = parse_secure_metadata(xml).map_err(xml_err)?;
+    let root_node = doc
+        .children_iter(doc.root())
+        .find(|node| doc.element(*node).is_some())
+        .ok_or_else(|| metadata_err("metadata document has no root element"))?;
+    let root = doc
+        .element(root_node)
+        .ok_or_else(|| metadata_err("metadata document has no root element"))?;
+    if root.matches_name_ns("urn:oasis:names:tc:SAML:2.0:metadata", "EntityDescriptor") {
+        let parsed = parse_saml::<EntityDescriptorRef<'_>>(&doc).map_err(xml_err)?;
+        let entity = parsed.to_owned();
+        return Ok(MetadataDocument {
+            root_kind: "EntityDescriptor".to_string(),
+            root_id: parsed.id.map(str::to_string),
+            has_signature: parsed.has_signature,
+            entities: vec![MetadataEntity {
+                effective_valid_until: entity.valid_until,
+                entity,
+            }],
+        });
+    }
+    if root.matches_name_ns("urn:oasis:names:tc:SAML:2.0:metadata", "EntitiesDescriptor") {
+        let parsed = parse_saml::<EntitiesDescriptorRef<'_>>(&doc).map_err(xml_err)?;
+        let owned = parsed.to_owned();
+        let mut entities = Vec::new();
+        flatten_entities(&owned, None, &mut entities);
+        return Ok(MetadataDocument {
+            root_kind: "EntitiesDescriptor".to_string(),
+            root_id: parsed.id.map(str::to_string),
+            has_signature: parsed.has_signature,
+            entities,
+        });
+    }
+    Err(metadata_err(
+        "metadata root must be EntityDescriptor or EntitiesDescriptor",
+    ))
+}
+
 /// Validate an EntityDescriptor against basic metadata requirements.
 #[pyfunction]
 fn validate_entity(entity: &EntityDescriptor) -> PyResult<()> {
@@ -395,8 +510,11 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<EndpointInfo>()?;
     m.add_class::<UiInfo>()?;
     m.add_class::<UiLogo>()?;
+    m.add_class::<MetadataDocument>()?;
+    m.add_class::<MetadataEntity>()?;
     m.add_function(wrap_pyfunction!(parse_entity, &m)?)?;
     m.add_function(wrap_pyfunction!(parse_entities, &m)?)?;
+    m.add_function(wrap_pyfunction!(parse_document, &m)?)?;
     m.add_function(wrap_pyfunction!(validate_entity, &m)?)?;
     Ok(())
 }

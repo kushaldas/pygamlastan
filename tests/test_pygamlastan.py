@@ -1502,6 +1502,29 @@ def test_process_response_verified_accepts_signed(rsa_keypair):
     assert result.idp_entity_id == IDP
 
 
+def test_process_response_verified_keeps_existing_positional_argument_order(rsa_keypair):
+    """Adding the optional decryptor must not reinterpret the two existing
+    positional unsafe flags as a decryptor argument."""
+    priv, cert, cert_b64 = rsa_keypair
+    signed = _signed_built_response_xml(cert_b64, priv)
+    result = profiles.process_response_verified(
+        signed,
+        crypto.SamlVerifier.from_cert(cert),
+        security.SecurityConfig.permissive(),
+        SP,
+        ACS,
+        IDP,
+        "_req123",
+        NOW,
+        security.InMemoryReplayCache(),
+        None,
+        None,
+        False,
+        True,
+    )
+    assert result.name_id == "alice@example.org"
+
+
 def test_process_response_verified_rejects_unsigned(rsa_keypair):
     """The F-1 guard: an UNSIGNED (but otherwise complete) Response cannot pass
     the verify-internally path. There is no signature to verify, so the call

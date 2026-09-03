@@ -310,6 +310,7 @@ fn collect_verified_signed_ids(results: &[gx::VerifyResult]) -> PyResult<Vec<Str
 #[pyclass(module = "pygamlastan.crypto", name = "SamlVerifier")]
 pub struct SamlVerifier {
     inner: gx::SamlVerifier,
+    fallbacks: Vec<gx::SamlVerifier>,
 }
 
 #[pymethods]
@@ -318,6 +319,7 @@ impl SamlVerifier {
     fn new(keys: &KeysManager) -> Self {
         SamlVerifier {
             inner: gx::SamlVerifier::new(keys.inner.clone()),
+            fallbacks: Vec::new(),
         }
     }
 
@@ -332,13 +334,34 @@ impl SamlVerifier {
     /// for the `-----BEGIN` armor prefix.
     #[staticmethod]
     fn from_cert(cert: Vec<u8>) -> PyResult<Self> {
-        let (mut key, cert_der) = load_x509_cert_key_and_der(&cert)?;
-        key.usage = KeyUsage::Verify;
         let mut km = GKeysManager::new();
-        km.add_key(key);
-        km.add_trusted_cert(cert_der);
+        add_verification_cert(&mut km, &cert)?;
         Ok(SamlVerifier {
             inner: gx::SamlVerifier::new(km),
+            fallbacks: Vec::new(),
+        })
+    }
+
+    /// Convenience: verifier trusting every supplied X.509 certificate. This
+    /// is the safe rollover form because one verifier can validate signatures
+    /// made by any concurrently-published IdP key.
+    #[staticmethod]
+    fn from_certs(certs: Vec<Vec<u8>>) -> PyResult<Self> {
+        if certs.is_empty() {
+            return Err(crypto_err(
+                "at least one verification certificate is required",
+            ));
+        }
+        let mut verifiers = Vec::with_capacity(certs.len());
+        for cert in certs {
+            let mut km = GKeysManager::new();
+            add_verification_cert(&mut km, &cert)?;
+            verifiers.push(gx::SamlVerifier::new(km));
+        }
+        let inner = verifiers.remove(0);
+        Ok(SamlVerifier {
+            inner,
+            fallbacks: verifiers,
         })
     }
 
@@ -364,6 +387,9 @@ impl SamlVerifier {
             );
         }
         self.inner.set_skip_time_checks(skip);
+        for verifier in &mut self.fallbacks {
+            verifier.set_skip_time_checks(skip);
+        }
         Ok(())
     }
     #[pyo3(signature = (trusted, unsafe_allow_untrusted_keys=false))]
@@ -388,6 +414,9 @@ impl SamlVerifier {
             );
         }
         self.inner.set_trusted_keys_only(trusted);
+        for verifier in &mut self.fallbacks {
+            verifier.set_trusted_keys_only(trusted);
+        }
         Ok(())
     }
     #[pyo3(signature = (strict, unsafe_allow_non_strict=false))]
@@ -412,6 +441,9 @@ impl SamlVerifier {
             );
         }
         self.inner.set_strict_verification(strict);
+        for verifier in &mut self.fallbacks {
+            verifier.set_strict_verification(strict);
+        }
         Ok(())
     }
     #[pyo3(signature = (bits, unsafe_allow_short_hmac=false))]
@@ -435,6 +467,9 @@ impl SamlVerifier {
             );
         }
         self.inner.set_hmac_min_out_len(bits);
+        for verifier in &mut self.fallbacks {
+            verifier.set_hmac_min_out_len(bits);
+        }
         Ok(())
     }
 
@@ -462,6 +497,9 @@ impl SamlVerifier {
             );
         }
         self.inner.set_require_reference_digests(require);
+        for verifier in &mut self.fallbacks {
+            verifier.set_require_reference_digests(require);
+        }
         Ok(())
     }
 
@@ -490,24 +528,25 @@ impl SamlVerifier {
         }
         self.inner
             .set_allow_raw_inline_keyinfo_with_trust_anchors(allow);
+        for verifier in &mut self.fallbacks {
+            verifier.set_allow_raw_inline_keyinfo_with_trust_anchors(allow);
+        }
         Ok(())
     }
 
     /// Verify an enveloped XML-DSig signature; returns a VerifyResult.
     fn verify_enveloped(&self, signed_xml: &str) -> PyResult<VerifyResult> {
-        let r = self
-            .inner
-            .verify_enveloped(signed_xml)
-            .map_err(crypto_err)?;
-        Ok(VerifyResult { inner: r })
+        let results = self.verify_all_with_fallbacks(signed_xml)?;
+        let inner = results
+            .into_iter()
+            .next()
+            .ok_or_else(|| crypto_err("document contains no XML signature"))?;
+        Ok(VerifyResult { inner })
     }
 
     /// Verify every enveloped XML-DSig signature in document order.
     fn verify_all_enveloped(&self, signed_xml: &str) -> PyResult<Vec<VerifyResult>> {
-        let results = self
-            .inner
-            .verify_all_enveloped(signed_xml)
-            .map_err(crypto_err)?;
+        let results = self.verify_all_with_fallbacks(signed_xml)?;
         Ok(results
             .into_iter()
             .map(|inner| VerifyResult { inner })
@@ -524,13 +563,59 @@ impl SamlVerifier {
         unsafe_allow_weak_sha1: bool,
     ) -> PyResult<bool> {
         reject_weak_signature_algorithm(algorithm_uri, unsafe_allow_weak_sha1)?;
-        self.inner
-            .verify_redirect_query(query_string, signature, algorithm_uri)
-            .map_err(crypto_err)
+        let mut last_error = None;
+        for verifier in std::iter::once(&self.inner).chain(self.fallbacks.iter()) {
+            match verifier.verify_redirect_query(query_string, signature, algorithm_uri) {
+                Ok(true) => return Ok(true),
+                Ok(false) => {}
+                Err(error) => last_error = Some(error),
+            }
+        }
+        match last_error {
+            Some(error) => Err(crypto_err(error)),
+            None => Ok(false),
+        }
     }
 }
 
+fn add_verification_cert(km: &mut GKeysManager, cert: &[u8]) -> PyResult<()> {
+    let (mut key, cert_der) = load_x509_cert_key_and_der(cert)?;
+    key.usage = KeyUsage::Verify;
+    km.add_key(key);
+    km.add_trusted_cert(cert_der);
+    Ok(())
+}
+
 impl SamlVerifier {
+    fn verify_all_with_fallbacks(&self, signed_xml: &str) -> PyResult<Vec<gx::VerifyResult>> {
+        let mut selected: Vec<Option<gx::VerifyResult>> = Vec::new();
+        let mut last_error = None;
+        for verifier in std::iter::once(&self.inner).chain(self.fallbacks.iter()) {
+            match verifier.verify_all_enveloped(signed_xml) {
+                Ok(results) => {
+                    if selected.len() < results.len() {
+                        selected.resize_with(results.len(), || None);
+                    }
+                    for (index, result) in results.into_iter().enumerate() {
+                        let should_replace = matches!(result, gx::VerifyResult::Valid { .. })
+                            || selected[index].is_none();
+                        if should_replace {
+                            selected[index] = Some(result);
+                        }
+                    }
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        if selected.is_empty() {
+            return match last_error {
+                Some(error) => Err(crypto_err(error)),
+                None => Err(crypto_err("document contains no XML signature")),
+            };
+        }
+        Ok(selected.into_iter().flatten().collect())
+    }
+
     /// crate-internal: verify the enveloped signature over `signed_xml` and
     /// return the digest-verified reference IDs (the cryptographically signed
     /// element IDs, leading '#' stripped). Errors if the signature is invalid.
@@ -539,10 +624,7 @@ impl SamlVerifier {
     /// to real crypto: the IDs it returns are exactly what may be passed as
     /// `verified_signed_ids` to the validator.
     pub(crate) fn verified_signed_ids(&self, signed_xml: &str) -> PyResult<Vec<String>> {
-        let results = self
-            .inner
-            .verify_all_enveloped(signed_xml)
-            .map_err(crypto_err)?;
+        let results = self.verify_all_with_fallbacks(signed_xml)?;
         collect_verified_signed_ids(&results)
     }
 }
@@ -581,7 +663,7 @@ impl SamlEncryptor {
 
 #[pyclass(module = "pygamlastan.crypto", name = "SamlDecryptor")]
 pub struct SamlDecryptor {
-    inner: gx::SamlDecryptor,
+    pub(crate) inner: gx::SamlDecryptor,
 }
 
 #[pymethods]

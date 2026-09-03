@@ -1,40 +1,35 @@
-"""``saml2.metadata`` shim: ``entity_descriptor(config)`` builds the SP's own
-SAML metadata document from an :class:`~pygamlastan.compat.saml2.config.SPConfig`.
-
-pygamlastan does not (yet) ship an SP-metadata *builder*, so this templates a
-minimal, schema-valid ``<md:EntityDescriptor>`` from the configured entityid,
-ACS/SLO endpoints and signing certificate - the same approach the pygamlastan
-``django-sp`` example uses. The returned object exposes ``.to_string()`` /
-``.to_xml()`` so the eduID metadata view keeps working.
-"""
+"""pysaml2-compatible service-provider metadata generation."""
 
 from __future__ import annotations
 
-from xml.sax.saxutils import quoteattr
+from collections.abc import Sequence
+from xml.etree import ElementTree as ET
+
+from pygamlastan import metadata as _native_metadata
+from pygamlastan.attribute_map import AttributeConverter
 
 from .config import SPConfig
 
 _MD = "urn:oasis:names:tc:SAML:2.0:metadata"
 _DS = "http://www.w3.org/2000/09/xmldsig#"
+_XML = "http://www.w3.org/XML/1998/namespace"
+_PROTOCOL = "urn:oasis:names:tc:SAML:2.0:protocol"
+_ATTR_URI = "urn:oasis:names:tc:SAML:2.0:attrname-format:uri"
+
+ET.register_namespace("md", _MD)
+ET.register_namespace("ds", _DS)
 
 
 def _read_cert_body(cert_file: str | None) -> str | None:
-    """Return the base64 DER body of a PEM certificate (no header/footer/ws).
-
-    If ``cert_file`` is configured but cannot be read - or does not actually
-    contain a PEM certificate block - raise rather than silently omitting the
-    certificate from the generated metadata, so a misconfiguration fails fast
-    instead of producing metadata without a signing key.
-    """
     if not cert_file:
         return None
     try:
         with open(cert_file, encoding="ascii") as fh:
             pem = fh.read()
-    except OSError as e:
-        raise ValueError(f"configured cert_file {cert_file!r} could not be read: {e}") from e
-    # Extract only the FIRST certificate block: a full-chain PEM has several, and
-    # concatenating all of them would produce an invalid X509Certificate body.
+    except OSError as exc:
+        raise ValueError(
+            f"configured certificate {cert_file!r} could not be read: {exc}"
+        ) from exc
     body: list[str] = []
     in_cert = False
     for line in pem.splitlines():
@@ -46,16 +41,37 @@ def _read_cert_body(cert_file: str | None) -> str | None:
             break
         if in_cert and stripped:
             body.append(stripped)
-    der = "".join(body)
-    if not der:
+    encoded = "".join(body)
+    if not encoded:
         raise ValueError(
-            f"configured cert_file {cert_file!r} contains no PEM CERTIFICATE block"
+            f"configured certificate {cert_file!r} contains no PEM certificate"
         )
-    return der
+    return encoded
 
 
-class _EntityDescriptorDoc:
-    """Holds rendered SP metadata XML; mirrors pysaml2's ``to_string``."""
+def _localized(parent: ET.Element, tag: str, values: object) -> None:
+    if not isinstance(values, (list, tuple)):
+        return
+    for item in values:
+        if not isinstance(item, (list, tuple)) or not item:
+            continue
+        value = str(item[0])
+        lang = str(item[1]) if len(item) > 1 and item[1] else None
+        element = ET.SubElement(parent, f"{{{_MD}}}{tag}")
+        if lang:
+            element.set(f"{{{_XML}}}lang", lang)
+        element.text = value
+
+
+def _key_descriptor(parent: ET.Element, use: str, cert_body: str) -> None:
+    descriptor = ET.SubElement(parent, f"{{{_MD}}}KeyDescriptor", {"use": use})
+    key_info = ET.SubElement(descriptor, f"{{{_DS}}}KeyInfo")
+    x509_data = ET.SubElement(key_info, f"{{{_DS}}}X509Data")
+    ET.SubElement(x509_data, f"{{{_DS}}}X509Certificate").text = cert_body
+
+
+class EntityDescriptor:
+    """Rendered SP metadata with pysaml2's ``to_string``/``to_xml`` API."""
 
     def __init__(self, xml: str) -> None:
         self._xml = xml
@@ -70,58 +86,128 @@ class _EntityDescriptorDoc:
         return self._xml
 
 
-def entity_descriptor(config: SPConfig) -> _EntityDescriptorDoc:
-    """Build this SP's ``<md:EntityDescriptor>`` from its config."""
+def entity_descriptor(config: SPConfig) -> EntityDescriptor:
+    """Build and natively validate this SP's metadata document."""
     if not config.entityid:
         raise ValueError("SPConfig.entityid is required to build SP metadata")
-    entity_id = config.entityid
-    cert_body = _read_cert_body(config.cert_file)
 
-    key_descriptor = ""
-    if cert_body:
-        key_descriptor = (
-            f'    <md:KeyDescriptor use="signing">\n'
-            f'      <ds:KeyInfo xmlns:ds="{_DS}">\n'
-            f"        <ds:X509Data>\n"
-            f"          <ds:X509Certificate>{cert_body}</ds:X509Certificate>\n"
-            f"        </ds:X509Data>\n"
-            f"      </ds:KeyInfo>\n"
-            f"    </md:KeyDescriptor>\n"
-        )
-
-    acs_xml = ""
-    for index, (url, binding) in enumerate(config.acs_endpoints):
-        acs_xml += (
-            f'    <md:AssertionConsumerService Binding={quoteattr(binding)} '
-            f"Location={quoteattr(url)} index=\"{index}\""
-            f'{" isDefault=\"true\"" if index == 0 else ""}/>\n'
-        )
-
-    slo_xml = ""
-    for url, binding in config.slo_endpoints:
-        slo_xml += (
-            f"    <md:SingleLogoutService Binding={quoteattr(binding)} Location={quoteattr(url)}/>\n"
-        )
-
-    # Advertise the dedicated protocol flags, not merely the presence of a key:
-    # a configured key makes signing possible but does not mean this SP promises
-    # to sign AuthnRequests or requires assertions themselves to be signed.
-    authn_requests_signed = "true" if config.authn_requests_signed else "false"
-    want_assertions_signed = "true" if config.want_assertions_signed else "false"
-
-    xml = (
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        f'<md:EntityDescriptor xmlns:md="{_MD}" entityID={quoteattr(entity_id)}>\n'
-        '  <md:SPSSODescriptor protocolSupportEnumeration='
-        '"urn:oasis:names:tc:SAML:2.0:protocol" '
-        f'AuthnRequestsSigned="{authn_requests_signed}" '
-        f'WantAssertionsSigned="{want_assertions_signed}">\n'
-        f"{key_descriptor}"
-        f"{slo_xml}"
-        f"{acs_xml}"
-        "  </md:SPSSODescriptor>\n"
-        "</md:EntityDescriptor>\n"
+    root = ET.Element(f"{{{_MD}}}EntityDescriptor", {"entityID": config.entityid})
+    descriptor = ET.SubElement(
+        root,
+        f"{{{_MD}}}SPSSODescriptor",
+        {
+            "protocolSupportEnumeration": _PROTOCOL,
+            "AuthnRequestsSigned": str(config.authn_requests_signed).lower(),
+            "WantAssertionsSigned": str(config.want_assertions_signed).lower(),
+        },
     )
-    # All attribute values are emitted via quoteattr; endpoints/cert come from
-    # controlled config, not untrusted input.
-    return _EntityDescriptorDoc(xml)
+
+    signing_cert = _read_cert_body(config.cert_file)
+    if signing_cert and config.metadata_key_usage in {"signing", "both"}:
+        _key_descriptor(descriptor, "signing", signing_cert)
+    encryption_certs: list[str] = []
+    if config.encryption_keypairs:
+        encryption_certs = [
+            cert
+            for pair in config.encryption_keypairs
+            if (cert := _read_cert_body(pair.get("cert_file")))
+        ]
+    elif signing_cert and config.metadata_key_usage in {"encryption", "both"}:
+        encryption_certs = [signing_cert]
+
+    seen_encryption_certs: set[str] = set()
+    for cert in encryption_certs:
+        if cert not in seen_encryption_certs:
+            _key_descriptor(descriptor, "encryption", cert)
+            seen_encryption_certs.add(cert)
+
+    for url, binding in config.slo_endpoints:
+        ET.SubElement(
+            descriptor,
+            f"{{{_MD}}}SingleLogoutService",
+            {"Binding": binding, "Location": url},
+        )
+
+    formats = config.name_id_format
+    if isinstance(formats, str):
+        formats = [formats]
+    for value in formats or []:
+        ET.SubElement(descriptor, f"{{{_MD}}}NameIDFormat").text = str(value)
+
+    for offset, (url, binding) in enumerate(config.acs_endpoints):
+        attributes = {
+            "Binding": binding,
+            "Location": url,
+            "index": str(offset + 1),
+        }
+        if offset == 0:
+            attributes["isDefault"] = "true"
+        ET.SubElement(descriptor, f"{{{_MD}}}AssertionConsumerService", attributes)
+
+    requested = [(name, True) for name in config.required_attributes] + [
+        (name, False) for name in config.optional_attributes
+    ]
+    if requested:
+        service = ET.SubElement(
+            descriptor, f"{{{_MD}}}AttributeConsumingService", {"index": "1"}
+        )
+        service_name = ET.SubElement(service, f"{{{_MD}}}ServiceName")
+        service_name.set(f"{{{_XML}}}lang", "en")
+        service_name.text = config.name or config.entityid
+        converter = AttributeConverter.from_static("saml_uri")
+        for local_name, required in requested:
+            wire_name = converter.to_wire_name(local_name) or local_name
+            ET.SubElement(
+                service,
+                f"{{{_MD}}}RequestedAttribute",
+                {
+                    "Name": wire_name,
+                    "NameFormat": _ATTR_URI,
+                    "FriendlyName": local_name,
+                    "isRequired": str(required).lower(),
+                },
+            )
+
+    if config.organization:
+        organization = ET.SubElement(root, f"{{{_MD}}}Organization")
+        _localized(organization, "OrganizationName", config.organization.get("name"))
+        _localized(
+            organization,
+            "OrganizationDisplayName",
+            config.organization.get("display_name"),
+        )
+        _localized(organization, "OrganizationURL", config.organization.get("url"))
+
+    contact_fields = {
+        "company": "Company",
+        "given_name": "GivenName",
+        "sur_name": "SurName",
+        "email_address": "EmailAddress",
+        "telephone_number": "TelephoneNumber",
+    }
+    for contact in config.contact_person:
+        element = ET.SubElement(
+            root,
+            f"{{{_MD}}}ContactPerson",
+            {"contactType": str(contact.get("contact_type", "technical"))},
+        )
+        for key, tag in contact_fields.items():
+            value = contact.get(key)
+            values = (
+                value
+                if key in {"email_address", "telephone_number"}
+                and isinstance(value, Sequence)
+                and not isinstance(value, (str, bytes, bytearray))
+                else [value]
+            )
+            for item in values:
+                if item:
+                    ET.SubElement(element, f"{{{_MD}}}{tag}").text = str(item)
+
+    xml = ET.tostring(root, encoding="unicode", xml_declaration=True)
+    parsed = _native_metadata.parse_entity(xml)
+    _native_metadata.validate_entity(parsed)
+    return EntityDescriptor(xml)
+
+
+__all__ = ["EntityDescriptor", "entity_descriptor"]
