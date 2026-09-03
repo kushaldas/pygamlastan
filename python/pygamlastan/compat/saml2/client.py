@@ -488,10 +488,14 @@ class Saml2Client:
         self.state = state_cache if state_cache is not None else {}
         self._signer: SamlSigner | None = None
         self._decryptor: SamlDecryptor | None = None
-        if self.config.encryption_keypairs:
+        decryption_key_files = [
+            keypair["key_file"] for keypair in self.config.encryption_keypairs
+        ]
+        if not decryption_key_files and self.config.key_file:
+            decryption_key_files.append(self.config.key_file)
+        if decryption_key_files:
             keys = KeysManager()
-            for keypair in self.config.encryption_keypairs:
-                key_file = keypair["key_file"]
+            for key_file in decryption_key_files:
                 try:
                     with open(key_file, "rb") as fh:
                         keys.add_key_pem(fh.read(), usage="decrypt")

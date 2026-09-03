@@ -77,6 +77,7 @@ class SPConfig:
         self.allow_unsigned_logout_requests: bool = False
         self.key_file: str | None = None
         self.cert_file: str | None = None
+        self.metadata_key_usage: str = "both"
         self.encryption_keypairs: list[dict[str, str]] = []
         # parsed metadata EntityDescriptors keyed by entity id
         self.metadata = MetadataStore()
@@ -166,6 +167,12 @@ class SPConfig:
 
         self.key_file = conf.get("key_file")
         self.cert_file = conf.get("cert_file")
+        metadata_key_usage = conf.get("metadata_key_usage", "both")
+        if metadata_key_usage not in {"signing", "encryption", "both"}:
+            raise ValueError(
+                "metadata_key_usage must be 'signing', 'encryption', or 'both'"
+            )
+        self.metadata_key_usage = metadata_key_usage
         raw_keypairs = conf.get("encryption_keypairs", [])
         if not isinstance(raw_keypairs, list):
             raise TypeError("encryption_keypairs must be a list")

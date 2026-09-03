@@ -1489,7 +1489,7 @@ def test_signed_response_accepted(rsa_keypair, tmp_path):
     assert si["ava"]["eduPersonPrincipalName"] == ["hubba-bubba@eduid.se"]
 
 
-def test_signed_encrypted_assertion_is_decrypted_and_validated(rsa_keypair, tmp_path):
+def test_primary_key_decrypts_and_validates_encrypted_assertion(rsa_keypair, tmp_path):
     private_key, cert_pem, cert_der_b64 = rsa_keypair
     key_path = tmp_path / "sp-encryption.key"
     cert_path = tmp_path / "sp-encryption.crt"
@@ -1497,11 +1497,10 @@ def test_signed_encrypted_assertion_is_decrypted_and_validated(rsa_keypair, tmp_
     cert_path.write_bytes(cert_pem)
 
     client = _signed_client(tmp_path, cert_der_b64)
-    client.config.encryption_keypairs = [
-        {"key_file": str(key_path), "cert_file": str(cert_path)}
-    ]
+    client.config.key_file = str(key_path)
+    client.config.cert_file = str(cert_path)
     # Key loading is intentionally eager, so construct the final client only
-    # after adding the encryption keypair to its parsed configuration.
+    # after adding the primary SP key to its parsed configuration.
     client = Saml2Client(client.config)
     session_id, _ = client.prepare_for_authenticate(binding=BINDING_HTTP_REDIRECT)
     signed = _encrypted_signed_auth_response(
@@ -1721,8 +1720,8 @@ def test_direct_assertion_signature_policy_rejects_response_only_signature(
         )
 
 
-def test_metadata_includes_signing_cert(rsa_keypair, tmp_path):
-    """When a cert_file is configured, the generated SP metadata embeds it."""
+def test_metadata_defaults_primary_cert_to_both_key_usages(rsa_keypair, tmp_path):
+    """PySAML2 advertises a cert-only SP key for signing and encryption."""
     _priv, cert_pem, _der = rsa_keypair
     cert_file = tmp_path / "sp.crt"
     cert_file.write_bytes(cert_pem)
@@ -1735,9 +1734,37 @@ def test_metadata_includes_signing_cert(rsa_keypair, tmp_path):
     }
     xml = entity_descriptor(SPConfig().load(conf)).to_xml()
     assert "<ds:X509Certificate>" in xml
-    # parses back and the SP exposes a signing certificate
+    # It parses back and the SP exposes the primary certificate for both uses.
     ed = md.parse_entity(xml)
     assert ed.signing_certificates("sp")
+    assert ed.encryption_certificates("sp")
+
+
+@pytest.mark.parametrize(
+    ("metadata_key_usage", "signing_certs", "encryption_certs"),
+    [("signing", 1, 0), ("encryption", 0, 1), ("both", 1, 1)],
+)
+def test_metadata_honors_primary_cert_key_usage(
+    rsa_keypair,
+    tmp_path,
+    metadata_key_usage,
+    signing_certs,
+    encryption_certs,
+):
+    _priv, cert_pem, _der = rsa_keypair
+    cert_file = tmp_path / "sp.crt"
+    cert_file.write_bytes(cert_pem)
+    conf = {
+        "entityid": SP,
+        "service": {
+            "sp": {"endpoints": {"assertion_consumer_service": [(ACS, BINDING_HTTP_POST)]}}
+        },
+        "cert_file": str(cert_file),
+        "metadata_key_usage": metadata_key_usage,
+    }
+    descriptor = md.parse_entity(entity_descriptor(SPConfig().load(conf)).to_xml())
+    assert len(descriptor.signing_certificates("sp")) == signing_certs
+    assert len(descriptor.encryption_certificates("sp")) == encryption_certs
 
 
 def test_metadata_unreadable_cert_file_raises():
@@ -2215,10 +2242,12 @@ def test_metadata_uses_first_cert_of_chain(rsa_keypair, tmp_path):
         "cert_file": str(chain),
     }
     xml = entity_descriptor(SPConfig().load(conf)).to_xml()
-    assert xml.count("<ds:X509Certificate>") == 1
-    # the embedded body equals the single leaf cert's DER base64, and parses back
-    assert cert_der_b64 in xml
-    assert md.parse_entity(xml).signing_certificates("sp")
+    assert xml.count("<ds:X509Certificate>") == 2
+    # Both default key usages embed only the first certificate in the chain.
+    assert xml.count(cert_der_b64) == 2
+    entity = md.parse_entity(xml)
+    assert entity.signing_certificates("sp")
+    assert entity.encryption_certificates("sp")
 
 
 def test_cache_zero_timestamp_consistent():

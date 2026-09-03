@@ -103,14 +103,24 @@ def entity_descriptor(config: SPConfig) -> EntityDescriptor:
     )
 
     signing_cert = _read_cert_body(config.cert_file)
-    if signing_cert:
+    if signing_cert and config.metadata_key_usage in {"signing", "both"}:
         _key_descriptor(descriptor, "signing", signing_cert)
-    seen_encryption_certs: set[str] = set()
-    for pair in config.encryption_keypairs:
-        cert = _read_cert_body(pair.get("cert_file"))
-        if cert and cert not in seen_encryption_certs:
-            _key_descriptor(descriptor, "encryption", cert)
-            seen_encryption_certs.add(cert)
+    if config.metadata_key_usage in {"encryption", "both"}:
+        encryption_certs: list[str] = []
+        if config.encryption_keypairs:
+            encryption_certs = [
+                cert
+                for pair in config.encryption_keypairs
+                if (cert := _read_cert_body(pair.get("cert_file")))
+            ]
+        elif signing_cert:
+            encryption_certs = [signing_cert]
+
+        seen_encryption_certs: set[str] = set()
+        for cert in encryption_certs:
+            if cert not in seen_encryption_certs:
+                _key_descriptor(descriptor, "encryption", cert)
+                seen_encryption_certs.add(cert)
 
     for url, binding in config.slo_endpoints:
         ET.SubElement(
