@@ -2,4 +2,6 @@
 
 NAMESPACE = "urn:oasis:names:tc:SAML:2.0:metadata"
 
-__all__ = ["NAMESPACE"]
+from .metadata import EntityDescriptor
+
+__all__ = ["NAMESPACE", "EntityDescriptor"]

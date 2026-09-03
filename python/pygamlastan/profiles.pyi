@@ -1,7 +1,7 @@
 from datetime import datetime
 
-from .core import Attribute, AuthnRequest, NameId, Response
-from .crypto import SamlVerifier
+from .core import Assertion, Attribute, AuthnRequest, NameId, Response
+from .crypto import SamlDecryptor, SamlVerifier
 from .metadata import EntityDescriptor
 from .security import PersistentIdStoreProtocol, ReplayCacheProtocol, SecurityConfig
 
@@ -27,9 +27,12 @@ class AuthnRequestOptions:
         extensions: str | None = ...,
         idp_list: list[str] | None = ...,
         request_id: str | None = ...,
+        subject_name_id: NameId | None = ...,
     ) -> None: ...
 
 class AuthnResult:
+    @property
+    def assertion(self) -> Assertion: ...
     @property
     def name_id(self) -> str: ...
     @property
@@ -116,6 +119,7 @@ def process_response(
     replay_cache: ReplayCacheProtocol | None = ...,
     persistent_id_store: PersistentIdStoreProtocol | None = ...,
     persistent_id_principal: str | None = ...,
+    decryptor: SamlDecryptor | None = ...,
     unsafe_no_replay_cache: bool = ...,
     unsafe_no_persistent_id_store: bool = ...,
 ) -> AuthnResult: ...

@@ -653,6 +653,10 @@ impl AuthnRequest {
         self.inner.base.has_signature
     }
     #[getter]
+    fn subject(&self) -> Option<Subject> {
+        self.inner.subject.clone().map(Subject::wrap)
+    }
+    #[getter]
     fn name_id_policy(&self) -> Option<NameIdPolicy> {
         self.inner.name_id_policy.clone().map(NameIdPolicy::wrap)
     }

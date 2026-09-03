@@ -32,7 +32,7 @@ from pygamlastan import profiles as _profiles
 from pygamlastan import security as _security
 from pygamlastan import xml as _xml
 from pygamlastan.core import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT
-from pygamlastan.crypto import SamlSigner, SamlVerifier
+from pygamlastan.crypto import KeysManager, SamlDecryptor, SamlSigner, SamlVerifier
 
 from .client_base import LogoutError
 from .config import SPConfig
@@ -48,8 +48,8 @@ from .response import (
     StatusRequestDenied,
     UnsolicitedResponse,
 )
-from .saml import NAMEID_FORMAT_TRANSIENT, NameID
 from .s_utils import UnsupportedBinding
+from .saml import NAMEID_FORMAT_TRANSIENT, NameID
 from .sigver import MissingKey
 from .validate import ResponseLifetimeExceed, ToEarly
 from .xmldsig import DIGEST_SHA256
@@ -217,10 +217,7 @@ def _raise_compat_time_error(parsed: Any, config: _security.SecurityConfig) -> N
                 and now - skew >= conditions.not_on_or_after
             ):
                 raise ResponseLifetimeExceed("SAML assertion conditions have expired")
-            if (
-                conditions.not_before is not None
-                and now + skew < conditions.not_before
-            ):
+            if conditions.not_before is not None and now + skew < conditions.not_before:
                 raise ToEarly("SAML assertion conditions are not valid yet")
 
         subject = assertion.subject
@@ -266,7 +263,9 @@ def _logout_deadline(value: Any) -> datetime | None:
     )
 
 
-def _nameid_key(name_id: Any) -> tuple[str, str | None, str | None, str | None, str | None] | None:
+def _nameid_key(
+    name_id: Any,
+) -> tuple[str, str | None, str | None, str | None, str | None] | None:
     """Full identity tuple of a NameID-like value, for subject correlation.
 
     Returns ``(text, format, name_qualifier, sp_name_qualifier, sp_provided_id)``,
@@ -290,7 +289,10 @@ def _nameid_key(name_id: Any) -> tuple[str, str | None, str | None, str | None, 
 
     def _q(attr: str) -> str | None:
         value = getattr(name_id, attr, None)
-        return value if isinstance(value, str) else None
+        # pysaml2's persisted NameID format omits empty optional attributes, so
+        # an explicitly empty XML attribute and an absent attribute must
+        # correlate to the same session subject during rolling migrations.
+        return value if isinstance(value, str) and value else None
 
     return (
         text,
@@ -414,7 +416,7 @@ def _maybe_cleanup_replay_cache(cache: Any) -> None:
                 del _replay_cleanup_times[k]
     try:
         cache.cleanup()
-    except Exception:
+    except Exception:  # noqa: BLE001 - injected maintenance hook; retention is safe
         # Eviction is maintenance, not a security decision (retaining an entry
         # longer is safe), so a failing injected cache must not abort the
         # authentication/logout flow - but it must not fail silently either.
@@ -453,6 +455,19 @@ class Saml2Client:
         self.users = identity_cache
         self.state = state_cache if state_cache is not None else {}
         self._signer: SamlSigner | None = None
+        self._decryptor: SamlDecryptor | None = None
+        if self.config.encryption_keypairs:
+            keys = KeysManager()
+            for keypair in self.config.encryption_keypairs:
+                key_file = keypair["key_file"]
+                try:
+                    with open(key_file, "rb") as fh:
+                        keys.add_key_pem(fh.read(), usage="decrypt")
+                except OSError as exc:
+                    raise ValueError(
+                        f"configured encryption key {key_file!r} could not be read: {exc}"
+                    ) from exc
+            self._decryptor = SamlDecryptor(keys)
         # Default to the shared process-lifetime cache; ``replay_cache`` lets a
         # multi-process deployment supply a shared implementation (any object
         # with ``check_and_insert(id, expiry) -> bool`` and ``cleanup()``).
@@ -540,6 +555,7 @@ class Saml2Client:
         include. When signing is enabled an enveloped XML signature is produced
         over this exact request document.
         """
+        subject = kwargs.pop("subject", None)
         acs_url, _acs_binding = self.config.acs(service_url_binding or binding)
         force_value = self.config.force_authn if force_authn is None else force_authn
         force = str(force_value).lower() in ("true", "1", "yes")
@@ -589,6 +605,11 @@ class Saml2Client:
             # native builder for that interoperable form instead of rewriting
             # serialized XML after construction.
             request_id="id-" + secrets.token_hex(16),
+            subject_name_id=(
+                subject.name_id.to_core()
+                if subject is not None and getattr(subject, "name_id", None) is not None
+                else None
+            ),
         )
         request = _profiles.create_authn_request(options)
         xml = request.to_xml()
@@ -649,6 +670,7 @@ class Saml2Client:
             sign=False,
             force_authn=force_authn,
             requested_authn_context=requested_authn_context,
+            subject=subject,
             sigalg=sigalg,
             digest_alg=digest_alg,
             **kwargs,
@@ -680,7 +702,9 @@ class Saml2Client:
                     sigalg or self.config.signing_algorithm,
                     digest_alg or self.config.digest_algorithm,
                 )
-            html = _bindings.post_encode(xml.encode("utf-8"), True, sso_url, relay_state=rs)
+            html = _bindings.post_encode(
+                xml.encode("utf-8"), True, sso_url, relay_state=rs
+            )
             return session_id, _post_http_info(sso_url, html)
         raise UnsupportedBinding(
             f"unsupported binding for AuthnRequest: {effective_binding}"
@@ -720,7 +744,15 @@ class Saml2Client:
         # arrived over (config.acs falls back to the first configured ACS when the
         # exact binding is absent), rather than assuming HTTP-POST.
         acs_url, _ = self.config.acs(binding)
-        expected_idp = kwargs.get("expected_idp") or self.config.only_idp()
+        expected_idp = kwargs.get("expected_idp")
+        expected_idps = kwargs.get("expected_idps")
+        if (
+            expected_idp is None
+            and expected_idps is not None
+            and in_response_to is not None
+        ):
+            expected_idp = expected_idps.get(in_response_to)
+        expected_idp = expected_idp or self.config.only_idp()
         if expected_idp is None:
             # The legacy outstanding-query mapping stores only the return URL,
             # not the IdP selected for the request. Trusting the response's
@@ -754,52 +786,33 @@ class Saml2Client:
             cfg.require_signed_assertions = self.config.want_assertions_signed
             cfg.require_signed_responses = self.config.want_response_signed
             cfg.require_encrypted_assertions = False
-            # During key rollover the IdP metadata publishes the old and new
-            # signing certificates simultaneously, so try each until one
-            # verifies cryptographically. A post-verification validation
-            # failure is raised immediately: the signature already checked out
-            # under that trusted certificate, and another certificate cannot
-            # change the validation outcome.
-            result = None
-            crypto_error: SamlCryptoError | None = None
             try:
                 signing_certs = self.config.idp_signing_certs(expected_idp)
             except ValueError as exc:
                 raise MissingKey(str(exc)) from exc
-            for cert in signing_certs:
-                verifier = SamlVerifier.from_cert(cert)
-                try:
-                    result = _profiles.process_response_verified(
-                        xml,
-                        verifier,
-                        cfg,
-                        sp_entity_id,
-                        acs_url,
-                        expected_idp,
-                        expected_request_id=in_response_to,
-                        replay_cache=scoped_replay_cache,
-                        unsafe_no_persistent_id_store=True,
-                    )
-                    break
-                except SamlCryptoError as e:
-                    # Missing signature, or not signed by this certificate:
-                    # remember the failure and try the next published one.
-                    crypto_error = e
-                except Exception as e:
-                    # Signature verified, but validation failed. A non-Success Status
-                    # surfaces as StatusError for pysaml2 parity (only after the
-                    # signature has been verified); anything else stays AssertionError.
-                    if not parsed.is_success():
-                        self._raise_on_failed_status(parsed)
-                    _raise_compat_time_error(parsed, cfg)
-                    raise AssertionError(f"SAML response validation failed: {e}") from e
-            if result is None:
-                # No published certificate verified the signature; eduID's
-                # get_authn_response catches AssertionError as "SAML response
-                # is not verified".
+            verifier = SamlVerifier.from_certs(signing_certs)
+            try:
+                result = _profiles.process_response_verified(
+                    xml,
+                    verifier,
+                    cfg,
+                    sp_entity_id,
+                    acs_url,
+                    expected_idp,
+                    expected_request_id=in_response_to,
+                    replay_cache=scoped_replay_cache,
+                    decryptor=self._decryptor,
+                    unsafe_no_persistent_id_store=True,
+                )
+            except SamlCryptoError as crypto_error:
                 raise SignatureError(
                     f"SAML response is not verified: {crypto_error}"
                 ) from crypto_error
+            except Exception as e:
+                if not parsed.is_success():
+                    self._raise_on_failed_status(parsed)
+                _raise_compat_time_error(parsed, cfg)
+                raise AssertionError(f"SAML response validation failed: {e}") from e
         else:
             # Unsigned responses are only acceptable in dev/test, where the
             # settings explicitly set want_response_signed=False.
@@ -822,11 +835,12 @@ class Saml2Client:
                 _raise_compat_time_error(parsed, cfg)
                 raise AssertionError(f"SAML response processing failed: {e}") from e
 
-        assertions = list(parsed.assertions)
-        assertion = next(
-            (item for item in assertions if item.id == result.assertion_id),
-            None,
-        )
+        assertion = getattr(result, "assertion", None)
+        if assertion is None:
+            assertion = next(
+                (item for item in parsed.assertions if item.id == result.assertion_id),
+                None,
+            )
         if assertion is None:
             raise AssertionError(
                 f"processed assertion {result.assertion_id!r} is absent from response"
@@ -838,6 +852,7 @@ class Saml2Client:
             assertion=assertion,
             came_from=came_from,
             legacy_attributes=_legacy_nil_attributes(xml, result.assertion_id),
+            allow_unknown_attributes=self.config.allow_unknown_attributes,
         )
         if self.identity_cache is not None:
             session_info = wrapped.session_info()
@@ -877,6 +892,7 @@ class Saml2Client:
         sign: Any = None,
         sign_alg: str | None = None,
         digest_alg: str | None = None,
+        state_data: dict[str, Any] | None = None,
     ) -> dict[str, tuple[str, dict[str, Any]]]:
         """Begin SP-initiated logout for every issuer holding identity data.
 
@@ -887,7 +903,9 @@ class Saml2Client:
         if isinstance(name_id, str):
             name_id = decode(name_id)
         if _nameid_key(name_id) is None:
-            raise ValueError("global_logout requires a NameID with a non-empty identifier")
+            raise ValueError(
+                "global_logout requires a NameID with a non-empty identifier"
+            )
         candidate_idps: list[str] = []
         if self.users is not None:
             issuers = getattr(self.users, "issuers_of_info", None)
@@ -907,6 +925,7 @@ class Saml2Client:
             sign=sign,
             sign_alg=sign_alg,
             digest_alg=digest_alg,
+            state_data=state_data,
         )
 
     def do_logout(
@@ -927,6 +946,7 @@ class Saml2Client:
         browser bindings are returned; the shim never performs hidden SOAP I/O.
         """
         sp_entity_id = self._require_entityid()
+        state_data = kwargs.pop("state_data", None)
         deadline = _logout_deadline(expire)
         if deadline is not None and deadline <= datetime.now(timezone.utc):
             raise LogoutError("the requested logout expiry has already passed")
@@ -940,9 +960,11 @@ class Saml2Client:
         preferred = list(self.config.preferred_binding["single_logout_service"])
         candidates = []
         for candidate in ([expected_binding] if expected_binding else []) + preferred:
-            if candidate in (BINDING_HTTP_REDIRECT, BINDING_HTTP_POST):
-                if candidate not in candidates:
-                    candidates.append(candidate)
+            if (
+                candidate in (BINDING_HTTP_REDIRECT, BINDING_HTTP_POST)
+                and candidate not in candidates
+            ):
+                candidates.append(candidate)
 
         selected_endpoints: list[tuple[str, str, str]] = []
         unhandled: list[str] = []
@@ -988,7 +1010,9 @@ class Saml2Client:
             try:
                 request = _logout.create_sp_logout_request(options)
             except Exception as exc:
-                raise LogoutError(f"could not create LogoutRequest for {idp}: {exc}") from exc
+                raise LogoutError(
+                    f"could not create LogoutRequest for {idp}: {exc}"
+                ) from exc
 
             xml = request.to_xml()
             relay_state = request.id
@@ -1030,6 +1054,7 @@ class Saml2Client:
                 # datetime object; keep the state cache transport-neutral.
                 "not_on_or_after": deadline.isoformat() if deadline else None,
                 "sign": should_sign,
+                "data": dict(state_data or {}),
             }
             responses[idp] = (binding, http_info)
 
@@ -1076,7 +1101,9 @@ class Saml2Client:
                 )
             }
             if params.get("SigAlg") != sig_alg or "SAMLResponse" not in params:
-                raise SignatureError("signed query does not describe this LogoutResponse")
+                raise SignatureError(
+                    "signed query does not describe this LogoutResponse"
+                )
             try:
                 query_xml = self._decode_message(
                     params["SAMLResponse"], BINDING_HTTP_REDIRECT
@@ -1090,7 +1117,9 @@ class Saml2Client:
             try:
                 raw_signature = base64.b64decode(signature, validate=True)
             except (binascii.Error, ValueError) as exc:
-                raise SignatureError(f"invalid Redirect signature encoding: {exc}") from exc
+                raise SignatureError(
+                    f"invalid Redirect signature encoding: {exc}"
+                ) from exc
             for verifier in verifiers:
                 try:
                     if verifier.verify_redirect_query(
@@ -1098,7 +1127,7 @@ class Saml2Client:
                     ):
                         verified = True
                         break
-                except Exception:
+                except SamlCryptoError:
                     continue
 
         # Requiring the root ID among verified references prevents a wrapped
@@ -1106,7 +1135,7 @@ class Saml2Client:
         for verifier in verifiers:
             try:
                 results = verifier.verify_all_enveloped(xml)
-            except Exception:
+            except SamlCryptoError:
                 continue
             if results and all(result.is_valid() for result in results):
                 signed_ids = {
@@ -1179,12 +1208,22 @@ class Saml2Client:
                 ) from exc
         if not parsed.is_success():
             raise StatusError("LogoutResponse status is not Success")
+        relay_state = kwargs.get("relay_state")
+        if relay_state is not None and relay_state != request_id:
+            raise StatusError("LogoutResponse RelayState does not match InResponseTo")
         if state is not None and request_id is not None:
-            del self.state[request_id]
+            marker = object()
+            consumed = self.state.pop(request_id, marker)
+            if consumed is marker:
+                raise StatusError("LogoutResponse state was already consumed")
             sync = getattr(self.state, "sync", None)
             if callable(sync):
                 sync()
-        return LogoutResponse(True, in_response_to=request_id)
+        return LogoutResponse(
+            True,
+            in_response_to=request_id,
+            state=dict(state.get("data", {})) if state is not None else {},
+        )
 
     def handle_logout_request(
         self,
@@ -1245,7 +1284,8 @@ class Saml2Client:
             # each binding.
             if parsed.destination is not None:
                 local_slo = {
-                    url for url, endpoint_binding in self.config.slo_endpoints
+                    url
+                    for url, endpoint_binding in self.config.slo_endpoints
                     if endpoint_binding == binding
                 }
                 if parsed.destination not in local_slo:
@@ -1277,9 +1317,7 @@ class Saml2Client:
             or request_subject is None
             or request_subject != expected_subject
         ):
-            raise ValueError(
-                "LogoutRequest NameID does not match the session NameID"
-            )
+            raise ValueError("LogoutRequest NameID does not match the session NameID")
         # One-time use: signature verification alone does not stop a captured,
         # validly signed LogoutRequest from being submitted again - including
         # after the user logs in anew - to force-log out the fresh session.
@@ -1350,9 +1388,7 @@ class Saml2Client:
         slo_url = None
         for candidate in response_bindings:
             try:
-                slo_url = self.config.single_logout_response_service(
-                    issuer, candidate
-                )
+                slo_url = self.config.single_logout_response_service(issuer, candidate)
                 response_binding = candidate
                 break
             except ValueError:
@@ -1568,7 +1604,7 @@ class Saml2Client:
                     ):
                         redirect_ok = True
                         break
-                except Exception as e:
+                except SamlCryptoError as e:
                     redirect_error = e
             if not redirect_ok:
                 raise ValueError(
@@ -1584,7 +1620,7 @@ class Saml2Client:
             for verifier in verifiers:
                 try:
                     results = verifier.verify_all_enveloped(xml)
-                except Exception as e:
+                except SamlCryptoError as e:
                     # Not signed by this (rollover) certificate; try the next.
                     last_error = e
                     continue

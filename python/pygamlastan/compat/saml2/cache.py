@@ -16,6 +16,7 @@ identity-cache records exist.
 from __future__ import annotations
 
 import time
+from collections.abc import MutableMapping
 from datetime import datetime
 from typing import Any
 
@@ -86,7 +87,7 @@ class Cache:
         # Unlike pysaml2 there is no shelve-backed mode; a filename is accepted
         # for signature compatibility but storage is always in-memory unless a
         # subclass swaps in its own backend.
-        self._db: dict[str, dict[str, tuple[Any, dict[str, Any]]]] = {}
+        self._db: MutableMapping[str, dict[str, tuple[Any, dict[str, Any]]]] = {}
         self._sync = False
 
     def _flush(self) -> None:
@@ -111,9 +112,7 @@ class Cache:
                     structured_match = (
                         isinstance(name_id, NameID) and decoded == name_id
                     )
-                    text_match = (
-                        isinstance(name_id, str) and decoded.text == name_id
-                    )
+                    text_match = isinstance(name_id, str) and decoded.text == name_id
                     if structured_match or text_match:
                         matches.append(stored)
                 except ValueError:
@@ -177,7 +176,9 @@ class Cache:
             info["name_id"] = decode(info["name_id"])
         return info or None
 
-    def set(self, name_id: Any, entity_id: Any, info: Any, not_on_or_after: Any = 0) -> None:
+    def set(
+        self, name_id: Any, entity_id: Any, info: Any, not_on_or_after: Any = 0
+    ) -> None:
         """Store session information under the subject and issuer keys."""
         info = dict(info)
         if "name_id" in info and not isinstance(info["name_id"], str):
@@ -215,7 +216,7 @@ class Cache:
 
     def subjects(self) -> list[Any]:
         """Return all cached subjects as decoded :class:`~saml.NameID` objects."""
-        return [decode(c) for c in self._db.keys()]
+        return [decode(c) for c in self._db]
 
     # Names used by pysaml2's Population wrapper and Saml2Client.
     def issuers_of_info(self, name_id: Any) -> list[str]:

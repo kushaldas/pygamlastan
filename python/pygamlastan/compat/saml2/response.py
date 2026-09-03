@@ -53,10 +53,10 @@ class StatusRequestDenied(StatusError):
     """The IdP denied the request."""
 
 
-@lru_cache(maxsize=1)
-def _converter() -> _attr.AttributeConverterSet:
+@lru_cache(maxsize=2)
+def _converter(allow_unknown_attributes: bool = False) -> _attr.AttributeConverterSet:
     # The default OID<->friendly-name maps, built once per process.
-    return _attr.AttributeConverterSet.with_default_maps()
+    return _attr.AttributeConverterSet.with_default_maps(allow_unknown_attributes)
 
 
 class _SubjectConfirmationDataAdapter:
@@ -94,6 +94,19 @@ class _SubjectAdapter:
         self._value = value
 
     @property
+    def name_id(self) -> NameID | None:
+        value = self._value.name_id
+        if value is None:
+            return None
+        return NameID(
+            text=value.value,
+            format=value.format,
+            name_qualifier=value.name_qualifier,
+            sp_name_qualifier=value.sp_name_qualifier,
+            sp_provided_id=value.sp_provided_id,
+        )
+
+    @property
     def subject_confirmation(self) -> list[_SubjectConfirmationAdapter]:
         return [
             _SubjectConfirmationAdapter(item)
@@ -127,15 +140,15 @@ class AuthnResponse:
         assertion: Any = None,
         came_from: Any = None,
         legacy_attributes: list[Any] | None = None,
+        allow_unknown_attributes: bool = False,
     ) -> None:
         self._result = result
         self._in_response_to = in_response_to
         self._came_from = came_from
         self._legacy_attributes = legacy_attributes or []
+        self._allow_unknown_attributes = allow_unknown_attributes
         conditions = getattr(assertion, "conditions", None)
-        self._assertion_not_on_or_after = getattr(
-            conditions, "not_on_or_after", None
-        )
+        self._assertion_not_on_or_after = getattr(conditions, "not_on_or_after", None)
         self.assertion = _AssertionAdapter(assertion) if assertion is not None else None
 
     def session_id(self) -> str | None:
@@ -146,11 +159,12 @@ class AuthnResponse:
     @property
     def ava(self) -> dict[str, list[str]]:
         """Return assertion attributes converted to local friendly names."""
-        local = _converter().to_local(self._result.attributes)
+        converter = _converter(self._allow_unknown_attributes)
+        local = converter.to_local(self._result.attributes)
         values = {la.name: list(la.values) for la in local}
         # Only fill empty/missing native values. A well-formed typed value
         # remains authoritative over the narrow legacy recovery path.
-        legacy_local = _converter().to_local(self._legacy_attributes)
+        legacy_local = converter.to_local(self._legacy_attributes)
         for attribute in legacy_local:
             if not values.get(attribute.name):
                 values[attribute.name] = list(attribute.values)
@@ -196,9 +210,15 @@ class AuthnResponse:
 class LogoutResponse:
     """pysaml2-shaped wrapper over a pygamlastan core ``LogoutResponse``."""
 
-    def __init__(self, success: bool, in_response_to: str | None = None) -> None:
+    def __init__(
+        self,
+        success: bool,
+        in_response_to: str | None = None,
+        state: dict[str, Any] | None = None,
+    ) -> None:
         self._success = success
         self.in_response_to = in_response_to
+        self.state = state or {}
 
     def status_ok(self) -> bool:
         """Report whether the SAML LogoutResponse carried Success status."""

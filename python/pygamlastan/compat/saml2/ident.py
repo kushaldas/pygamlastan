@@ -1,11 +1,10 @@
 """``saml2.ident`` shims: ``code`` / ``decode`` round-trip a NameID to and from
 an opaque string for storage in a session.
 
-pysaml2 serialises a NameID to its own quoted-attribute string. The exact wire
-form is private to pysaml2 and never leaves the deployment (it is stored in the
-user session and handed back to the same library), so the shim uses its own
-compact, self-describing encoding: a versioned base64url-wrapped JSON object.
-Both ends are this shim, so the round-trip is all that matters.
+pysaml2 serialises a NameID to a quoted numeric-field string. The shim writes
+that legacy format so old and new workers can share sessions during a rolling
+deployment, while still decoding the versioned ``pgc1`` form emitted by early
+compatibility builds.
 """
 
 from __future__ import annotations
@@ -21,18 +20,26 @@ _PREFIX = "pgc1:"  # pygamlastan-compat v1 marker
 
 
 def code(name_id: NameID | str) -> str:
-    """Serialise a :class:`NameID` to an opaque, session-storable string."""
+    """Serialise using pysaml2's legacy numeric-field format.
+
+    Keeping the writer legacy-compatible makes sessions readable by both old
+    and new workers during rolling deploys. :func:`decode` continues to accept
+    the versioned pygamlastan form written by earlier shim builds.
+    """
     if isinstance(name_id, str):
         name_id = NameID(text=name_id)
-    payload = {
-        "v": name_id.text,
-        "f": name_id.format,
-        "nq": name_id.name_qualifier,
-        "spnq": name_id.sp_name_qualifier,
-        "spid": name_id.sp_provided_id,
-    }
-    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    return _PREFIX + base64.urlsafe_b64encode(raw).decode("ascii")
+    values = (
+        name_id.name_qualifier,
+        name_id.sp_name_qualifier,
+        name_id.format,
+        name_id.sp_provided_id,
+        name_id.text,
+    )
+    return ",".join(
+        f"{index}={urllib.parse.quote(value)}"
+        for index, value in enumerate(values)
+        if value
+    )
 
 
 def decode(value: str) -> NameID:
@@ -82,7 +89,9 @@ def decode(value: str) -> NameID:
         raise ValueError(f"corrupt pygamlastan-compat NameID: {e}") from e
     if not isinstance(payload, dict):
         # valid JSON but not an object (e.g. a list/number) - still corruption.
-        raise ValueError("corrupt pygamlastan-compat NameID: payload is not an object")
+        raise ValueError(  # noqa: TRY004 - all persisted-format corruption is ValueError
+            "corrupt pygamlastan-compat NameID: payload is not an object"
+        )
 
     def _field(key: str) -> str | None:
         # Each NameID field must be a string or absent/null; a non-string value

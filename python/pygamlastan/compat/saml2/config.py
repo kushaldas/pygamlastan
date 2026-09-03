@@ -1,17 +1,23 @@
 """``saml2.config`` shim: :class:`SPConfig` reads the existing eduID
 ``saml2_settings.py`` dict and exposes just what the client/metadata shims need.
 
-Only the keys eduID actually sets are interpreted; unknown keys (``xmlsec_binary``,
-``attribute_map_dir``, ``contact_person``, ``organization``, ``debug`` ...) are
-accepted and ignored, since pygamlastan needs none of them.
+Only the keys eduID actually sets are interpreted. Legacy-only keys such as
+``xmlsec_binary`` and ``attribute_map_dir`` are accepted and ignored, while
+organization and contact information are retained for generated SP metadata.
 """
 
 from __future__ import annotations
 
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
 from typing import Any
+from xml.etree import ElementTree as ET
 
 from pygamlastan import metadata as _md
 from pygamlastan.core import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT
+from pygamlastan.crypto import SamlVerifier
 
 from .mdstore import MetadataStore, SourceNotFound
 
@@ -27,11 +33,58 @@ def _as_bool(value: Any) -> bool:
     return bool(value)
 
 
+_MAX_REMOTE_METADATA_BYTES = 32 * 1024 * 1024
+_MD_NS = "urn:oasis:names:tc:SAML:2.0:metadata"
+
+
+class _HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> Any:
+        if urllib.parse.urlsplit(newurl).scheme.lower() != "https":
+            raise SourceNotFound("remote metadata redirect must use HTTPS")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _parse_saml_time(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _effective_entity_expiries(xml: str) -> dict[str, datetime | None]:
+    root = ET.fromstring(xml)
+    result: dict[str, datetime | None] = {}
+
+    def walk(element: ET.Element, inherited: datetime | None) -> None:
+        own_value = element.attrib.get("validUntil")
+        own = _parse_saml_time(own_value) if own_value else None
+        expiry = (
+            min(inherited, own)
+            if inherited is not None and own is not None
+            else (own or inherited)
+        )
+        if element.tag == f"{{{_MD_NS}}}EntityDescriptor":
+            entity_id = element.attrib.get("entityID")
+            if entity_id:
+                result[entity_id] = expiry
+        for child in element:
+            if child.tag in {
+                f"{{{_MD_NS}}}EntityDescriptor",
+                f"{{{_MD_NS}}}EntitiesDescriptor",
+            }:
+                walk(child, expiry)
+
+    walk(root, None)
+    return result
+
+
 class SPConfig:
     """A minimal SP configuration parsed from an eduID-style settings dict."""
 
     def __init__(self) -> None:
-        self.entityid: str | None = None
+        self.entityid: str = ""
         self.name: str | None = None
         # endpoints: list of (url, binding)
         self.acs_endpoints: list[tuple[str, str]] = []
@@ -47,6 +100,7 @@ class SPConfig:
         self.logout_responses_signed: bool = False
         self.force_authn: bool = False
         self.allow_create: bool = False
+        self.allow_unknown_attributes: bool = False
         self.name_id_format: str | list[str] | None = None
         self.name_id_policy_format: str | None = None
         self.requested_authn_context: Any = None
@@ -59,6 +113,7 @@ class SPConfig:
         self.allow_unsigned_logout_requests: bool = False
         self.key_file: str | None = None
         self.cert_file: str | None = None
+        self.encryption_keypairs: list[dict[str, str]] = []
         # parsed metadata EntityDescriptors keyed by entity id
         self.metadata = MetadataStore()
         self.preferred_binding = {
@@ -66,47 +121,65 @@ class SPConfig:
         }
         self._sp: dict[str, Any] = {}
         self.raw: dict[str, Any] = {}
+        self.required_attributes: list[str] = []
+        self.optional_attributes: list[str] = []
+        self.organization: dict[str, Any] = {}
+        self.contact_person: list[dict[str, Any]] = []
+        self._signature_policy_explicit = False
 
     # -- loading ----------------------------------------------------------
 
     def load(self, conf: dict[str, Any]) -> SPConfig:
         """Load a pysaml2-style service-provider configuration mapping."""
         self.raw = dict(conf)
-        self.entityid = conf.get("entityid")
+        self.entityid = str(conf.get("entityid") or "")
         sp = conf.get("service", {}).get("sp", {})
         self._sp = dict(sp)
         self.name = sp.get("name")
+        self._signature_policy_explicit = any(
+            key in sp
+            for key in (
+                "want_response_signed",
+                "want_assertions_signed",
+                "want_logout_response_signed",
+            )
+        )
+        self.required_attributes = list(sp.get("required_attributes", []))
+        self.optional_attributes = list(sp.get("optional_attributes", []))
+        self.organization = dict(conf.get("organization", {}))
+        self.contact_person = list(conf.get("contact_person", []))
 
         endpoints = sp.get("endpoints", {})
         self.acs_endpoints = [
             tuple(e) for e in endpoints.get("assertion_consumer_service", [])
         ]
-        self.slo_endpoints = [tuple(e) for e in endpoints.get("single_logout_service", [])]
+        self.slo_endpoints = [
+            tuple(e) for e in endpoints.get("single_logout_service", [])
+        ]
 
         self.idp = dict(sp.get("idp", {}))
         # The shim deliberately defaults to signed AuthnResponses. Deployments
         # accepting unsigned test responses must opt out in their SP settings.
         self.want_response_signed = _as_bool(sp.get("want_response_signed", True))
-        self.want_assertions_signed = _as_bool(
-            sp.get("want_assertions_signed", False)
-        )
+        self.want_assertions_signed = _as_bool(sp.get("want_assertions_signed", False))
         # pysaml2 treats logout-response signing as its own setting; requiring
         # signed AuthnResponses must not silently change the SLO contract.
         self.want_logout_response_signed = _as_bool(
             sp.get("want_logout_response_signed", False)
         )
-        self.authn_requests_signed = _as_bool(
-            sp.get("authn_requests_signed", False)
-        )
-        self.logout_requests_signed = _as_bool(
-            sp.get("logout_requests_signed", False)
-        )
+        self.authn_requests_signed = _as_bool(sp.get("authn_requests_signed", False))
+        self.logout_requests_signed = _as_bool(sp.get("logout_requests_signed", False))
         self.logout_responses_signed = _as_bool(
             sp.get("logout_responses_signed", False)
         )
         self.force_authn = _as_bool(sp.get("force_authn", False))
         self.allow_create = _as_bool(
             sp.get("allow_create", sp.get("name_id_format_allow_create", False))
+        )
+        self.allow_unknown_attributes = _as_bool(
+            sp.get(
+                "allow_unknown_attributes", conf.get("allow_unknown_attributes", False)
+            )
         )
         self.name_id_format = sp.get("name_id_format")
         self.name_id_policy_format = sp.get("name_id_policy_format")
@@ -129,12 +202,28 @@ class SPConfig:
 
         self.key_file = conf.get("key_file")
         self.cert_file = conf.get("cert_file")
+        raw_keypairs = conf.get("encryption_keypairs", [])
+        if not isinstance(raw_keypairs, list):
+            raise TypeError("encryption_keypairs must be a list")
+        self.encryption_keypairs = []
+        for pair in raw_keypairs:
+            if not isinstance(pair, dict) or not pair.get("key_file"):
+                raise ValueError("each encryption_keypairs entry requires key_file")
+            self.encryption_keypairs.append(dict(pair))
 
         # Reset before (re)loading so a reused SPConfig instance does not
         # accumulate stale metadata across load() calls.
         self.metadata = MetadataStore()
-        for path in conf.get("metadata", {}).get("local", []):
+        metadata_config = conf.get("metadata", {})
+        unsupported = set(metadata_config) - {"local", "remote"}
+        if unsupported:
+            raise ValueError(
+                "unsupported metadata source(s): " + ", ".join(sorted(unsupported))
+            )
+        for path in metadata_config.get("local", []):
             self._load_metadata_file(path)
+        for source in metadata_config.get("remote", []):
+            self._load_remote_metadata(source)
 
         return self
 
@@ -143,12 +232,115 @@ class SPConfig:
             with open(path, encoding="utf-8") as fh:
                 xml = fh.read()
         except OSError as exc:
-            raise SourceNotFound(f"could not read metadata source {path!r}: {exc}") from exc
-        try:
+            raise SourceNotFound(
+                f"could not read metadata source {path!r}: {exc}"
+            ) from exc
+        root = ET.fromstring(xml)
+        if root.tag == f"{{{_MD_NS}}}EntitiesDescriptor":
             entities = _md.parse_entities(xml)
-        except Exception:
+        else:
             entities = [_md.parse_entity(xml)]
-        self.metadata.add_source(path, list(entities))
+        entity_list = list(entities)
+        self._validate_metadata_document(xml, entity_list, require_expiry=False)
+        self.metadata.add_source(path, entity_list)
+
+    def _load_remote_metadata(self, source: Any) -> None:
+        if (
+            not isinstance(source, dict)
+            or not source.get("url")
+            or not source.get("cert")
+        ):
+            raise ValueError("remote metadata entries require url and cert")
+        url = str(source["url"])
+        if urllib.parse.urlsplit(url).scheme.lower() != "https":
+            raise SourceNotFound("remote metadata URL must use HTTPS")
+        cert_path = str(source["cert"])
+        try:
+            with open(cert_path, "rb") as fh:
+                cert = fh.read()
+        except OSError as exc:
+            raise SourceNotFound(
+                f"could not read metadata signing certificate {cert_path!r}: {exc}"
+            ) from exc
+        try:
+            request = urllib.request.Request(
+                url,
+                headers={"Accept": "application/samlmetadata+xml, application/xml"},
+            )
+            opener = urllib.request.build_opener(_HttpsOnlyRedirectHandler())
+            with opener.open(request, timeout=10) as response:
+                if urllib.parse.urlsplit(response.geturl()).scheme.lower() != "https":
+                    raise SourceNotFound("remote metadata redirected away from HTTPS")
+                length = response.headers.get("Content-Length")
+                if length is not None and int(length) > _MAX_REMOTE_METADATA_BYTES:
+                    raise SourceNotFound("remote metadata exceeds the 32 MiB limit")
+                body = response.read(_MAX_REMOTE_METADATA_BYTES + 1)
+        except SourceNotFound:
+            raise
+        except (OSError, urllib.error.URLError, ValueError) as exc:
+            raise SourceNotFound(
+                f"could not fetch metadata source {url!r}: {exc}"
+            ) from exc
+        if len(body) > _MAX_REMOTE_METADATA_BYTES:
+            raise SourceNotFound("remote metadata exceeds the 32 MiB limit")
+        try:
+            xml = body.decode("utf-8")
+            root = ET.fromstring(xml)
+            results = SamlVerifier.from_cert(cert).verify_all_enveloped(xml)
+        except Exception as exc:
+            raise SourceNotFound(
+                f"remote metadata verification failed for {url!r}: {exc}"
+            ) from exc
+        if not results or not all(result.is_valid() for result in results):
+            raise SourceNotFound(f"remote metadata signature is invalid for {url!r}")
+        root_id = root.attrib.get("ID", "")
+        signed_ids = {
+            item for result in results for item in result.signed_reference_ids()
+        }
+        if "" not in signed_ids and root_id not in signed_ids:
+            raise SourceNotFound(
+                f"remote metadata signature does not cover the document root for {url!r}"
+            )
+        if root.tag == f"{{{_MD_NS}}}EntitiesDescriptor":
+            entities = _md.parse_entities(xml)
+        else:
+            entities = [_md.parse_entity(xml)]
+        entity_list = list(entities)
+        self._validate_metadata_document(xml, entity_list, require_expiry=True)
+        self.metadata.add_source(url, entity_list)
+
+    def _validate_metadata_document(
+        self, xml: str, entities: list[_md.EntityDescriptor], *, require_expiry: bool
+    ) -> None:
+        expiries = _effective_entity_expiries(xml)
+        now = datetime.now(timezone.utc)
+        for entity in entities:
+            _md.validate_entity(entity)
+            expiry = expiries.get(entity.entity_id)
+            if require_expiry and expiry is None:
+                raise ValueError(
+                    f"remote metadata entity {entity.entity_id!r} has no finite validUntil"
+                )
+            if expiry is not None and expiry <= now:
+                raise ValueError(f"metadata entity {entity.entity_id!r} has expired")
+            if entity.is_idp():
+                if not entity.single_sign_on_services():
+                    raise ValueError(
+                        f"IdP metadata {entity.entity_id!r} has no SSO endpoint"
+                    )
+                signatures_required = (
+                    self.want_response_signed
+                    or self.want_assertions_signed
+                    or self.want_logout_response_signed
+                )
+                if (
+                    signatures_required
+                    and (require_expiry or self._signature_policy_explicit)
+                    and not entity.signing_certificates("idp")
+                ):
+                    raise ValueError(
+                        f"IdP metadata {entity.entity_id!r} has no signing certificate"
+                    )
 
     def getattr(self, attribute: str, context: str | None = None) -> Any:
         """Read a setting using pysaml2's optional service context."""
@@ -220,7 +412,9 @@ class SPConfig:
             for ep in ed.single_sign_on_services():
                 if ep.binding == binding:
                     return ep.location
-        raise ValueError(f"no SingleSignOnService for {idp_entity_id!r} with binding {binding}")
+        raise ValueError(
+            f"no SingleSignOnService for {idp_entity_id!r} with binding {binding}"
+        )
 
     def single_logout_service(
         self, idp_entity_id: str | None, binding: str = BINDING_HTTP_REDIRECT
@@ -235,7 +429,9 @@ class SPConfig:
             for ep in ed.single_logout_services("idp"):
                 if ep.binding == binding:
                     return ep.location
-        raise ValueError(f"no SingleLogoutService for {idp_entity_id!r} with binding {binding}")
+        raise ValueError(
+            f"no SingleLogoutService for {idp_entity_id!r} with binding {binding}"
+        )
 
     def single_logout_response_service(
         self, idp_entity_id: str | None, binding: str = BINDING_HTTP_REDIRECT
@@ -262,7 +458,9 @@ class SPConfig:
             raise ValueError(f"no metadata for IdP {idp_entity_id!r}")
         certs = ed.signing_certificates("idp")
         if not certs:
-            raise ValueError(f"IdP {idp_entity_id!r} metadata has no signing certificate")
+            raise ValueError(
+                f"IdP {idp_entity_id!r} metadata has no signing certificate"
+            )
         return list(certs)
 
     def idp_signing_cert(self, idp_entity_id: str | None) -> bytes:

@@ -7,7 +7,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
 use gamlastan::core::assertion::name_id::NameIdOrEncryptedId;
-use gamlastan::core::assertion::types::Assertion as GAssertion;
+use gamlastan::core::assertion::subject::Subject as GSubject;
+use gamlastan::core::assertion::types::{Assertion as GAssertion, AssertionRef};
 use gamlastan::core::identifiers::SamlId;
 use gamlastan::core::protocol::request::{AuthnContextComparison, Scoping};
 use gamlastan::core::protocol::response::Response as GResponse;
@@ -15,11 +16,12 @@ use gamlastan::core::protocol::ResponseRef;
 use gamlastan::profiles::sso::{idp as gidp, sp as gsp, web_browser as gwb};
 use gamlastan::profiles::{InMemorySessionStore as GInMemorySessionStore, SessionStore};
 use gamlastan::security as gs;
+use gamlastan::xml::deserialize::SamlDeserialize;
 use gamlastan::xml::{parse_saml, parse_secure};
 
 use crate::convert::new_submodule;
-use crate::core::{Attribute, AuthnRequest, NameId, Response};
-use crate::crypto::SamlVerifier;
+use crate::core::{Assertion, Attribute, AuthnRequest, NameId, Response};
+use crate::crypto::{SamlDecryptor, SamlVerifier};
 use crate::errors::{profile_err, xml_err};
 use crate::metadata::EntityDescriptor;
 use crate::security::{
@@ -32,7 +34,21 @@ use crate::security::{
 fn parse_response_xml(xml: &str) -> PyResult<Response> {
     let doc = parse_secure(xml).map_err(xml_err)?;
     let r = parse_saml::<ResponseRef<'_>>(&doc).map_err(xml_err)?;
-    Ok(Response::wrap(r.to_owned()))
+    let mut response = r.to_owned();
+    normalize_issuer_text(&mut response);
+    Ok(Response::wrap(response))
+}
+
+/// pysaml2 collapses surrounding XML whitespace in Issuer character data.
+/// Preserve that interoperability after verification, while keeping the exact
+/// original bytes as the verifier input.
+fn normalize_issuer_text(response: &mut GResponse) {
+    if let Some(issuer) = &mut response.base.issuer {
+        issuer.value = issuer.value.trim().to_string();
+    }
+    for assertion in &mut response.assertions {
+        assertion.issuer.value = assertion.issuer.value.trim().to_string();
+    }
 }
 
 fn parse_comparison(s: Option<String>) -> PyResult<Option<AuthnContextComparison>> {
@@ -266,6 +282,7 @@ pub struct AuthnRequestOptions {
     allow_create: Option<bool>,
     idp_list: Vec<String>,
     request_id: Option<SamlId>,
+    subject_name_id: Option<gamlastan::core::assertion::name_id::NameId>,
 }
 
 #[pymethods]
@@ -277,6 +294,7 @@ impl AuthnRequestOptions {
         sp_name_qualifier=None, authn_context_class_refs=None, authn_context_comparison=None,
         provider_name=None, destination=None, proxy_count=None, requester_ids=None,
         attribute_consuming_service_index=None, extensions=None, idp_list=None, request_id=None,
+        subject_name_id=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -299,6 +317,7 @@ impl AuthnRequestOptions {
         extensions: Option<String>,
         idp_list: Option<Vec<String>>,
         request_id: Option<String>,
+        subject_name_id: Option<NameId>,
     ) -> PyResult<Self> {
         let o = gwb::AuthnRequestOptions {
             sp_entity_id,
@@ -327,6 +346,7 @@ impl AuthnRequestOptions {
                 .map(SamlId::from_string)
                 .transpose()
                 .map_err(profile_err)?,
+            subject_name_id: subject_name_id.map(|value| value.inner),
         })
     }
 }
@@ -359,6 +379,12 @@ fn create_authn_request(options: &AuthnRequestOptions) -> PyResult<AuthnRequest>
             }
         }
     }
+    if let Some(name_id) = &options.subject_name_id {
+        req.subject = Some(GSubject {
+            name_id: Some(NameIdOrEncryptedId::NameId(name_id.clone())),
+            subject_confirmations: Vec::new(),
+        });
+    }
     Ok(AuthnRequest::wrap(req))
 }
 
@@ -369,10 +395,15 @@ fn create_authn_request(options: &AuthnRequestOptions) -> PyResult<AuthnRequest>
 #[pyclass(module = "pygamlastan.profiles", name = "AuthnResult", frozen)]
 pub struct AuthnResult {
     inner: gwb::AuthnResult,
+    assertion: GAssertion,
 }
 
 #[pymethods]
 impl AuthnResult {
+    #[getter]
+    fn assertion(&self) -> Assertion {
+        Assertion::wrap(self.assertion.clone())
+    }
     #[getter]
     fn name_id(&self) -> &str {
         &self.inner.name_id
@@ -499,8 +530,10 @@ fn process_response(
         replay_cache.is_some(),
         unsafe_no_replay_cache,
     )?;
+    let mut normalized = response.inner.clone();
+    normalize_issuer_text(&mut normalized);
     require_profile_persistent_id_store(
-        &response.inner,
+        &normalized,
         config,
         persistent_id_store.is_some(),
         unsafe_no_persistent_id_store,
@@ -527,7 +560,7 @@ fn process_response(
         .map(|s| s as &dyn gs::name_id::PersistentIdStore);
 
     let result = process_response_with_stores(
-        &response.inner,
+        &normalized,
         config,
         cache_ref,
         pid_ref,
@@ -539,7 +572,16 @@ fn process_response(
         &signed_id_refs,
         now,
     )?;
-    Ok(AuthnResult { inner: result })
+    let assertion = normalized
+        .assertions
+        .iter()
+        .find(|item| item.id == result.assertion_id)
+        .cloned()
+        .ok_or_else(|| profile_err("processed assertion is absent from response"))?;
+    Ok(AuthnResult {
+        inner: result,
+        assertion,
+    })
 }
 
 /// Safe, opinionated SP entry point: verify the response signature internally,
@@ -560,7 +602,7 @@ fn process_response(
 #[pyo3(signature = (
     response_xml, verifier, config, sp_entity_id, acs_url, expected_idp_entity_id,
     expected_request_id=None, now=None, replay_cache=None, persistent_id_store=None,
-    persistent_id_principal=None, unsafe_no_replay_cache=false,
+    persistent_id_principal=None, decryptor=None, unsafe_no_replay_cache=false,
     unsafe_no_persistent_id_store=false,
 ))]
 #[allow(clippy::too_many_arguments)]
@@ -576,6 +618,7 @@ fn process_response_verified(
     replay_cache: Option<Py<PyAny>>,
     persistent_id_store: Option<Py<PyAny>>,
     persistent_id_principal: Option<String>,
+    decryptor: Option<&SamlDecryptor>,
     unsafe_no_replay_cache: bool,
     unsafe_no_persistent_id_store: bool,
 ) -> PyResult<AuthnResult> {
@@ -587,10 +630,61 @@ fn process_response_verified(
 
     // 1. Verify the signature over the exact bytes; this is the only source of
     //    truth for which IDs count as signed (errors if invalid/unsigned).
-    let signed_ids = verifier.verified_signed_ids(response_xml)?;
+    let mut signed_ids = verifier.verified_signed_ids(response_xml)?;
+    // 2. Parse the SAME bytes. If it contains encrypted assertions, require a
+    //    decryptor, reject a mixed clear/encrypted response, and parse every
+    //    decrypted assertion through the secure native XML parser.
+    let mut parsed = parse_response_xml(response_xml)?;
+    let encrypted = std::mem::take(&mut parsed.inner.encrypted_assertions);
+    if !encrypted.is_empty() {
+        if !parsed.inner.assertions.is_empty() {
+            return Err(profile_err(
+                "response must not mix plaintext and encrypted assertions",
+            ));
+        }
+        let decryptor = decryptor.ok_or_else(|| {
+            profile_err("response contains EncryptedAssertion but no decryptor was configured")
+        })?;
+        for encrypted_assertion in encrypted {
+            let encrypted_xml = std::str::from_utf8(&encrypted_assertion.raw)
+                .map_err(|e| profile_err(format!("non-UTF8 EncryptedAssertion: {e}")))?;
+            let plaintext = decryptor
+                .inner
+                .decrypt(encrypted_xml)
+                .map_err(profile_err)?;
+            let assertion_doc = parse_secure(&plaintext).map_err(xml_err)?;
+            let root = assertion_doc
+                .document_element()
+                .ok_or_else(|| profile_err("decrypted assertion document is empty"))?;
+            let assertion_node = if assertion_doc.element(root).is_some_and(|element| {
+                element.matches_name_ns("urn:oasis:names:tc:SAML:2.0:assertion", "Assertion")
+            }) {
+                root
+            } else {
+                assertion_doc
+                    .children_iter(root)
+                    .find(|node| {
+                        assertion_doc.element(*node).is_some_and(|element| {
+                            element.matches_name_ns(
+                                "urn:oasis:names:tc:SAML:2.0:assertion",
+                                "Assertion",
+                            )
+                        })
+                    })
+                    .ok_or_else(|| {
+                        profile_err("decrypted EncryptedAssertion has no Assertion child")
+                    })?
+            };
+            let assertion_ref =
+                AssertionRef::from_xml(&assertion_doc, assertion_node).map_err(xml_err)?;
+            let assertion = assertion_ref.to_owned();
+            if assertion.has_signature {
+                signed_ids.extend(verifier.verified_signed_ids(&plaintext)?);
+            }
+            parsed.inner.assertions.push(assertion);
+        }
+    }
     let signed_id_refs: Vec<&str> = signed_ids.iter().map(|s| s.as_str()).collect();
-    // 2. Parse the SAME bytes into a Response, then validate.
-    let parsed = parse_response_xml(response_xml)?;
     require_profile_persistent_id_store(
         &parsed.inner,
         config,
@@ -620,7 +714,17 @@ fn process_response_verified(
         &signed_id_refs,
         now,
     )?;
-    Ok(AuthnResult { inner: result })
+    let assertion = parsed
+        .inner
+        .assertions
+        .iter()
+        .find(|item| item.id == result.assertion_id)
+        .cloned()
+        .ok_or_else(|| profile_err("processed assertion is absent from response"))?;
+    Ok(AuthnResult {
+        inner: result,
+        assertion,
+    })
 }
 
 // ---------------------------------------------------------------------------

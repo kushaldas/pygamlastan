@@ -67,6 +67,11 @@ class MetadataStore(Mapping[str, EntityDescriptor]):
     def add_source(self, source: str, entities: list[EntityDescriptor]) -> None:
         """Register the entities parsed from one local metadata source."""
         local = _LocalMetadataSource(entities)
+        duplicates = set(local.entities).intersection(self._entities)
+        if duplicates:
+            raise ValueError(
+                "duplicate metadata entity id(s): " + ", ".join(sorted(duplicates))
+            )
         self.metadata[source] = local
         self._entities.update(local.entities)
 
@@ -164,15 +169,19 @@ class MetadataStore(Mapping[str, EntityDescriptor]):
     def with_descriptor(self, descriptor: str) -> dict[str, EntityDescriptor]:
         """Return entities that publish the requested IdP or SP descriptor."""
         if descriptor == "idpsso":
-            return {key: value for key, value in self._entities.items() if value.is_idp()}
+            return {
+                key: value for key, value in self._entities.items() if value.is_idp()
+            }
         if descriptor == "spsso":
-            return {key: value for key, value in self._entities.items() if value.is_sp()}
+            return {
+                key: value for key, value in self._entities.items() if value.is_sp()
+            }
         return {}
 
 
 # Keep the exception type identical across ``mdstore`` and ``s_utils`` without
 # creating an import cycle during configuration loading.
-from .s_utils import UnknownSystemEntity  # noqa: E402  (intentional late import)
+from .s_utils import UnknownSystemEntity  # noqa: I001 - intentional late import
 
 
 __all__ = ["MetaDataMDX", "MetadataStore", "SourceNotFound"]
