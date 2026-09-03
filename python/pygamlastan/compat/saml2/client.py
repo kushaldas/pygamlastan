@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
+import hmac
 import json
 import re
 import secrets
@@ -73,6 +75,36 @@ def _post_http_info(url: str, html: str) -> dict[str, Any]:
         "headers": [("Content-type", "text/html")],
         "data": html,
     }
+
+
+def _matches_legacy_logout_relay_state(
+    request_id: str, relay_state: str, secret: Any
+) -> bool:
+    """Validate RelayState emitted by pysaml2 or the earlier shim.
+
+    Older pygamlastan releases used the request ID directly. pysaml2 used
+    ``request-id|timestamp|HMAC-SHA1`` but did not persist that value alongside
+    its request state, so rolling upgrades must validate the legacy encoding.
+    """
+    if relay_state == request_id:
+        return True
+    parts = relay_state.split("|")
+    if len(parts) != 3 or parts[0] != request_id:
+        return False
+    try:
+        int(parts[1])
+    except ValueError:
+        return False
+    if secret is None:
+        secret_bytes = b""
+    elif isinstance(secret, bytes):
+        secret_bytes = secret
+    else:
+        secret_bytes = str(secret).encode("utf-8")
+    digest = hmac.new(secret_bytes, digestmod=hashlib.sha1)
+    digest.update(parts[0].encode("utf-8"))
+    digest.update(parts[1].encode("utf-8"))
+    return hmac.compare_digest(digest.hexdigest(), parts[2])
 
 
 def _signature_template(
@@ -947,6 +979,7 @@ class Saml2Client:
         """
         sp_entity_id = self._require_entityid()
         state_data = kwargs.pop("state_data", None)
+        requested_relay_state = kwargs.pop("relay_state", None)
         deadline = _logout_deadline(expire)
         if deadline is not None and deadline <= datetime.now(timezone.utc):
             raise LogoutError("the requested logout expiry has already passed")
@@ -1015,7 +1048,11 @@ class Saml2Client:
                 ) from exc
 
             xml = request.to_xml()
-            relay_state = request.id
+            relay_state = (
+                requested_relay_state
+                if requested_relay_state is not None
+                else request.id
+            )
             if binding == BINDING_HTTP_REDIRECT:
                 url = _bindings.redirect_encode(
                     xml.encode("utf-8"),
@@ -1049,6 +1086,7 @@ class Saml2Client:
                 "operation": "SLO",
                 "name_id": code(name_id),
                 "binding": binding,
+                "relay_state": relay_state,
                 "reason": reason,
                 # Django's default JSON session serializer cannot persist a
                 # datetime object; keep the state cache transport-neutral.
@@ -1209,8 +1247,20 @@ class Saml2Client:
         if not parsed.is_success():
             raise StatusError("LogoutResponse status is not Success")
         relay_state = kwargs.get("relay_state")
-        if relay_state is not None and relay_state != request_id:
-            raise StatusError("LogoutResponse RelayState does not match InResponseTo")
+        if state is not None and request_id is not None:
+            stored_relay_state = state.get("relay_state")
+            if stored_relay_state is not None:
+                relay_state_matches = relay_state == stored_relay_state
+            else:
+                relay_state_matches = isinstance(relay_state, str) and (
+                    _matches_legacy_logout_relay_state(
+                        request_id, relay_state, self.config.raw.get("secret")
+                    )
+                )
+            if not relay_state_matches:
+                raise StatusError(
+                    "LogoutResponse RelayState does not match the outstanding request"
+                )
         if state is not None and request_id is not None:
             marker = object()
             consumed = self.state.pop(request_id, marker)

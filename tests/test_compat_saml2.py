@@ -9,7 +9,9 @@ eduID integration is verified separately in the eduid-developer env.
 """
 
 import base64
+import hashlib
 import html
+import hmac
 import itertools
 import re
 import urllib.parse
@@ -790,6 +792,7 @@ def test_global_logout_persists_and_consumes_correlation_state():
     request_id = pgxml.parse_logout_request(request.saml_text).id
     assert request_state.sync_calls == 1
     assert session["state"][request_id]["entity_id"] == IDP
+    assert session["state"][request_id]["relay_state"] == request.relay_state
 
     encoded = deflate_and_base64_encode(_logout_response(request_id))
     response_state = SessionState()
@@ -797,7 +800,7 @@ def test_global_logout_persists_and_consumes_correlation_state():
         SPConfig().load(CONF), state_cache=response_state
     )
     response = response_client.parse_logout_request_response(
-        encoded, BINDING_HTTP_REDIRECT
+        encoded, BINDING_HTTP_REDIRECT, relay_state=request.relay_state
     )
     assert response.status_ok()
     assert response_state.sync_calls == 1
@@ -835,12 +838,13 @@ def test_signed_logout_response_is_verified_and_correlated(rsa_keypair, tmp_path
     nid = NameID(text="abc123hash", format=TRANSIENT, sp_name_qualifier=SP)
     _binding, info = client.global_logout(nid)[IDP]
     query = dict(info["headers"])["Location"].split("?", 1)[1]
-    request_id = pgxml.parse_logout_request(
-        pgbindings.redirect_decode(query).saml_text
-    ).id
+    decoded = pgbindings.redirect_decode(query)
+    request_id = pgxml.parse_logout_request(decoded.saml_text).id
     xml = _signed_logout_response(request_id, cert_der_b64, private_key)
     encoded = deflate_and_base64_encode(xml)
-    assert client.parse_logout_request_response(encoded).status_ok()
+    assert client.parse_logout_request_response(
+        encoded, relay_state=decoded.relay_state
+    ).status_ok()
     assert request_id not in state
 
 
@@ -862,7 +866,9 @@ def test_detached_redirect_logout_response_is_verified(rsa_keypair, tmp_path):
     private_key, _cert_pem, cert_der_b64 = rsa_keypair
     base = _signed_client(tmp_path, cert_der_b64)
     base.config.want_logout_response_signed = True
-    state = {"redirect-response": {"entity_id": IDP}}
+    state = {
+        "redirect-response": {"entity_id": IDP, "relay_state": "relay value"}
+    }
     signed_client = Saml2Client(base.config, state_cache=state)
     encoded, sig_alg, signature, signed_query = _redirect_signed_logout_response(
         "redirect-response", private_key, relay_state="relay value"
@@ -874,10 +880,67 @@ def test_detached_redirect_logout_response_is_verified(rsa_keypair, tmp_path):
         sig_alg=sig_alg,
         signature=signature,
         signed_query=signed_query,
+        relay_state="relay value",
     )
 
     assert response.status_ok()
     assert "redirect-response" not in state
+
+
+def test_logout_response_requires_exact_stored_relay_state():
+    state: dict[str, dict[str, str]] = {}
+    client = Saml2Client(SPConfig().load(CONF), state_cache=state)
+    name_id = NameID(text="abc123hash", format=TRANSIENT, sp_name_qualifier=SP)
+    _binding, info = client.do_logout(
+        name_id,
+        [IDP],
+        "",
+        None,
+        relay_state="opaque-state-from-caller",
+    )[IDP]
+    decoded_request = pgbindings.redirect_decode(
+        dict(info["headers"])["Location"].split("?", 1)[1]
+    )
+    request_id = pgxml.parse_logout_request(decoded_request.saml_text).id
+    assert decoded_request.relay_state == "opaque-state-from-caller"
+    assert state[request_id]["relay_state"] == "opaque-state-from-caller"
+    encoded = deflate_and_base64_encode(_logout_response(request_id))
+
+    with pytest.raises(StatusError, match="RelayState does not match"):
+        client.parse_logout_request_response(encoded)
+    with pytest.raises(StatusError, match="RelayState does not match"):
+        client.parse_logout_request_response(encoded, relay_state=request_id)
+    assert request_id in state
+
+    response = client.parse_logout_request_response(
+        encoded, relay_state="opaque-state-from-caller"
+    )
+    assert response.status_ok()
+    assert request_id not in state
+
+
+def test_logout_response_accepts_verified_pysaml2_relay_state_during_migration():
+    request_id = "legacy-pysaml2-request"
+    timestamp = "1788415200"
+    secret = "shared-relay-secret"
+    digest = hmac.new(secret.encode(), digestmod=hashlib.sha1)
+    digest.update(request_id.encode())
+    digest.update(timestamp.encode())
+    relay_state = f"{request_id}|{timestamp}|{digest.hexdigest()}"
+    state = {request_id: {"entity_id": IDP}}
+    config = SPConfig().load({**CONF, "secret": secret})
+    client = Saml2Client(config, state_cache=state)
+
+    with pytest.raises(StatusError, match="RelayState does not match"):
+        client.parse_logout_request_response(
+            deflate_and_base64_encode(_logout_response(request_id)),
+            relay_state=relay_state[:-1] + ("0" if relay_state[-1] != "0" else "1"),
+        )
+    response = client.parse_logout_request_response(
+        deflate_and_base64_encode(_logout_response(request_id)),
+        relay_state=relay_state,
+    )
+    assert response.status_ok()
 
 
 def test_tampered_redirect_logout_response_retains_state(rsa_keypair, tmp_path):
@@ -3193,6 +3256,9 @@ def test_metadata_generation_includes_full_sp_contract(rsa_keypair, tmp_path):
         "contact_person": [
             {
                 "contact_type": "technical",
+                "company": "Example AB",
+                "given_name": "Alice",
+                "sur_name": "Admin",
                 "email_address": ["ops@example.org", "security@example.org"],
                 "telephone_number": ["+46-1", "+46-2"],
             }
@@ -3213,6 +3279,8 @@ def test_metadata_generation_includes_full_sp_contract(rsa_keypair, tmp_path):
     assert "<md:EmailAddress>ops@example.org</md:EmailAddress>" in xml
     assert "<md:EmailAddress>security@example.org</md:EmailAddress>" in xml
     assert xml.count("<md:TelephoneNumber>") == 2
+    assert xml.index("<md:Company>") < xml.index("<md:GivenName>")
+    assert xml.index("<md:GivenName>") < xml.index("<md:SurName>")
 
 
 def test_signed_remote_metadata_is_verified_before_loading(

@@ -170,9 +170,9 @@ def entity_descriptor(config: SPConfig) -> EntityDescriptor:
         _localized(organization, "OrganizationURL", config.organization.get("url"))
 
     contact_fields = {
+        "company": "Company",
         "given_name": "GivenName",
         "sur_name": "SurName",
-        "company": "Company",
         "email_address": "EmailAddress",
         "telephone_number": "TelephoneNumber",
     }
