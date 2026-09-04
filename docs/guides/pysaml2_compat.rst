@@ -169,6 +169,9 @@ The relevant keys:
   automatically.
 * ``service.sp.want_response_signed`` - the security switch (see
   `Security model`_); defaults to ``True``.
+* ``service.sp.allow_unsolicited`` - accept intentional IdP-initiated SSO with
+  no outstanding AuthnRequest. It defaults to ``False`` and uses the existing
+  pysaml2 setting name.
 * ``service.sp.authn_requests_signed`` / ``logout_requests_signed`` /
   ``logout_responses_signed`` - independent outbound signing switches.
 * ``service.sp.want_assertions_signed`` /
@@ -228,6 +231,9 @@ Processing the Response
 ``parse_authn_request_response(raw, binding, outstanding)`` decodes the
 ``SAMLResponse`` (base64 for HTTP-POST), enforces that its ``InResponseTo`` is in
 your ``outstanding`` set, verifies/validates it, and returns an ``AuthnResponse``.
+Calling it without an outstanding mapping is rejected as
+``UnsolicitedResponse`` unless ``service.sp.allow_unsolicited`` is explicitly
+enabled; a response carrying a dangling ``InResponseTo`` is always rejected.
 
 .. code-block:: python
 
@@ -422,7 +428,9 @@ reset replay state. A multi-process deployment should inject a shared
 implementation via ``Saml2Client(config, replay_cache=...)`` (any object with
 ``check_and_insert(id, expiry) -> bool`` and ``cleanup()``). The shim calls
 ``cleanup()`` periodically (throttled) from its processing paths, so expired
-entries are evicted and the cache stays bounded in a long-running SP. Keys sent
+entries in custom backends are evicted and the cache stays bounded in a
+long-running SP. Gamlastan 0.9's built-in cache also prunes expired entries
+during insertion. Keys sent
 to that backend are stable ASCII strings namespaced by message kind, local SP
 entity ID, and trusted expected IdP, so one trust context cannot reserve a raw
 SAML ID and make another context fail as a replay.

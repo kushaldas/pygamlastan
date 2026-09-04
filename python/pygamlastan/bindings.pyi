@@ -1,8 +1,19 @@
 from collections.abc import Mapping, Sequence
+from typing import Protocol
 
 from .crypto import SamlSigner
 
 RELAY_STATE_MAX_BYTES: int
+
+class ArtifactStoreProtocol(Protocol):
+    def store(self, artifact: str, message_xml: bytes) -> None: ...
+    def resolve_and_consume(self, artifact: str) -> bytes | None: ...
+    def store_for_recipient(
+        self, artifact: str, recipient_entity_id: str, message_xml: bytes
+    ) -> None: ...
+    def resolve_and_consume_for_requester(
+        self, artifact: str, requester_entity_id: str
+    ) -> bytes | None: ...
 
 class RedirectDecoded:
     @property
@@ -32,6 +43,8 @@ class PostDecoded:
 
 class SamlArtifact:
     def __init__(self, endpoint_index: int, entity_id: str, random_handle: bytes) -> None: ...
+    @staticmethod
+    def generate(endpoint_index: int, entity_id: str) -> SamlArtifact: ...
     @staticmethod
     def decode(encoded: str) -> SamlArtifact: ...
     def encode(self) -> str: ...

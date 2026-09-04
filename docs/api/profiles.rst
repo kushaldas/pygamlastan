@@ -152,9 +152,60 @@ Identity Provider
 Sessions
 --------
 
+.. py:class:: SessionParticipant(entity_id, name_id_value, name_id_format=None, name_qualifier=None, sp_name_qualifier=None, sp_provided_id=None, session_indexes=None, slo_url=None, slo_binding=None, session_not_on_or_after=None)
+
+   One SP participating in an IdP-side session. The full participant NameID is
+   retained, including the gamlastan 0.9 ``sp_provided_id`` field, so incoming
+   LogoutRequests can be matched without confusing it with the local principal.
+
+   Read-only attributes: ``entity_id``, ``name_id_value``, ``name_id_format``,
+   ``name_qualifier``, ``sp_name_qualifier``, ``sp_provided_id``,
+   ``session_indexes``, ``slo_url``, ``slo_binding``, and
+   ``session_not_on_or_after``.
+
+.. py:class:: SamlSession(session_index, principal_name_id, authn_instant, principal_name_id_format=None, authn_context_class_ref=None, session_not_on_or_after=None, participants=None)
+
+   An IdP-side SAML session containing zero or more
+   :class:`SessionParticipant` values.
+
+   Read-only attributes: ``session_index``, ``principal_name_id``,
+   ``principal_name_id_format``, ``authn_instant``,
+   ``authn_context_class_ref``, ``session_not_on_or_after``, and
+   ``participants``.
+
 .. py:class:: InMemorySessionStore()
 
    A single-process store of SSO sessions for Single Logout.
 
+   .. py:method:: __len__() -> int
+   .. py:method:: is_empty() -> bool
+   .. py:method:: create_session(session: SamlSession) -> str
+   .. py:method:: get_session(session_index: str) -> SamlSession | None
+   .. py:method:: get_sessions_by_name_id(name_id: str) -> list[SamlSession]
+
+      Legacy local-principal lookup. Do not use it to authorize an incoming
+      participant LogoutRequest; use the participant-bound methods below.
+
+   .. py:method:: get_sessions_for_participant(requester_entity_id: str, name_id: pygamlastan.core.NameId, session_indexes: list[str] | None = None) -> list[SamlSession]
+
+      Find sessions containing the exact authenticated SP, full participant
+      NameID, and any supplied SessionIndex. An omitted NameID format and the
+      SAML ``unspecified`` format URI are equivalent; all other NameID
+      qualifiers, including ``SPProvidedID``, must match exactly.
+
+   .. py:method:: take_sessions_for_participant(requester_entity_id: str, name_id: pygamlastan.core.NameId, session_indexes: list[str] | None = None) -> list[SamlSession]
+
+      Atomically recheck, remove, and return matching sessions. Use this before
+      acknowledging an IdP-side LogoutRequest so concurrent replacement cannot
+      delete an unrelated session. ``session_indexes=None`` or ``[]`` matches
+      any index owned by that participant; otherwise at least one supplied
+      index must match.
+
+   .. py:method:: add_participant(session_index: str, participant: SessionParticipant) -> bool
+   .. py:method:: remove_participant(session_index: str, entity_id: str) -> bool
    .. py:method:: destroy_session(session_index: str) -> bool
    .. py:method:: cleanup_expired() -> None
+
+      Remove sessions whose session-level ``session_not_on_or_after`` has
+      passed. Participant expiry remains available to application policy and
+      IdP logout fan-out.

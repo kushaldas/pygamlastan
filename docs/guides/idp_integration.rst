@@ -185,7 +185,14 @@ After you authenticate the user, describe the response with
 
 .. code-block:: python
 
+   from datetime import datetime, timedelta, timezone
    from pygamlastan import core, profiles
+
+   issue_instant = datetime.now(timezone.utc)
+   authn_instant = issue_instant                 # or the reused login's real time
+   session_index = "session-42"
+   session_expires = issue_instant + timedelta(hours=8)
+   authn_context = core.AUTHN_CONTEXT_PASSWORD
 
    options = profiles.ResponseOptions(
        idp_entity_id="https://idp.example.org",
@@ -193,8 +200,9 @@ After you authenticate the user, describe the response with
        acs_url=processed.acs_url,
        in_response_to=processed.request_id,
        assertion_lifetime_seconds=300,
-       session_index="session-42",                 # for later Single Logout
-       authn_context_class_ref=core.AUTHN_CONTEXT_PASSWORD,
+       session_index=session_index,                 # for later Single Logout
+       session_not_on_or_after=session_expires,
+       authn_context_class_ref=authn_context,
        attributes=[
            core.Attribute("mail", values=["alice@example.org"]),
            core.Attribute("displayName", values=["Alice"]),
@@ -204,10 +212,108 @@ After you authenticate the user, describe the response with
        "alice@example.org",
        format=processed.requested_name_id_format or core.NAMEID_TRANSIENT,
    )
-   response = profiles.create_response(options, name_id)
+   response = profiles.create_response(
+       options, name_id, now=issue_instant, authn_instant=authn_instant
+   )
 
 Then sign it (see :doc:`signing`) and deliver it via the chosen binding (see
 :doc:`bindings`).
+
+Tracking sessions for participant-bound logout
+-----------------------------------------------
+
+An IdP must remember the identity and SessionIndex it issued to each SP. They
+are participant-specific: a targeted or SP-provided NameID is not necessarily
+the IdP's local principal identifier. Store the complete wire identity together
+with the SP's metadata-derived SLO endpoint:
+
+.. code-block:: python
+
+   from pygamlastan import core, profiles
+
+   session_store = profiles.InMemorySessionStore()
+
+   participant = profiles.SessionParticipant(
+       entity_id=processed.sp_entity_id,
+       name_id_value=name_id.value,
+       name_id_format=name_id.format,
+       name_qualifier=name_id.name_qualifier,
+       sp_name_qualifier=name_id.sp_name_qualifier,
+       sp_provided_id=name_id.sp_provided_id,
+       session_indexes=[session_index],
+       slo_url="https://sp.example.org/slo",       # resolve from trusted metadata
+       slo_binding=core.BINDING_HTTP_REDIRECT,
+       session_not_on_or_after=session_expires,
+   )
+   session_store.create_session(profiles.SamlSession(
+       session_index=session_index,
+       principal_name_id="user-123",               # local account identifier
+       principal_name_id_format=None,
+       authn_instant=authn_instant,
+       authn_context_class_ref=authn_context,
+       session_not_on_or_after=session_expires,
+       participants=[participant],
+   ))
+
+For a reused IdP session, call
+:meth:`~pygamlastan.profiles.InMemorySessionStore.add_participant` after issuing
+an assertion to another SP. The in-memory implementation is useful for tests
+and single-process services; a production multi-worker IdP normally needs the
+same model in shared durable storage.
+
+When an SP sends a LogoutRequest, cryptographically authenticate the exact
+message first. Then validate freshness and replay, and atomically take only the
+sessions that contain that authenticated SP with the request's complete NameID
+and optional SessionIndex:
+
+.. code-block:: python
+
+   from datetime import datetime, timezone
+   from pygamlastan import logout, security, xml
+
+   # Application-scoped in one process; use a shared backend across workers.
+   logout_replay_cache = security.InMemoryReplayCache()
+   request = xml.parse_logout_request(logout_request_xml)
+   authenticated_sp_entity_id = "https://sp.example.org/sp"
+
+   # signature_verified is the result of checking this exact Redirect query
+   # and/or XML document against this SP's trusted metadata certificate.
+   logout.validate_logout_request_with_replay(
+       request,
+       expected_issuer=authenticated_sp_entity_id,
+       signature_verified=signature_verified,
+       now=datetime.now(timezone.utc),
+       replay_cache=logout_replay_cache,
+   )
+
+   request_name_id = request.name_id
+   if request_name_id is None:
+       raise ValueError("decrypt an encrypted LogoutRequest NameID before matching")
+
+   ended_sessions = session_store.take_sessions_for_participant(
+       authenticated_sp_entity_id,
+       request_name_id,
+       request.session_indexes,
+   )
+
+   for session in ended_sessions:
+       for other_sp in session.participants:
+           if other_sp.entity_id == authenticated_sp_entity_id:
+               continue
+           propagation = logout.create_idp_propagation_request(
+               "https://idp.example.org", other_sp
+           )
+           # Sign and deliver propagation.to_xml() using other_sp.slo_binding.
+
+``take_sessions_for_participant`` performs the participant recheck and removal
+under one lock, avoiding a lookup-then-delete race. Matching includes the
+authenticated entity ID, NameID value, format and all qualifiers (including
+``SPProvidedID``), plus any supplied SessionIndex. A request from one SP cannot
+therefore terminate a similarly named session belonging to another SP.
+
+Use a long-lived replay cache shared by all handler workers; creating a fresh
+cache per request would not provide replay protection across requests. The
+built-in cache is suitable when the handler and cache object share one process.
 
 Releasing attributes
 --------------------

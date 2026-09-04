@@ -14,12 +14,111 @@ use gx::{Key as GKey, KeyUsage, KeysManager as GKeysManager};
 use crate::convert::new_submodule;
 use crate::errors::crypto_err;
 
+// ---------------------------------------------------------------------------
+// Verification algorithm policy
+// ---------------------------------------------------------------------------
+
+/// Signature and Reference-digest algorithms accepted by `SamlVerifier`.
+///
+/// The default is gamlastan's production SAML policy (RSA/ECDSA with SHA-2).
+/// `permissive()` exists only for deliberate legacy/non-SAML interoperability.
+#[pyclass(
+    module = "pygamlastan.crypto",
+    name = "AlgorithmPolicy",
+    frozen,
+    from_py_object
+)]
+#[derive(Clone)]
+pub struct AlgorithmPolicy {
+    inner: gx::AlgorithmPolicy,
+}
+
+impl AlgorithmPolicy {
+    fn wrap(inner: gx::AlgorithmPolicy) -> Self {
+        Self { inner }
+    }
+}
+
+#[pymethods]
+impl AlgorithmPolicy {
+    /// Construct the secure default SAML algorithm policy.
+    #[new]
+    fn new() -> Self {
+        Self::wrap(gx::AlgorithmPolicy::new())
+    }
+
+    /// Accept every signature and digest algorithm supported by the backend.
+    #[staticmethod]
+    fn permissive(py: Python<'_>) -> Self {
+        crate::convert::warn(
+            py,
+            "AlgorithmPolicy.permissive() accepts legacy signature and digest algorithms; use an exact allowlist in production.",
+        );
+        Self::wrap(gx::AlgorithmPolicy::permissive())
+    }
+
+    /// Construct a policy containing exactly the supplied allowlists.
+    #[staticmethod]
+    fn allow_only(signature_algorithms: Vec<String>, digest_algorithms: Vec<String>) -> Self {
+        Self::wrap(gx::AlgorithmPolicy::allow_only(
+            signature_algorithms,
+            digest_algorithms,
+        ))
+    }
+
+    /// Return a copy with a replacement signature-method allowlist.
+    fn with_signature_algorithms(&self, algorithms: Vec<String>) -> Self {
+        Self::wrap(self.inner.clone().with_signature_algorithms(algorithms))
+    }
+
+    /// Return a copy with a replacement Reference-digest allowlist.
+    fn with_digest_algorithms(&self, algorithms: Vec<String>) -> Self {
+        Self::wrap(self.inner.clone().with_digest_algorithms(algorithms))
+    }
+
+    /// `None` means backend-compatible unrestricted mode; an empty list denies all.
+    #[getter]
+    fn allowed_signature_algorithms(&self) -> Option<Vec<String>> {
+        self.inner.allowed_signature_algorithms().map(<[_]>::to_vec)
+    }
+
+    /// `None` means backend-compatible unrestricted mode; an empty list denies all.
+    #[getter]
+    fn allowed_digest_algorithms(&self) -> Option<Vec<String>> {
+        self.inner.allowed_digest_algorithms().map(<[_]>::to_vec)
+    }
+
+    fn allows_signature_algorithm(&self, uri: &str) -> bool {
+        self.inner.allows_signature_algorithm(uri)
+    }
+
+    fn allows_digest_algorithm(&self, uri: &str) -> bool {
+        self.inner.allows_digest_algorithm(uri)
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "AlgorithmPolicy(signature_algorithms={:?}, digest_algorithms={:?})",
+            self.inner.allowed_signature_algorithms(),
+            self.inner.allowed_digest_algorithms()
+        )
+    }
+}
+
+fn is_sha1_algorithm(algorithm: &str) -> bool {
+    let normalized = algorithm.to_ascii_lowercase();
+    normalized.contains("sha1") || normalized.contains("sha-1")
+}
+
 pub(crate) fn reject_weak_signature_algorithm(
     algorithm: &str,
     unsafe_allow_weak_sha1: bool,
 ) -> PyResult<()> {
-    let normalized = algorithm.to_ascii_lowercase();
-    if unsafe_allow_weak_sha1 || (!normalized.contains("sha1") && !normalized.contains("sha-1")) {
+    if unsafe_allow_weak_sha1 || !is_sha1_algorithm(algorithm) {
         return Ok(());
     }
     Err(crypto_err(
@@ -365,6 +464,36 @@ impl SamlVerifier {
         })
     }
 
+    /// Apply the same verification algorithm policy to every rollover key.
+    fn set_algorithm_policy(&mut self, policy: &AlgorithmPolicy) {
+        self.inner.set_algorithm_policy(policy.inner.clone());
+        for verifier in &mut self.fallbacks {
+            verifier.set_algorithm_policy(policy.inner.clone());
+        }
+    }
+
+    /// Return a verifier copy using `policy`, preserving all rollover keys.
+    fn with_algorithm_policy(&self, policy: &AlgorithmPolicy) -> Self {
+        let mut inner = self.inner.clone();
+        inner.set_algorithm_policy(policy.inner.clone());
+        let fallbacks = self
+            .fallbacks
+            .iter()
+            .cloned()
+            .map(|mut verifier| {
+                verifier.set_algorithm_policy(policy.inner.clone());
+                verifier
+            })
+            .collect();
+        Self { inner, fallbacks }
+    }
+
+    /// Get a copy of the active signature and Reference-digest policy.
+    #[getter]
+    fn algorithm_policy(&self) -> AlgorithmPolicy {
+        AlgorithmPolicy::wrap(self.inner.algorithm_policy().clone())
+    }
+
     #[pyo3(signature = (skip, unsafe_allow_skip_time_checks=false))]
     fn set_skip_time_checks(
         &mut self,
@@ -534,6 +663,33 @@ impl SamlVerifier {
         Ok(())
     }
 
+    /// Configure the independent HMAC SignatureMethod guard.
+    #[pyo3(signature = (reject, unsafe_allow_hmac=false))]
+    fn set_reject_hmac_signatures(
+        &mut self,
+        py: Python<'_>,
+        reject: bool,
+        unsafe_allow_hmac: bool,
+    ) -> PyResult<()> {
+        if !reject {
+            if !unsafe_allow_hmac {
+                return Err(crypto_err(
+                    "HMAC SAML signatures are disabled by default; pass \
+                     unsafe_allow_hmac=True only for non-SAML interoperability",
+                ));
+            }
+            crate::convert::warn(
+                py,
+                "SamlVerifier.set_reject_hmac_signatures(False) enables symmetric-key signature methods; do not use for SAML federation traffic.",
+            );
+        }
+        self.inner.set_reject_hmac_signatures(reject);
+        for verifier in &mut self.fallbacks {
+            verifier.set_reject_hmac_signatures(reject);
+        }
+        Ok(())
+    }
+
     /// Verify an enveloped XML-DSig signature; returns a VerifyResult.
     fn verify_enveloped(&self, signed_xml: &str) -> PyResult<VerifyResult> {
         let results = self.verify_all_with_fallbacks(signed_xml)?;
@@ -562,9 +718,48 @@ impl SamlVerifier {
         algorithm_uri: &str,
         unsafe_allow_weak_sha1: bool,
     ) -> PyResult<bool> {
-        reject_weak_signature_algorithm(algorithm_uri, unsafe_allow_weak_sha1)?;
+        // An exact custom policy is already an explicit opt-in. Preserve the
+        // older one-call escape hatch, but widen only for the requested SHA-1
+        // method instead of disabling the complete 0.9 policy.
+        if !self
+            .inner
+            .algorithm_policy()
+            .allows_signature_algorithm(algorithm_uri)
+        {
+            reject_weak_signature_algorithm(algorithm_uri, unsafe_allow_weak_sha1)?;
+        }
+        let widen_for_sha1 = unsafe_allow_weak_sha1 && is_sha1_algorithm(algorithm_uri);
+        let legacy_verifiers;
+        let verifiers: Box<dyn Iterator<Item = &gx::SamlVerifier>> = if widen_for_sha1 {
+            legacy_verifiers = std::iter::once(&self.inner)
+                .chain(self.fallbacks.iter())
+                .cloned()
+                .map(|mut verifier| {
+                    let active = verifier.algorithm_policy();
+                    if !active.allows_signature_algorithm(algorithm_uri) {
+                        let mut signatures = active
+                            .allowed_signature_algorithms()
+                            .unwrap_or_default()
+                            .to_vec();
+                        signatures.push(algorithm_uri.to_string());
+                        let policy = match active.allowed_digest_algorithms() {
+                            Some(digests) => {
+                                gx::AlgorithmPolicy::allow_only(signatures, digests.to_vec())
+                            }
+                            None => gx::AlgorithmPolicy::permissive()
+                                .with_signature_algorithms(signatures),
+                        };
+                        verifier.set_algorithm_policy(policy);
+                    }
+                    verifier
+                })
+                .collect::<Vec<_>>();
+            Box::new(legacy_verifiers.iter())
+        } else {
+            Box::new(std::iter::once(&self.inner).chain(self.fallbacks.iter()))
+        };
         let mut last_error = None;
-        for verifier in std::iter::once(&self.inner).chain(self.fallbacks.iter()) {
+        for verifier in verifiers {
             match verifier.verify_redirect_query(query_string, signature, algorithm_uri) {
                 Ok(true) => return Ok(true),
                 Ok(false) => {}
@@ -856,6 +1051,7 @@ impl Pkcs11Signer {
 
 pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let m = new_submodule(py, parent, "crypto")?;
+    m.add_class::<AlgorithmPolicy>()?;
     m.add_class::<KeysManager>()?;
     m.add_class::<SamlSigner>()?;
     m.add_class::<SamlVerifier>()?;

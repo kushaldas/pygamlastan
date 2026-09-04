@@ -66,9 +66,31 @@ RelayState
 Artifact
 --------
 
+.. py:class:: ArtifactStoreProtocol
+
+   Structural typing contract for application artifact stores. Gamlastan 0.9
+   adds ``store_for_recipient(artifact, recipient_entity_id, message_xml)`` and
+   ``resolve_and_consume_for_requester(artifact, requester_entity_id)``. New
+   implementations must bind each artifact to its authenticated SP owner; a
+   requester mismatch must not consume the artifact intended for that SP.
+
+   .. py:method:: store(artifact: str, message_xml: bytes) -> None
+   .. py:method:: resolve_and_consume(artifact: str) -> bytes | None
+   .. py:method:: store_for_recipient(artifact: str, recipient_entity_id: str, message_xml: bytes) -> None
+   .. py:method:: resolve_and_consume_for_requester(artifact: str, requester_entity_id: str) -> bytes | None
+
+      Atomically return and consume the message only when
+      ``requester_entity_id`` owns the artifact. Return ``None`` without
+      consuming it for missing artifacts and requester mismatches.
+
 .. py:class:: SamlArtifact(endpoint_index: int, entity_id: str, random_handle: bytes)
 
    A type ``0x0004`` SAML artifact. ``random_handle`` is 20 bytes.
+
+   .. py:staticmethod:: generate(endpoint_index: int, entity_id: str) -> SamlArtifact
+
+      Generate an artifact with a cryptographically secure random 20-byte
+      message handle. Prefer this to constructing handles manually.
 
    .. py:staticmethod:: decode(encoded: str) -> SamlArtifact
    .. py:method:: encode() -> str

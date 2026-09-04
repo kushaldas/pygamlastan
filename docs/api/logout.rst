@@ -26,6 +26,14 @@ Building requests
    Build the LogoutRequest. Sign it (``crypto``) before front-channel delivery.
    Raises :class:`pygamlastan.SamlProfileError` if the SP entity id is empty.
 
+.. py:function:: create_idp_propagation_request(idp_entity_id: str, participant: pygamlastan.profiles.SessionParticipant) -> pygamlastan.core.LogoutRequest
+
+   Build the IdP fan-out request for a stored participant, preserving its full
+   NameID (including ``SPProvidedID``) and session indexes, and copying
+   ``participant.slo_url`` into the request's ``Destination``. A
+   ``LogoutRequest`` has no binding field: select the delivery transport
+   separately from ``participant.slo_binding``.
+
 Building responses
 ------------------
 
@@ -60,6 +68,22 @@ Validating requests
    SLO destroys the session keyed by the request-supplied NameID, so passing a
    hard-coded ``True`` would let anyone who guesses a NameID force-log a victim
    out; the check fails closed when ``signature_verified`` is ``False``.
+
+.. py:function:: validate_logout_request_with_replay(request: pygamlastan.core.LogoutRequest, expected_issuer: str, signature_verified: bool, now: datetime.datetime, replay_cache: pygamlastan.security.ReplayCacheProtocol, clock_skew_seconds: int = 180, max_request_age_seconds: int = 300) -> None
+
+   The preferred stateful validator for a handler that can mutate sessions. In
+   addition to :func:`validate_logout_request`, it rejects future-dated and
+   stale requests and atomically reserves an issuer-scoped request ID in the
+   replay cache. A second use raises :class:`pygamlastan.SamlProfileError`.
+   Stateless signature, issuer, NameID, expiry, and age checks run before the
+   cache is mutated. The cache expiry is the earlier of the request's effective
+   ``NotOnOrAfter`` and its maximum accepted age, with clock skew applied.
+
+   Use one long-lived :class:`pygamlastan.security.InMemoryReplayCache` in a
+   single-process service, or a shared implementation of
+   :class:`pygamlastan.security.ReplayCacheProtocol` across workers. See
+   :doc:`../guides/idp_integration` for participant-bound session removal after
+   successful validation.
 
 SP-side orchestration
 ---------------------

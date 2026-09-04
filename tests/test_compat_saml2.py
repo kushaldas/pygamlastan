@@ -126,6 +126,11 @@ def _auth_response(req_id: str, resp_id: str | None = None, assert_id: str | Non
 </samlp:Response>"""
 
 
+def _unsolicited_auth_response() -> str:
+    response = _auth_response("unused-request-id")
+    return response.replace(' InResponseTo="unused-request-id"', "")
+
+
 def _logout_response(req_id: str) -> str:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return f"""<?xml version='1.0' encoding='UTF-8'?>
@@ -170,11 +175,15 @@ def _logout_request(
     issuer: str = IDP,
     issue_instant: str | None = None,
     destination: str | None = SLO,
+    not_on_or_after: str | None = None,
 ) -> str:
     ts = issue_instant or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     destination_attr = f' Destination="{destination}"' if destination is not None else ""
+    expiry_attr = (
+        f' NotOnOrAfter="{not_on_or_after}"' if not_on_or_after is not None else ""
+    )
     return f"""<?xml version='1.0' encoding='UTF-8'?>
-<samlp:LogoutRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="{req_id}" IssueInstant="{ts}" Version="2.0"{destination_attr}>
+<samlp:LogoutRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="{req_id}" IssueInstant="{ts}" Version="2.0"{destination_attr}{expiry_attr}>
   <saml:Issuer>{issuer}</saml:Issuer>
   <saml:NameID Format="{TRANSIENT}" SPNameQualifier="{SP}">abc123hash</saml:NameID>
   <samlp:SessionIndex>session-1</samlp:SessionIndex>
@@ -439,6 +448,13 @@ def test_spconfig_load_and_only_idp():
     assert cfg.want_response_signed is False
     assert cfg.want_logout_response_signed is False
     assert cfg.accepted_time_diff == 0
+    assert cfg.allow_unsolicited is False
+
+
+def test_spconfig_loads_allow_unsolicited_as_pysaml2_boolean():
+    sp = {**CONF["service"]["sp"], "allow_unsolicited": "true"}
+    cfg = SPConfig().load({**CONF, "service": {"sp": sp}})
+    assert cfg.allow_unsolicited is True
 
 
 def test_spconfig_loads_accepted_time_diff():
@@ -696,6 +712,32 @@ def test_parse_authn_response_unsolicited_rejected(client):
     raw = base64.b64encode(_auth_response(session_id).encode("utf-8")).decode("ascii")
     with pytest.raises(UnsolicitedResponse):
         client.parse_authn_request_response(raw, BINDING_HTTP_POST, {"some-other-id": "ref"})
+
+
+def test_parse_authn_response_without_outstanding_rejected_by_default(client):
+    raw = base64.b64encode(_unsolicited_auth_response().encode("utf-8")).decode("ascii")
+    with pytest.raises(UnsolicitedResponse):
+        client.parse_authn_request_response(raw, BINDING_HTTP_POST)
+
+
+def test_parse_authn_response_allows_explicit_pysaml2_opt_in():
+    sp = {**CONF["service"]["sp"], "allow_unsolicited": True}
+    compat_client = Saml2Client(SPConfig().load({**CONF, "service": {"sp": sp}}))
+    raw = base64.b64encode(_unsolicited_auth_response().encode("utf-8")).decode("ascii")
+
+    response = compat_client.parse_authn_request_response(raw, BINDING_HTTP_POST)
+
+    assert response.session_id() is None
+
+
+def test_parse_authn_response_allows_opt_in_with_empty_outstanding_mapping():
+    sp = {**CONF["service"]["sp"], "allow_unsolicited": True}
+    compat_client = Saml2Client(SPConfig().load({**CONF, "service": {"sp": sp}}))
+    raw = base64.b64encode(_unsolicited_auth_response().encode("utf-8")).decode("ascii")
+
+    response = compat_client.parse_authn_request_response(raw, BINDING_HTTP_POST, {})
+
+    assert response.session_id() is None
 
 
 def test_name_id_code_decode_round_trip():
@@ -2452,7 +2494,11 @@ def _session_nameid() -> NameID:
 
 
 def _redirect_signed_logout(
-    req_id: str, priv: bytes, relay_state: str | None = None
+    req_id: str,
+    priv: bytes,
+    relay_state: str | None = None,
+    issue_instant: str | None = None,
+    not_on_or_after: str | None = None,
 ) -> tuple[str, str, str, str]:
     """A LogoutRequest over HTTP-Redirect with a valid detached signature.
 
@@ -2463,7 +2509,13 @@ def _redirect_signed_logout(
     """
     signer = crypto.SamlSigner.from_pem(priv)
     sig_alg = signer.signature_method_uri()
-    encoded = deflate_and_base64_encode(_logout_request(req_id))
+    encoded = deflate_and_base64_encode(
+        _logout_request(
+            req_id,
+            issue_instant=issue_instant,
+            not_on_or_after=not_on_or_after,
+        )
+    )
     parts = ["SAMLRequest=" + urllib.parse.quote(encoded, safe="")]
     if relay_state is not None:
         parts.append("RelayState=" + urllib.parse.quote(relay_state, safe=""))
@@ -2872,6 +2924,33 @@ def test_handle_logout_request_stale_without_notonorafter_rejected(client):
             )
 
 
+def test_handle_logout_request_stale_with_future_notonorafter_rejected(
+    rsa_keypair, tmp_path
+):
+    """A future NotOnOrAfter cannot revive an otherwise ancient signed request."""
+    priv, _cert_pem, cert_der_b64 = rsa_keypair
+    signed_client = _signed_client(tmp_path, cert_der_b64)
+    now = datetime.now(timezone.utc)
+    old = (now - timedelta(hours=25)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    future = (now + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    encoded, sig_alg, signature, signed_query = _redirect_signed_logout(
+        "id-lr-ancient-with-expiry",
+        priv,
+        issue_instant=old,
+        not_on_or_after=future,
+    )
+
+    with pytest.raises(ValueError, match="maximum accepted age"):
+        signed_client.handle_logout_request(
+            encoded,
+            _session_nameid(),
+            BINDING_HTTP_REDIRECT,
+            sig_alg=sig_alg,
+            signature=signature,
+            signed_query=signed_query,
+        )
+
+
 def test_handle_logout_request_unknown_expected_idp_rejected(client):
     """A caller-supplied expected_idp that is neither configured nor present in
     metadata must not reach the no-certificate development fallback: an
@@ -3205,10 +3284,8 @@ def test_scoped_replay_cache_uses_distinct_ascii_protocol_keys():
 
 
 def test_replay_cache_periodic_cleanup(monkeypatch):
-    """The processing paths schedule (throttled) cache.cleanup() so expired
-    entries are evicted: gamlastan's check_and_insert never removes other
-    entries and validation never calls cleanup(), so without this the
-    process-lifetime cache would grow without bound."""
+    """Processing schedules cleanup for injected caches whose insertion path
+    may not prune expired entries itself (the 0.9 built-in cache now does)."""
     from pygamlastan.compat.saml2 import client as client_mod
 
     def force_next_cleanup():
@@ -3257,16 +3334,16 @@ def test_replay_cache_periodic_cleanup(monkeypatch):
     assert cache.cleanups == 2
 
 
-def test_inmemory_replay_cache_cleanup_evicts_expired():
-    """InMemoryReplayCache.cleanup() removes expired entries (check_and_insert
-    alone never shrinks the map)."""
+def test_inmemory_replay_cache_prunes_expired_entries_on_insert():
+    """Gamlastan 0.9 does not retain already-expired IDs in its built-in cache."""
     from pygamlastan import security
 
     cache = security.InMemoryReplayCache()
     now = datetime.now(timezone.utc)
     assert cache.check_and_insert("expired-entry", now - timedelta(seconds=1))
+    assert len(cache) == 0
     assert cache.check_and_insert("live-entry", now + timedelta(hours=1))
-    assert len(cache) == 2
+    assert len(cache) == 1
     cache.cleanup()
     assert len(cache) == 1
 

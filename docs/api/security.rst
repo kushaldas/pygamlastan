@@ -66,6 +66,13 @@ and the replay cache. See the :doc:`../guides/validation` guide.
       (``SubjectConfirmationData/@Address``). Requires passing the client address
       to validation. Off by default.
 
+   .. py:attribute:: allow_unsolicited_responses
+      :type: bool
+
+      Accept an IdP-initiated response with no ``InResponseTo``. Off by default
+      because unsolicited login permits login CSRF. Enable only for an
+      intentional IdP-initiated SSO deployment.
+
    .. py:attribute:: enforce_persistent_id_uniqueness
       :type: bool
 

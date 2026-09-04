@@ -14,7 +14,10 @@ use gamlastan::core::protocol::request::{AuthnContextComparison, Scoping};
 use gamlastan::core::protocol::response::Response as GResponse;
 use gamlastan::core::protocol::ResponseRef;
 use gamlastan::profiles::sso::{idp as gidp, sp as gsp, web_browser as gwb};
-use gamlastan::profiles::{InMemorySessionStore as GInMemorySessionStore, SessionStore};
+use gamlastan::profiles::{
+    InMemorySessionStore as GInMemorySessionStore, SamlSession as GSamlSession,
+    SessionParticipant as GSessionParticipant, SessionStore,
+};
 use gamlastan::security as gs;
 use gamlastan::xml::deserialize::SamlDeserialize;
 use gamlastan::xml::{parse_saml, parse_secure};
@@ -162,6 +165,18 @@ fn process_response_with_stores(
                 .status_message
                 .clone()
                 .unwrap_or_else(|| response.base.status.status_code.value.clone()),
+        ));
+    }
+
+    // pygamlastan performs the extraction locally so it can compose Python
+    // replay/persistent-ID stores. Mirror gamlastan 0.9's profile-level guard
+    // here rather than bypassing the new secure default.
+    if response.base.in_response_to.is_none()
+        && expected_request_id.is_none()
+        && !config.inner.allow_unsolicited_responses
+    {
+        return Err(profile_err(
+            gamlastan::profiles::ProfileError::UnsolicitedNotAllowed,
         ));
     }
 
@@ -1034,6 +1049,197 @@ fn create_error_response(
 // Session store (built-in)
 // ---------------------------------------------------------------------------
 
+/// One SP participating in an IdP-side SAML session.
+#[pyclass(
+    module = "pygamlastan.profiles",
+    name = "SessionParticipant",
+    frozen,
+    from_py_object
+)]
+#[derive(Clone)]
+pub struct SessionParticipant {
+    pub(crate) inner: GSessionParticipant,
+}
+
+impl SessionParticipant {
+    pub(crate) fn wrap(inner: GSessionParticipant) -> Self {
+        Self { inner }
+    }
+}
+
+#[pymethods]
+impl SessionParticipant {
+    #[new]
+    #[pyo3(signature = (
+        entity_id,
+        name_id_value,
+        name_id_format=None,
+        name_qualifier=None,
+        sp_name_qualifier=None,
+        sp_provided_id=None,
+        session_indexes=None,
+        slo_url=None,
+        slo_binding=None,
+        session_not_on_or_after=None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        entity_id: String,
+        name_id_value: String,
+        name_id_format: Option<String>,
+        name_qualifier: Option<String>,
+        sp_name_qualifier: Option<String>,
+        sp_provided_id: Option<String>,
+        session_indexes: Option<Vec<String>>,
+        slo_url: Option<String>,
+        slo_binding: Option<String>,
+        session_not_on_or_after: Option<DateTime<Utc>>,
+    ) -> Self {
+        Self::wrap(GSessionParticipant {
+            entity_id,
+            name_id_value,
+            name_id_format,
+            name_qualifier,
+            sp_name_qualifier,
+            sp_provided_id,
+            session_indexes: session_indexes.unwrap_or_default(),
+            slo_url,
+            slo_binding,
+            session_not_on_or_after,
+        })
+    }
+
+    #[getter]
+    fn entity_id(&self) -> &str {
+        &self.inner.entity_id
+    }
+    #[getter]
+    fn name_id_value(&self) -> &str {
+        &self.inner.name_id_value
+    }
+    #[getter]
+    fn name_id_format(&self) -> Option<&str> {
+        self.inner.name_id_format.as_deref()
+    }
+    #[getter]
+    fn name_qualifier(&self) -> Option<&str> {
+        self.inner.name_qualifier.as_deref()
+    }
+    #[getter]
+    fn sp_name_qualifier(&self) -> Option<&str> {
+        self.inner.sp_name_qualifier.as_deref()
+    }
+    #[getter]
+    fn sp_provided_id(&self) -> Option<&str> {
+        self.inner.sp_provided_id.as_deref()
+    }
+    #[getter]
+    fn session_indexes(&self) -> Vec<String> {
+        self.inner.session_indexes.clone()
+    }
+    #[getter]
+    fn slo_url(&self) -> Option<&str> {
+        self.inner.slo_url.as_deref()
+    }
+    #[getter]
+    fn slo_binding(&self) -> Option<&str> {
+        self.inner.slo_binding.as_deref()
+    }
+    #[getter]
+    fn session_not_on_or_after(&self) -> Option<DateTime<Utc>> {
+        self.inner.session_not_on_or_after
+    }
+}
+
+/// An IdP-side SAML session and its participating SPs.
+#[pyclass(
+    module = "pygamlastan.profiles",
+    name = "SamlSession",
+    frozen,
+    from_py_object
+)]
+#[derive(Clone)]
+pub struct SamlSession {
+    inner: GSamlSession,
+}
+
+impl SamlSession {
+    fn wrap(inner: GSamlSession) -> Self {
+        Self { inner }
+    }
+}
+
+#[pymethods]
+impl SamlSession {
+    #[new]
+    #[pyo3(signature = (
+        session_index,
+        principal_name_id,
+        authn_instant,
+        principal_name_id_format=None,
+        authn_context_class_ref=None,
+        session_not_on_or_after=None,
+        participants=None,
+    ))]
+    fn new(
+        session_index: String,
+        principal_name_id: String,
+        authn_instant: DateTime<Utc>,
+        principal_name_id_format: Option<String>,
+        authn_context_class_ref: Option<String>,
+        session_not_on_or_after: Option<DateTime<Utc>>,
+        participants: Option<Vec<SessionParticipant>>,
+    ) -> Self {
+        Self::wrap(GSamlSession {
+            session_index,
+            principal_name_id,
+            principal_name_id_format,
+            authn_instant,
+            authn_context_class_ref,
+            session_not_on_or_after,
+            participants: participants
+                .unwrap_or_default()
+                .into_iter()
+                .map(|participant| participant.inner)
+                .collect(),
+        })
+    }
+
+    #[getter]
+    fn session_index(&self) -> &str {
+        &self.inner.session_index
+    }
+    #[getter]
+    fn principal_name_id(&self) -> &str {
+        &self.inner.principal_name_id
+    }
+    #[getter]
+    fn principal_name_id_format(&self) -> Option<&str> {
+        self.inner.principal_name_id_format.as_deref()
+    }
+    #[getter]
+    fn authn_instant(&self) -> DateTime<Utc> {
+        self.inner.authn_instant
+    }
+    #[getter]
+    fn authn_context_class_ref(&self) -> Option<&str> {
+        self.inner.authn_context_class_ref.as_deref()
+    }
+    #[getter]
+    fn session_not_on_or_after(&self) -> Option<DateTime<Utc>> {
+        self.inner.session_not_on_or_after
+    }
+    #[getter]
+    fn participants(&self) -> Vec<SessionParticipant> {
+        self.inner
+            .participants
+            .iter()
+            .cloned()
+            .map(SessionParticipant::wrap)
+            .collect()
+    }
+}
+
 #[pyclass(module = "pygamlastan.profiles", name = "InMemorySessionStore")]
 pub struct InMemorySessionStore {
     inner: GInMemorySessionStore,
@@ -1050,6 +1256,61 @@ impl InMemorySessionStore {
     fn __len__(&self) -> usize {
         self.inner.len()
     }
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+    fn create_session(&self, session: SamlSession) -> String {
+        self.inner.create_session(session.inner)
+    }
+    fn get_session(&self, session_index: &str) -> Option<SamlSession> {
+        self.inner.get_session(session_index).map(SamlSession::wrap)
+    }
+    fn get_sessions_by_name_id(&self, name_id: &str) -> Vec<SamlSession> {
+        self.inner
+            .get_sessions_by_name_id(name_id)
+            .into_iter()
+            .map(SamlSession::wrap)
+            .collect()
+    }
+    #[pyo3(signature = (requester_entity_id, name_id, session_indexes=None))]
+    fn get_sessions_for_participant(
+        &self,
+        requester_entity_id: &str,
+        name_id: &NameId,
+        session_indexes: Option<Vec<String>>,
+    ) -> Vec<SamlSession> {
+        self.inner
+            .get_sessions_for_participant(
+                requester_entity_id,
+                &name_id.inner,
+                &session_indexes.unwrap_or_default(),
+            )
+            .into_iter()
+            .map(SamlSession::wrap)
+            .collect()
+    }
+    #[pyo3(signature = (requester_entity_id, name_id, session_indexes=None))]
+    fn take_sessions_for_participant(
+        &self,
+        requester_entity_id: &str,
+        name_id: &NameId,
+        session_indexes: Option<Vec<String>>,
+    ) -> PyResult<Vec<SamlSession>> {
+        self.inner
+            .take_sessions_for_participant(
+                requester_entity_id,
+                &name_id.inner,
+                &session_indexes.unwrap_or_default(),
+            )
+            .map(|sessions| sessions.into_iter().map(SamlSession::wrap).collect())
+            .map_err(profile_err)
+    }
+    fn add_participant(&self, session_index: &str, participant: SessionParticipant) -> bool {
+        self.inner.add_participant(session_index, participant.inner)
+    }
+    fn remove_participant(&self, session_index: &str, entity_id: &str) -> bool {
+        self.inner.remove_participant(session_index, entity_id)
+    }
     fn destroy_session(&self, session_index: &str) -> bool {
         self.inner.destroy_session(session_index)
     }
@@ -1064,6 +1325,8 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AuthnResult>()?;
     m.add_class::<ProcessedAuthnRequest>()?;
     m.add_class::<ResponseOptions>()?;
+    m.add_class::<SessionParticipant>()?;
+    m.add_class::<SamlSession>()?;
     m.add_class::<InMemorySessionStore>()?;
     m.add_function(wrap_pyfunction!(create_authn_request, &m)?)?;
     m.add_function(wrap_pyfunction!(process_response, &m)?)?;

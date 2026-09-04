@@ -1,6 +1,8 @@
 from datetime import datetime
 
 from .core import LogoutRequest, LogoutResponse, NameId
+from .profiles import SessionParticipant
+from .security import ReplayCacheProtocol
 
 REASON_USER: str
 REASON_ADMIN: str
@@ -83,6 +85,9 @@ class SpLogoutOrchestrator:
     def progress(self) -> LogoutPropagationResult: ...
 
 def create_sp_logout_request(options: SpLogoutRequestOptions) -> LogoutRequest: ...
+def create_idp_propagation_request(
+    idp_entity_id: str, participant: SessionParticipant
+) -> LogoutRequest: ...
 def create_logout_response_success(
     entity_id: str, in_response_to: str, destination: str | None = ...
 ) -> LogoutResponse: ...
@@ -102,4 +107,13 @@ def validate_logout_request(
     signature_verified: bool,
     now: datetime,
     clock_skew_seconds: int = ...,
+) -> None: ...
+def validate_logout_request_with_replay(
+    request: LogoutRequest,
+    expected_issuer: str,
+    signature_verified: bool,
+    now: datetime,
+    replay_cache: ReplayCacheProtocol,
+    clock_skew_seconds: int = ...,
+    max_request_age_seconds: int = ...,
 ) -> None: ...

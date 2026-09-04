@@ -448,24 +448,19 @@ class _ScopedReplayCache:
         self._cache.cleanup()
 
 
-# Maximum accepted age (from IssueInstant) for a LogoutRequest that declares
-# no NotOnOrAfter. validate_logout_request only bounds requests that DECLARE
-# NotOnOrAfter, so without this limit a captured request would stay valid
-# forever while any finite replay-cache entry eventually expires - breaking
-# one-time use. Replay entries are retained past this window, so a request can
-# never outlive its replay entry.
+# Maximum accepted age from IssueInstant for every LogoutRequest. This is passed
+# to gamlastan 0.9's stateful replay validator and also caps a request-declared
+# NotOnOrAfter in the compatibility layer.
 _LOGOUT_REQUEST_MAX_AGE = timedelta(hours=24)
 
-# Evict expired replay entries periodically. gamlastan's check_and_insert only
-# ever replaces the SAME expired ID and validation never calls cleanup(), so
-# without this every accepted assertion/LogoutRequest ID would stay in the
-# process-lifetime cache forever and a long-running SP would grow without
-# bound. Cleanup is throttled PER CACHE (keyed by id()): a single process-wide
-# timestamp would let traffic on one injected cache consume every cleanup slot
-# while another cache is never cleaned. Entries are tiny and the table is
-# pruned, so churning cache instances cannot grow it without bound; an id()
-# reused after a cache is garbage-collected can at worst delay the new cache's
-# first cleanup by one interval.
+# Evict expired entries from injected replay backends that do not prune during
+# insertion. Gamlastan 0.9's built-in cache does prune, but cleanup remains
+# harmless. Cleanup is throttled PER CACHE (keyed by id()): a single
+# process-wide timestamp would let traffic on one injected cache consume every
+# cleanup slot while another cache is never cleaned. Entries are tiny and the
+# table is pruned, so churning cache instances cannot grow it without bound; an
+# id() reused after a cache is garbage-collected can at worst delay the new
+# cache's first cleanup by one interval.
 _REPLAY_CLEANUP_INTERVAL_SECONDS = 300.0
 _replay_cleanup_lock = threading.Lock()
 _replay_cleanup_times: dict[int, float] = {}
@@ -808,7 +803,12 @@ class Saml2Client:
         _validate_response_version(xml)
 
         in_response_to = parsed.in_response_to
-        if outstanding is not None and in_response_to not in outstanding:
+        if in_response_to is None:
+            if not self.config.allow_unsolicited:
+                raise UnsolicitedResponse(
+                    "response has no matching outstanding AuthnRequest"
+                )
+        elif outstanding is None or in_response_to not in outstanding:
             raise UnsolicitedResponse(
                 f"InResponseTo {in_response_to!r} not in outstanding queries"
             )
@@ -859,6 +859,7 @@ class Saml2Client:
             cfg.require_signed_assertions = self.config.want_assertions_signed
             cfg.require_signed_responses = self.config.want_response_signed
             cfg.require_encrypted_assertions = False
+            cfg.allow_unsolicited_responses = self.config.allow_unsolicited
             try:
                 signing_certs = self.config.idp_signing_certs(expected_idp)
             except ValueError as exc:
@@ -901,6 +902,7 @@ class Saml2Client:
             self._raise_on_failed_status(parsed)
             cfg = _security.SecurityConfig.permissive()
             cfg.clock_skew_seconds = self.config.accepted_time_diff
+            cfg.allow_unsolicited_responses = self.config.allow_unsolicited
             try:
                 result = _profiles.process_response(
                     parsed,
@@ -1397,12 +1399,6 @@ class Saml2Client:
             signature_verified = self._verify_logout_request_signature(
                 xml, binding, expected_idp, parsed, kwargs, relay_state
             )
-            _logout.validate_logout_request(
-                parsed,
-                expected_idp,
-                signature_verified,
-                datetime.now(timezone.utc),
-            )
         except Exception as e:
             raise ValueError(f"invalid LogoutRequest: {e}") from e
         # Subject correlation: the LogoutRequest must target the same principal as
@@ -1418,52 +1414,20 @@ class Saml2Client:
             or request_subject != expected_subject
         ):
             raise ValueError("LogoutRequest NameID does not match the session NameID")
-        # One-time use: signature verification alone does not stop a captured,
-        # validly signed LogoutRequest from being submitted again - including
-        # after the user logs in anew - to force-log out the fresh session.
-        # Record the request ID atomically in the shared replay cache before
-        # the success response authorizes any session destruction; a repeat
-        # fails closed as a replay. The entry is retained through the request's
-        # own NotOnOrAfter window (plus validation skew) when it declares one.
-        # Without NotOnOrAfter, validation never expires the request, so this
-        # handler enforces its own age limit from IssueInstant and retains the
-        # replay entry past that whole window: the request is rejected as too
-        # old before its replay entry can ever expire, keeping one-time use
-        # airtight either way.
+        # One-time use: gamlastan 0.9's stateful validator authenticates the
+        # issuer/signature, bounds IssueInstant freshness, and atomically
+        # reserves the issuer-scoped request ID before the success response can
+        # authorize session destruction. Keep the shim's additional 24-hour
+        # cap on a declared NotOnOrAfter so an unsafe unsigned-development
+        # deployment cannot submit unique requests that request arbitrarily
+        # long validity windows.
         now = datetime.now(timezone.utc)
-        # Reject an IssueInstant beyond the validation clock skew in the
-        # future before selecting either expiry branch: upstream
-        # validate_logout_request checks only NotOnOrAfter, so a far-future
-        # IssueInstant would otherwise pass the age check and pin a replay
-        # entry expiring 24h after that future instant - unbounded cache
-        # retention for what may be (in the no-certificate fallback) an
-        # unauthenticated request.
-        if parsed.issue_instant - now > timedelta(seconds=180):
-            raise ValueError(
-                "LogoutRequest IssueInstant is in the future beyond the "
-                "accepted clock skew"
-            )
         if parsed.not_on_or_after is not None:
-            # Bound the request-declared validity window the same way the
-            # no-NotOnOrAfter branch bounds lifetime: a date years ahead would
-            # pin a replay entry until then, letting unique requests (in the
-            # unsigned development fallback, unauthenticated ones) grow the
-            # process-wide cache without bound.
             if parsed.not_on_or_after - now > _LOGOUT_REQUEST_MAX_AGE:
                 raise ValueError(
                     "LogoutRequest NotOnOrAfter is further ahead than the "
                     f"maximum accepted validity window ({_LOGOUT_REQUEST_MAX_AGE})"
                 )
-            replay_expiry = parsed.not_on_or_after + timedelta(seconds=180)
-        else:
-            if now - parsed.issue_instant > _LOGOUT_REQUEST_MAX_AGE:
-                raise ValueError(
-                    "LogoutRequest without NotOnOrAfter is older than the "
-                    f"maximum accepted age ({_LOGOUT_REQUEST_MAX_AGE})"
-                )
-            replay_expiry = (
-                parsed.issue_instant + _LOGOUT_REQUEST_MAX_AGE + timedelta(seconds=180)
-            )
         _maybe_cleanup_replay_cache(self._replay_cache)
         scoped_replay_cache = _ScopedReplayCache(
             self._replay_cache,
@@ -1471,10 +1435,18 @@ class Saml2Client:
             sp_entity_id,
             expected_idp,
         )
-        if not scoped_replay_cache.check_and_insert(parsed.id, replay_expiry):
-            raise ValueError(
-                "LogoutRequest replay detected: this request ID was already processed"
+        try:
+            _logout.validate_logout_request_with_replay(
+                parsed,
+                expected_idp,
+                signature_verified,
+                now,
+                scoped_replay_cache,
+                clock_skew_seconds=180,
+                max_request_age_seconds=int(_LOGOUT_REQUEST_MAX_AGE.total_seconds()),
             )
+        except Exception as e:
+            raise ValueError(f"invalid LogoutRequest: {e}") from e
         issuer = parsed.issuer.value if parsed.issuer is not None else expected_idp
         response_bindings = {
             BINDING_HTTP_POST: [BINDING_HTTP_POST, BINDING_HTTP_REDIRECT],

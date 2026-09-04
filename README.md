@@ -1,13 +1,13 @@
 # pygamlastan
 
-Python bindings for [gamlastan](https://github.com/kushaldas/gamlastan) **0.8.x**, a
+Python bindings for [gamlastan](https://github.com/kushaldas/gamlastan) **0.9.x**, a
 pure-Rust SAML 2.0 library - types, XML, crypto, metadata, bindings, security, and
 profiles. Built with [PyO3](https://pyo3.rs) 0.29 + [maturin](https://www.maturin.rs)
 (abi3, Python ≥ 3.10).
 
 The binding mirrors gamlastan's modules as Python submodules:
 `pygamlastan.{core, xml, crypto, bindings, metadata, security, profiles,
-attribute_map, idp}`. Parsing converts gamlastan's zero-copy `*Ref` views to owned
+attribute_map, idp, logout}`. Parsing converts gamlastan's zero-copy `*Ref` views to owned
 values at the FFI boundary, so no Rust lifetime escapes into Python.
 
 ## Example - SP processes an IdP response
@@ -40,6 +40,17 @@ print(result.name_id, result.attributes_dict())
 > does *not* verify signatures itself - passing that without a real verification
 > is an authentication bypass. See the
 > [security guide](https://pygamlastan.readthedocs.io/en/latest/guides/security.html).
+
+## Gamlastan 0.9 APIs
+
+The 0.5 release exposes gamlastan 0.9's algorithm allowlists, replay-aware
+LogoutRequest validation, participant-bound IdP session/logout helpers,
+recipient-bound artifact-store contract, and explicit unsolicited-SSO policy.
+Worked examples are in the [signing](https://pygamlastan.readthedocs.io/en/latest/guides/signing.html),
+[IdP integration](https://pygamlastan.readthedocs.io/en/latest/guides/idp_integration.html),
+[SP integration](https://pygamlastan.readthedocs.io/en/latest/guides/sp_integration.html),
+and [bindings](https://pygamlastan.readthedocs.io/en/latest/guides/bindings.html)
+guides.
 
 ## HSM / PKCS#11 signing
 

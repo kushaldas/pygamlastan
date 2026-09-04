@@ -1,6 +1,6 @@
 [package]
 name = "pygamlastan"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "Python bindings for the gamlastan SAML 2.0 library"
 license = "BSD-2-Clause"
@@ -11,11 +11,11 @@ name = "pygamlastan"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.29.0", features = ["extension-module", "abi3-py310", "chrono"] }
-# gamlastan 0.8.0 (crates.io) pulls the bergshamra 0.8.0 / kryptering 0.5.0
+pyo3 = { version = "0.29.2", features = ["extension-module", "abi3-py310", "chrono"] }
+# gamlastan 0.9.0 (crates.io) pulls the bergshamra 0.9.0 / kryptering 0.5.0
 # XML-security stack. For local co-development against the workspace checkout,
 # add a `[patch.crates-io]` gamlastan path override rather than editing this pin.
-gamlastan = "0.8.0"
+gamlastan = "0.9.0"
 # Mirror gamlastan's kryptering features so the shared `Signer` /
 # `Pkcs11Signer` types resolve to a single instance with no version or feature
 # drift across the FFI boundary.

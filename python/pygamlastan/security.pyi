@@ -28,6 +28,7 @@ class SecurityConfig:
     sanitize_relay_state: bool
     require_integrity_with_cbc: bool
     check_client_address: bool
+    allow_unsolicited_responses: bool
 
 class ValidationCheck:
     @property
