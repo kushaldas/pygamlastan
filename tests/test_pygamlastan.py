@@ -465,6 +465,39 @@ def test_algorithm_policy_complete_python_surface():
     assert verifier.with_algorithm_policy(default).algorithm_policy == default
 
 
+def test_algorithm_policy_builder_preserves_rollover_fallback(
+    rsa_keypair, rsa_keypair2
+):
+    """Applying a policy keeps every certificate supplied to ``from_certs``.
+
+    The signature is made by the second certificate, so success proves the
+    builder copied and configured the fallback verifier instead of retaining
+    only the first rollover key.
+    """
+    _first_private_key, first_cert, _first_cert_b64 = rsa_keypair
+    second_private_key, second_cert, second_cert_b64 = rsa_keypair2
+    template = _signature_template("_rollover-response", second_cert_b64)
+    unsigned = (
+        '<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" '
+        'ID="_rollover-response" Version="2.0" '
+        'IssueInstant="2026-09-04T00:00:00Z">'
+        f"{template}<samlp:Status/></samlp:Response>"
+    )
+    signed = crypto.SamlSigner.from_pem(second_private_key).sign_enveloped(unsigned)
+
+    policy = crypto.AlgorithmPolicy.allow_only(
+        ["http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"],
+        ["http://www.w3.org/2001/04/xmlenc#sha256"],
+    )
+    verifier = crypto.SamlVerifier.from_certs(
+        [first_cert, second_cert]
+    ).with_algorithm_policy(policy)
+
+    result = verifier.verify_enveloped(signed)
+    assert result.is_valid()
+    assert result.signed_reference_ids() == ["_rollover-response"]
+
+
 # --------------------------------------------------------------------------- #
 # bindings
 # --------------------------------------------------------------------------- #

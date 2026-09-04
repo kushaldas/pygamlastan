@@ -29,7 +29,10 @@ Building requests
 .. py:function:: create_idp_propagation_request(idp_entity_id: str, participant: pygamlastan.profiles.SessionParticipant) -> pygamlastan.core.LogoutRequest
 
    Build the IdP fan-out request for a stored participant, preserving its full
-   NameID (including ``SPProvidedID``), session indexes, endpoint, and binding.
+   NameID (including ``SPProvidedID``) and session indexes, and copying
+   ``participant.slo_url`` into the request's ``Destination``. A
+   ``LogoutRequest`` has no binding field: select the delivery transport
+   separately from ``participant.slo_binding``.
 
 Building responses
 ------------------
