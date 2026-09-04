@@ -135,7 +135,7 @@ def test_version_and_submodules():
     Guards the mixed Rust+Python layout: the `_native` extension must register
     each area (core, xml, ...) as an attribute of the `pygamlastan` package.
     """
-    assert pygamlastan.__version__ == "0.4.0"
+    assert pygamlastan.__version__ == "0.5.0"
     for name in ("core", "xml", "crypto", "bindings", "metadata", "security",
                  "profiles", "attribute_map", "idp", "logout"):
         assert hasattr(pygamlastan, name)
@@ -417,7 +417,52 @@ def test_redirect_signature_sha1_rejected_by_default(rsa_keypair):
     with pytest.raises(pygamlastan.SamlCryptoError):
         verifier.verify_redirect_query(query, sig, sha1_uri)
 
+    # An exact 0.9 allowlist is a narrower legacy opt-in than disabling the
+    # complete verifier policy.
+    verifier.set_algorithm_policy(
+        crypto.AlgorithmPolicy.allow_only(
+            [sha1_uri], ["http://www.w3.org/2001/04/xmlenc#sha256"]
+        )
+    )
+    assert verifier.verify_redirect_query(query, sig, sha1_uri) is True
+
+    verifier.set_algorithm_policy(crypto.AlgorithmPolicy())
     assert verifier.verify_redirect_query(query, sig, sha1_uri, unsafe_allow_weak_sha1=True) is True
+
+
+def test_algorithm_policy_complete_python_surface():
+    """The complete gamlastan 0.9 AlgorithmPolicy API is usable from Python."""
+    rsa256 = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"
+    sha256 = "http://www.w3.org/2001/04/xmlenc#sha256"
+
+    default = crypto.AlgorithmPolicy()
+    assert default.allows_signature_algorithm(rsa256)
+    assert default.allows_digest_algorithm(sha256)
+    assert default.allowed_signature_algorithms is not None
+    assert default.allowed_digest_algorithms is not None
+
+    exact = crypto.AlgorithmPolicy.allow_only(
+        ["urn:signature:b", "urn:signature:a", "urn:signature:a"],
+        ["urn:digest:b", "urn:digest:a", "urn:digest:a"],
+    )
+    assert exact.allowed_signature_algorithms == ["urn:signature:a", "urn:signature:b"]
+    assert exact.allowed_digest_algorithms == ["urn:digest:a", "urn:digest:b"]
+    assert exact == crypto.AlgorithmPolicy.allow_only(
+        ["urn:signature:a", "urn:signature:b"],
+        ["urn:digest:a", "urn:digest:b"],
+    )
+    assert exact.with_signature_algorithms([rsa256]).allowed_signature_algorithms == [rsa256]
+    assert exact.with_digest_algorithms([sha256]).allowed_digest_algorithms == [sha256]
+
+    with pytest.warns(UserWarning, match="permissive"):
+        permissive = crypto.AlgorithmPolicy.permissive()
+    assert permissive.allowed_signature_algorithms is None
+    assert permissive.allowed_digest_algorithms is None
+
+    verifier = crypto.SamlVerifier(crypto.KeysManager())
+    verifier.set_algorithm_policy(exact)
+    assert verifier.algorithm_policy == exact
+    assert verifier.with_algorithm_policy(default).algorithm_policy == default
 
 
 # --------------------------------------------------------------------------- #
@@ -1579,6 +1624,8 @@ def test_verifier_downgrade_setters_warn():
         verifier.set_require_reference_digests(False)
     with pytest.raises(pygamlastan.SamlCryptoError):
         verifier.set_allow_raw_inline_keyinfo_with_trust_anchors(True)
+    with pytest.raises(pygamlastan.SamlCryptoError):
+        verifier.set_reject_hmac_signatures(False)
 
     with pytest.warns(UserWarning, match="trusted_keys_only"):
         verifier.set_trusted_keys_only(False, unsafe_allow_untrusted_keys=True)
@@ -1594,6 +1641,8 @@ def test_verifier_downgrade_setters_warn():
         verifier.set_allow_raw_inline_keyinfo_with_trust_anchors(
             True, unsafe_allow_raw_inline_keyinfo=True,
         )
+    with pytest.warns(UserWarning, match="symmetric-key"):
+        verifier.set_reject_hmac_signatures(False, unsafe_allow_hmac=True)
     # Secure direction: no warning.
     with warnings.catch_warnings():
         warnings.simplefilter("error")
@@ -1603,6 +1652,7 @@ def test_verifier_downgrade_setters_warn():
         verifier.set_hmac_min_out_len(160)
         verifier.set_require_reference_digests(True)
         verifier.set_allow_raw_inline_keyinfo_with_trust_anchors(False)
+        verifier.set_reject_hmac_signatures(True)
 
 
 def test_redirect_decode_rejects_duplicate_params():
@@ -1655,6 +1705,7 @@ def test_security_config_all_fields_tunable():
         "enforce_persistent_id_uniqueness",
         "sanitize_relay_state",
         "require_integrity_with_cbc",
+        "allow_unsolicited_responses",
     ]:
         before = getattr(cfg, field)
         setattr(cfg, field, not before)
@@ -1663,6 +1714,36 @@ def test_security_config_all_fields_tunable():
         before = getattr(cfg, field)
         setattr(cfg, field, before + 1)
         assert getattr(cfg, field) == before + 1, field
+
+
+def test_native_profile_rejects_unsolicited_response_unless_enabled():
+    """The Python-backed-store bridge preserves gamlastan 0.9's login-CSRF guard."""
+    parsed = xml.parse_response(_built_response_xml(in_response_to=None))
+
+    with pytest.raises(pygamlastan.SamlProfileError, match="unsolicited"):
+        profiles.process_response(
+            parsed,
+            security.SecurityConfig(),
+            SP,
+            ACS,
+            IDP,
+            now=NOW,
+            replay_cache=security.InMemoryReplayCache(),
+        )
+
+    with pytest.warns(UserWarning, match="permissive"):
+        config = security.SecurityConfig.permissive()
+    assert config.allow_unsolicited_responses is True
+    result = profiles.process_response(
+        parsed,
+        config,
+        SP,
+        ACS,
+        IDP,
+        now=NOW,
+        replay_cache=security.InMemoryReplayCache(),
+    )
+    assert result.name_id == "alice@example.org"
 
 
 def test_persistent_id_store_detects_reassignment():
@@ -1819,6 +1900,62 @@ def test_individual_check_assertion_age():
     assert res.by_name(first.check_name).check_number == first.check_number
 
 
+def test_participant_bound_session_store_and_idp_logout():
+    """The new 0.9 participant lookup/removal API preserves full NameID data."""
+    participant = profiles.SessionParticipant(
+        SP,
+        "federated-alice",
+        name_id_format=core.NAMEID_PERSISTENT,
+        name_qualifier=IDP,
+        sp_name_qualifier=SP,
+        sp_provided_id="sp-alias",
+        session_indexes=["_participant-session"],
+        slo_url=f"{SP}/slo",
+        slo_binding=core.BINDING_HTTP_REDIRECT,
+        session_not_on_or_after=NOW + timedelta(minutes=30),
+    )
+    session = profiles.SamlSession(
+        "_idp-session",
+        "local-alice",
+        NOW,
+        principal_name_id_format=core.NAMEID_PERSISTENT,
+        authn_context_class_ref=core.AUTHN_CONTEXT_PASSWORD,
+        session_not_on_or_after=NOW + timedelta(hours=1),
+        participants=[participant],
+    )
+    store = profiles.InMemorySessionStore()
+    assert store.is_empty()
+    assert store.create_session(session) == "_idp-session"
+    assert len(store) == 1
+    assert store.get_session("_idp-session").participants[0].sp_provided_id == "sp-alias"
+    assert [s.session_index for s in store.get_sessions_by_name_id("local-alice")] == [
+        "_idp-session"
+    ]
+
+    participant_name_id = core.NameId(
+        "federated-alice",
+        format=core.NAMEID_PERSISTENT,
+        name_qualifier=IDP,
+        sp_name_qualifier=SP,
+        sp_provided_id="sp-alias",
+    )
+    assert len(store.get_sessions_for_participant(SP, participant_name_id)) == 1
+    assert store.get_sessions_for_participant(
+        SP, participant_name_id, ["_wrong-session"]
+    ) == []
+
+    propagated = logout.create_idp_propagation_request(IDP, participant)
+    assert propagated.issuer.value == IDP
+    assert propagated.destination == f"{SP}/slo"
+    assert propagated.name_id.sp_provided_id == "sp-alias"
+
+    removed = store.take_sessions_for_participant(
+        SP, participant_name_id, ["_participant-session"]
+    )
+    assert [s.session_index for s in removed] == ["_idp-session"]
+    assert store.is_empty()
+
+
 # ---------------------------------------------------------------------------
 # logout - Single Logout (SLO)
 # ---------------------------------------------------------------------------
@@ -1890,6 +2027,31 @@ def test_validate_logout_request():
     expired = logout.create_sp_logout_request(expired_opts)
     with pytest.raises(pygamlastan.SamlProfileError):
         logout.validate_logout_request(expired, SP, True, now, 180)
+
+
+def test_validate_logout_request_with_replay_is_one_time_use():
+    """The new stateful validator rejects a second issuer-scoped request ID."""
+    now = datetime.now(timezone.utc)
+    request = logout.create_sp_logout_request(
+        logout.SpLogoutRequestOptions(
+            SP,
+            _slo_name_id(),
+            not_on_or_after=now + timedelta(minutes=5),
+        )
+    )
+    cache = security.InMemoryReplayCache()
+
+    logout.validate_logout_request_with_replay(
+        request,
+        SP,
+        True,
+        now,
+        cache,
+        clock_skew_seconds=180,
+        max_request_age_seconds=300,
+    )
+    with pytest.raises(pygamlastan.SamlProfileError, match="replay"):
+        logout.validate_logout_request_with_replay(request, SP, True, now, cache)
 
 
 def test_orchestrator_full_success():

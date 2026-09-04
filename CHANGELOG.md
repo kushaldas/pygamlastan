@@ -8,6 +8,47 @@ security handling. `pygamlastan` is a thin PyO3 binding; most entries below
 reflect adopting a change made in `gamlastan` / `uppsala` / `bergshamra` and
 surfacing it correctly to Python.
 
+## [0.5.0] - 2026-09-04
+
+Adopts the upstream `gamlastan` 0.9 security release and its matching
+`bergshamra` 0.9 / `uppsala` 0.10.1 XML stack.
+
+### Added
+
+- Exposed `crypto.AlgorithmPolicy`, including secure defaults, exact allowlists,
+  permissive legacy mode, allowlist inspection, and verifier setter/builder
+  integration. `SamlVerifier` also exposes the independent HMAC guard.
+- Added `logout.validate_logout_request_with_replay`, which enforces bounded
+  freshness and issuer-scoped one-time use through built-in or Python replay
+  caches.
+- Added `profiles.SessionParticipant`, `profiles.SamlSession`, and the complete
+  built-in session-store surface, including participant-aware lookup and atomic
+  removal. `SessionParticipant.sp_provided_id` and IdP logout propagation are
+  available end to end.
+- Documented gamlastan 0.9's recipient-aware artifact-store protocol methods.
+- Exposed `SecurityConfig.allow_unsolicited_responses` and the pysaml2-compatible
+  `service.sp.allow_unsolicited` setting.
+
+### Changed
+
+- Refreshed the compatible PyO3 patch release from 0.29.0 to 0.29.2.
+- Refreshed compatible Rust dependency patches, including `chacha20` 0.10.2;
+  this removes the yanked 0.10.1 release previously selected through
+  `gamlastan`'s `rand` dependency.
+
+### Security
+
+- Unsolicited SSO is rejected by default in both the compatibility shim and the
+  native Python-backed-store response-processing path; deployments must opt in.
+- SHA-1 remains rejected by default. An exact `AlgorithmPolicy` can opt into a
+  named legacy method, while the older `unsafe_allow_weak_sha1` path now widens
+  only for that method instead of making the entire verifier permissive.
+- The pysaml2 SLO compatibility path rejects future, stale, replayed, and
+  destination-mismatched requests, including requests whose far-future
+  `NotOnOrAfter` attempts to revive an old `IssueInstant`.
+- The built-in replay cache adopts gamlastan 0.9's insertion-time pruning and
+  no longer retains entries whose supplied expiry is already due.
+
 ## [0.4.0] - 2026-09-02
 
 Adopts the upstream `gamlastan` 0.8 hardening release. This is an API-breaking

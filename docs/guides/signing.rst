@@ -100,6 +100,53 @@ Prefer :func:`pygamlastan.profiles.process_response_verified` for normal SP
 flows; it performs this all-signature verification internally over the exact
 bytes it then validates.
 
+Algorithm allowlists
+--------------------
+
+Gamlastan 0.9 checks the XML-DSig ``SignatureMethod`` and every Reference
+``DigestMethod`` against an :class:`pygamlastan.crypto.AlgorithmPolicy` before
+cryptographic dispatch. The default policy accepts RSA and ECDSA signatures
+with SHA-256, SHA-384, or SHA-512, and Reference digests with SHA-256,
+SHA-384, or SHA-512. It rejects SHA-1 and other backend-supported legacy
+algorithms.
+
+Inspect the active policy or replace it with an exact federation policy:
+
+.. code-block:: python
+
+   RSA_SHA256 = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"
+   SHA256 = "http://www.w3.org/2001/04/xmlenc#sha256"
+
+   policy = crypto.AlgorithmPolicy.allow_only([RSA_SHA256], [SHA256])
+   verifier.set_algorithm_policy(policy)
+
+   assert verifier.algorithm_policy == policy
+   assert verifier.algorithm_policy.allows_signature_algorithm(RSA_SHA256)
+   assert verifier.algorithm_policy.allowed_digest_algorithms == [SHA256]
+
+``with_signature_algorithms`` and ``with_digest_algorithms`` return new policy
+objects; they do not mutate the original. Likewise,
+``verifier.with_algorithm_policy(policy)`` returns a verifier copy while
+preserving all configured certificates, including rollover certificates:
+
+.. code-block:: python
+
+   rsa_only = crypto.AlgorithmPolicy().with_signature_algorithms([RSA_SHA256])
+   restricted_verifier = verifier.with_algorithm_policy(rsa_only)
+
+An empty allowlist intentionally denies every algorithm of that kind. In
+contrast, :meth:`~pygamlastan.crypto.AlgorithmPolicy.permissive` returns
+``None`` allowlists and accepts every algorithm supported by the backend; it
+emits a warning and should be confined to deliberate legacy or non-SAML
+interoperability.
+
+HMAC has a second, independent defence. Even if an algorithm policy allows an
+HMAC URI, the verifier rejects HMAC signatures until
+``set_reject_hmac_signatures(False, unsafe_allow_hmac=True)`` is called. SAML
+federations normally use asymmetric certificates, so leave this guard enabled.
+For a narrowly scoped legacy SHA-1 peer, prefer an exact custom allowlist over
+``permissive()`` and isolate that verifier from normal SAML traffic.
+
 PKCS#11 / HSM signing
 ---------------------
 

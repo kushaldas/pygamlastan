@@ -26,12 +26,17 @@ XML-DSig verification **internally over the exact bytes it validates**, so the
        sp_entity_id="https://sp.example.org/sp",
        acs_url="https://sp.example.org/acs",
        expected_idp_entity_id="https://idp.example.org",
-       expected_request_id="_the_request_id",       # None for unsolicited
+       expected_request_id="_the_request_id",       # correlate the browser request
        replay_cache=security.InMemoryReplayCache(),
    )
 
    print(result.name_id)
    print(result.attributes_dict())   # {"mail": ["alice@example.org"], ...}
+
+IdP-initiated responses are rejected by production defaults. If a deployment
+intentionally supports unsolicited SSO, set
+``config.allow_unsolicited_responses = True`` and pass
+``expected_request_id=None`` explicitly.
 
 .. important::
 

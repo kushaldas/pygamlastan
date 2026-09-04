@@ -166,6 +166,17 @@ impl SecurityConfig {
     fn set_check_client_address(&mut self, v: bool) {
         self.inner.check_client_address = v;
     }
+
+    /// Accept IdP-initiated SSO responses with no request correlation.
+    /// Disabled by default because unsolicited login enables login CSRF.
+    #[getter]
+    fn allow_unsolicited_responses(&self) -> bool {
+        self.inner.allow_unsolicited_responses
+    }
+    #[setter]
+    fn set_allow_unsolicited_responses(&mut self, v: bool) {
+        self.inner.allow_unsolicited_responses = v;
+    }
 }
 
 // ---------------------------------------------------------------------------

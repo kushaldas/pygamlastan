@@ -67,6 +67,30 @@ Signing
 Verification
 ------------
 
+.. py:class:: AlgorithmPolicy()
+
+   The gamlastan 0.9 signature and Reference-digest allowlist. The secure
+   default accepts RSA/ECDSA signature methods with SHA-256/384/512 and
+   SHA-256/384/512 digests.
+
+   .. py:staticmethod:: allow_only(signature_algorithms: list[str], digest_algorithms: list[str]) -> AlgorithmPolicy
+
+      Build an exact allowlist. Empty lists deliberately deny every algorithm.
+
+   .. py:staticmethod:: permissive() -> AlgorithmPolicy
+
+      Accept every backend-supported algorithm. This warns and is intended only
+      for deliberate legacy/non-SAML interoperability.
+
+   .. py:method:: with_signature_algorithms(algorithms: list[str]) -> AlgorithmPolicy
+   .. py:method:: with_digest_algorithms(algorithms: list[str]) -> AlgorithmPolicy
+   .. py:attribute:: allowed_signature_algorithms
+      :type: list[str] | None
+   .. py:attribute:: allowed_digest_algorithms
+      :type: list[str] | None
+   .. py:method:: allows_signature_algorithm(uri: str) -> bool
+   .. py:method:: allows_digest_algorithm(uri: str) -> bool
+
 .. py:class:: SamlVerifier(keys: KeysManager)
 
    Verify signatures against keys/trusted certs in a :class:`KeysManager`.
@@ -76,6 +100,15 @@ Verification
       Build a verifier trusting a single certificate (PEM or DER). The
       certificate's public key is registered as a verification key and as a
       trust anchor.
+
+   .. py:method:: set_algorithm_policy(policy: AlgorithmPolicy) -> None
+   .. py:method:: with_algorithm_policy(policy: AlgorithmPolicy) -> SamlVerifier
+   .. py:attribute:: algorithm_policy
+      :type: AlgorithmPolicy
+
+      Configure or inspect the policy applied before cryptographic dispatch.
+      ``with_algorithm_policy`` returns a verifier copy and preserves every
+      certificate configured for key rollover.
 
    .. py:method:: verify_enveloped(signed_xml: str) -> VerifyResult
 
@@ -129,18 +162,26 @@ Verification
       ``allow=True`` raises unless ``unsafe_allow_raw_inline_keyinfo=True`` is
       explicit. Keep this disabled for SAML.
 
+   .. py:method:: set_reject_hmac_signatures(reject: bool, unsafe_allow_hmac: bool = False) -> None
+
+      Keep the independent HMAC guard enabled for SAML. Disabling it requires
+      ``unsafe_allow_hmac=True`` and still requires the active
+      :class:`AlgorithmPolicy` to allow the chosen HMAC method.
+
    Example: hardened verifier setup with all default-on policy controls made
    explicit:
 
    .. code-block:: python
 
       verifier = crypto.SamlVerifier.from_cert(idp_signing_cert_pem)
+      verifier.set_algorithm_policy(crypto.AlgorithmPolicy())
       verifier.set_skip_time_checks(False)
       verifier.set_trusted_keys_only(True)
       verifier.set_strict_verification(True)
       verifier.set_hmac_min_out_len(160)
       verifier.set_require_reference_digests(True)
       verifier.set_allow_raw_inline_keyinfo_with_trust_anchors(False)
+      verifier.set_reject_hmac_signatures(True)
 
       results = verifier.verify_all_enveloped(response_xml)
       if not results or any(not result for result in results):

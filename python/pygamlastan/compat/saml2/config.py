@@ -65,6 +65,7 @@ class SPConfig:
         self.force_authn: bool = False
         self.allow_create: bool = False
         self.allow_unknown_attributes: bool = False
+        self.allow_unsolicited: bool = False
         self.name_id_format: str | list[str] | None = None
         self.name_id_policy_format: str | None = None
         self.requested_authn_context: Any = None
@@ -146,6 +147,7 @@ class SPConfig:
                 "allow_unknown_attributes", conf.get("allow_unknown_attributes", False)
             )
         )
+        self.allow_unsolicited = _as_bool(sp.get("allow_unsolicited", False))
         self.name_id_format = sp.get("name_id_format")
         self.name_id_policy_format = sp.get("name_id_policy_format")
         self.requested_authn_context = sp.get("requested_authn_context")

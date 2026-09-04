@@ -6,17 +6,12 @@
 //! `SpLogoutOrchestrator` state machine (the equivalent of pysaml2's
 //! `global_logout`/`do_logout`/`handle_logout_response`), the IdP/SP
 //! `LogoutResponse` builders (success / partial / error), and
-//! `validate_logout_request`.
-//!
-//! `create_idp_propagation_request` (IdP fan-out to session participants) is
-//! deliberately not bound yet: it depends on the `profiles::session`
-//! `SessionParticipant`/session-store surface, which is a separate module not
-//! required by the SP-side flow. The orchestrator covers SP-driven logout; the
-//! IdP side builds responses with the helpers here.
+//! `validate_logout_request`, the replay-aware 0.9 validator, and IdP fan-out
+//! using the session types exposed by `pygamlastan.profiles`.
 
 use chrono::{DateTime, Utc};
 use pyo3::prelude::*;
-use pyo3::types::PyModule;
+use pyo3::types::{PyAny, PyModule};
 
 use gamlastan::core::protocol::{Status, StatusCode};
 use gamlastan::profiles::logout as gl;
@@ -24,6 +19,8 @@ use gamlastan::profiles::logout as gl;
 use crate::convert::new_submodule;
 use crate::core::{LogoutRequest, LogoutResponse, NameId};
 use crate::errors::profile_err;
+use crate::profiles::SessionParticipant;
+use crate::security::PyReplayCache;
 
 // ---------------------------------------------------------------------------
 // SpLogoutRequestOptions / create_sp_logout_request
@@ -72,6 +69,18 @@ impl SpLogoutRequestOptions {
 fn create_sp_logout_request(options: &SpLogoutRequestOptions) -> PyResult<LogoutRequest> {
     let req = gl::create_sp_logout_request(&options.inner).map_err(profile_err)?;
     Ok(LogoutRequest::wrap(req))
+}
+
+/// Build an IdP fan-out LogoutRequest for a session participant.
+#[pyfunction]
+fn create_idp_propagation_request(
+    idp_entity_id: &str,
+    participant: &SessionParticipant,
+) -> LogoutRequest {
+    LogoutRequest::wrap(gl::create_idp_propagation_request(
+        idp_entity_id,
+        &participant.inner,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +178,43 @@ fn validate_logout_request(
         signature_verified,
         now,
         clock_skew_seconds,
+    )
+    .map_err(profile_err)
+}
+
+/// Validate freshness and atomically reserve an issuer-scoped request ID.
+///
+/// `replay_cache` may be `security.InMemoryReplayCache` or any object
+/// implementing the replay-cache protocol.
+#[pyfunction]
+#[pyo3(signature = (
+    request,
+    expected_issuer,
+    signature_verified,
+    now,
+    replay_cache,
+    clock_skew_seconds=180,
+    max_request_age_seconds=300,
+))]
+#[allow(clippy::too_many_arguments)]
+fn validate_logout_request_with_replay(
+    request: &LogoutRequest,
+    expected_issuer: &str,
+    signature_verified: bool,
+    now: DateTime<Utc>,
+    replay_cache: Py<PyAny>,
+    clock_skew_seconds: u64,
+    max_request_age_seconds: u64,
+) -> PyResult<()> {
+    let cache = PyReplayCache { obj: replay_cache };
+    gl::validate_logout_request_with_replay(
+        &request.inner,
+        expected_issuer,
+        signature_verified,
+        now,
+        clock_skew_seconds,
+        max_request_age_seconds,
+        &cache,
     )
     .map_err(profile_err)
 }
@@ -443,10 +489,12 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SpLogoutOrchestrator>()?;
 
     m.add_function(wrap_pyfunction!(create_sp_logout_request, &m)?)?;
+    m.add_function(wrap_pyfunction!(create_idp_propagation_request, &m)?)?;
     m.add_function(wrap_pyfunction!(create_logout_response_success, &m)?)?;
     m.add_function(wrap_pyfunction!(create_logout_response_partial, &m)?)?;
     m.add_function(wrap_pyfunction!(create_logout_response_error, &m)?)?;
     m.add_function(wrap_pyfunction!(validate_logout_request, &m)?)?;
+    m.add_function(wrap_pyfunction!(validate_logout_request_with_replay, &m)?)?;
 
     // Logout reason URIs.
     m.add("REASON_USER", gl::reason::USER)?;

@@ -93,13 +93,56 @@ Artifact
 --------
 
 :class:`pygamlastan.bindings.SamlArtifact` builds and parses type ``0x0004``
-artifacts:
+artifacts. Prefer :meth:`~pygamlastan.bindings.SamlArtifact.generate`, which
+uses Python's operating-system-backed ``secrets`` generator for the 20-byte
+message handle:
 
 .. code-block:: python
 
-   import os
-   artifact = bindings.SamlArtifact(0, "https://idp.example.org", os.urandom(20))
+   artifact = bindings.SamlArtifact.generate(0, "https://idp.example.org")
    token = artifact.encode()                 # base64 to put in the URL
 
    decoded = bindings.SamlArtifact.decode(token)
    decoded.matches_entity("https://idp.example.org")   # True
+
+The artifact identifies its source, but an artifact-resolution service must
+also bind the stored message to the SP for which it was issued. Gamlastan 0.9's
+:class:`pygamlastan.bindings.ArtifactStoreProtocol` makes that ownership check
+explicit:
+
+.. code-block:: python
+
+   from threading import Lock
+
+   class ArtifactStore:
+       def __init__(self):
+           self._messages: dict[str, tuple[str, bytes]] = {}
+           self._lock = Lock()
+
+       def store_for_recipient(
+           self, artifact: str, recipient_entity_id: str, message_xml: bytes
+       ) -> None:
+           with self._lock:
+               self._messages[artifact] = (recipient_entity_id, message_xml)
+
+       def resolve_and_consume_for_requester(
+           self, artifact: str, requester_entity_id: str
+       ) -> bytes | None:
+           with self._lock:
+               stored = self._messages.get(artifact)
+               if stored is None or stored[0] != requester_entity_id:
+                   return None       # a mismatch must not consume another SP's message
+               return self._messages.pop(artifact)[1]
+
+       # Legacy unbound operations, if older integration code still needs them.
+       def store(self, artifact: str, message_xml: bytes) -> None:
+           raise NotImplementedError("recipient_entity_id is required")
+
+       def resolve_and_consume(self, artifact: str) -> bytes | None:
+           raise NotImplementedError("requester_entity_id is required")
+
+The protocol is structural: no base class is required. Production stores
+should make the requester comparison and one-time consumption atomic in a
+shared database or cache. In particular, do not remove a message when the
+authenticated requester does not match its ``recipient_entity_id``; the real
+recipient must still be able to resolve it later.

@@ -198,3 +198,33 @@ the reference ids returned from a *trusted* :class:`~pygamlastan.crypto.SamlVeri
 you tell the profile which assertion/response ids were actually verified against
 the IdP's key, so the "assertions must be signed" requirement is bound to real
 cryptography rather than to markup. See :doc:`signing` and :doc:`validation`.
+
+Unsolicited (IdP-initiated) SSO
+-------------------------------
+
+Production defaults reject a response that has no ``InResponseTo``. This
+prevents an IdP-initiated response from silently entering a solicited login
+flow and reduces login-CSRF risk. If the deployment intentionally supports
+IdP-initiated SSO, opt in at the SP and pass no expected request ID:
+
+.. code-block:: python
+
+   config = security.SecurityConfig()
+   config.allow_unsolicited_responses = True
+
+   result = profiles.process_response_verified(
+       response_xml,
+       verifier,
+       config,
+       sp_entity_id="https://sp.example.org/sp",
+       acs_url="https://sp.example.org/acs",
+       expected_idp_entity_id="https://idp.example.org",
+       expected_request_id=None,
+       replay_cache=replay_cache,
+   )
+
+The response itself must omit ``InResponseTo``. A dangling or unexpected value
+is not treated as unsolicited, and the normal signature, issuer, audience,
+recipient, time, and replay checks still apply. Keep this setting disabled
+unless users have an intentional IdP-initiated entry point; solicited SSO gives
+the SP a request correlation value and remains preferable.

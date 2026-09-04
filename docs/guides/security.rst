@@ -110,15 +110,19 @@ binding.
 Verifier policy knobs
 ---------------------
 
-:class:`pygamlastan.crypto.SamlVerifier` exposes the 0.7 XML-DSig hardening
-knobs from gamlastan. The defaults are the SAML-safe values; the example below
-sets them explicitly so an audit can see the intended policy:
+:class:`pygamlastan.crypto.SamlVerifier` exposes the XML-DSig hardening knobs
+from gamlastan, including the 0.9 algorithm allowlist. The defaults are the
+SAML-safe values; the example below sets them explicitly so an audit can see
+the intended policy:
 
 .. code-block:: python
 
    from pygamlastan import crypto
 
    verifier = crypto.SamlVerifier.from_cert(idp_cert_pem)
+
+   # RSA/ECDSA SHA-256/384/512 signatures and SHA-256/384/512 digests.
+   verifier.set_algorithm_policy(crypto.AlgorithmPolicy())
 
    # Keep X.509 NotBefore/NotAfter enforcement enabled.
    verifier.set_skip_time_checks(False)
@@ -137,6 +141,9 @@ sets them explicitly so an audit can see the intended policy:
 
    # Do not let raw inline KeyValue/DEREncodedKeyValue bypass trust anchors.
    verifier.set_allow_raw_inline_keyinfo_with_trust_anchors(False)
+
+   # SAML federation signatures use asymmetric keys, not shared-secret HMAC.
+   verifier.set_reject_hmac_signatures(True)
 
 The unsafe directions are guarded: disabling trusted-key-only mode, non-strict
 verification, reference-digest enforcement, X.509 time checks, or the HMAC
@@ -177,7 +184,7 @@ defenses are applied before any SAML-level processing:
   external entity is resolved and no internal entity is expanded into a parsed
   SAML tree.
 
-* **Fail-closed resource limits** (uppsala 0.9): element nesting depth (128),
+* **Fail-closed resource limits** (uppsala 0.10): element nesting depth (128),
   entity-expansion byte budget (1 MiB), and entity nesting depth (256). These
   bound **billion-laughs / quadratic-blowup** amplification and **deep-nesting
   stack exhaustion**. Exceeding a limit raises :class:`pygamlastan.SamlXmlError`.
