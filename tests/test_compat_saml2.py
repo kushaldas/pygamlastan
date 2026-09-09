@@ -586,6 +586,47 @@ def test_metadata_store_rejects_duplicate_ids_within_one_aggregate(tmp_path):
         SPConfig().load({"metadata": {"local": [str(path)]}})
 
 
+def test_aggregate_with_unrelated_unsigned_idp_loads_fine(rsa_keypair, tmp_path):
+    """A metadata aggregate covering many IdPs (e.g. an MDX role/idp.xml bulk
+    document) must not fail to load just because some unrelated bystander
+    entity in it lacks a signing certificate -- pysaml2 never validates this
+    eagerly either (mdstore's certs() is resolved lazily, per entity, only
+    when that entity is actually used for verification). Reproduces the real
+    eidas dev-environment failure: bankidp.qa.swamid.se-shaped bystander entity
+    with no KeyDescriptor at all, alongside the actually-used, properly-signed
+    IdP."""
+    _priv, _cert_pem, cert_der_b64 = rsa_keypair
+    bystander_id = "https://bystander.example.com/idp/metadata"
+    used_entity = _idp_metadata(cert_der_b64).split("?>", 1)[1]
+    bystander_entity = _idp_metadata().split("?>", 1)[1].replace(IDP, bystander_id)
+    aggregate = f"""<md:EntitiesDescriptor
+        xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata">
+      {used_entity}
+      {bystander_entity}
+    </md:EntitiesDescriptor>"""
+    path = tmp_path / "aggregate.xml"
+    path.write_text(aggregate, encoding="utf-8")
+
+    # Explicit want_response_signed=True, matching eidas's real dev config --
+    # previously enough (combined with a "local" source) to trip the eager
+    # per-entity check on load; want_response_signed's own True default,
+    # without an explicit key in `service.sp`, did not (documented as an
+    # intentional trigger condition in the original, now-removed check).
+    cfg = SPConfig().load(
+        {
+            "service": {"sp": {"want_response_signed": True}},
+            "metadata": {"local": [str(path)]},
+        }
+    )
+
+    # The actually-used IdP's certificate resolves correctly...
+    assert cfg.idp_signing_certs(IDP)
+    # ...while the bystander's lack of one is only visible if something
+    # actually tries to use it for verification, exactly like pysaml2.
+    with pytest.raises(ValueError, match=f"{bystander_id!r}.*no signing certificate"):
+        cfg.idp_signing_certs(bystander_id)
+
+
 def test_missing_metadata_file_raises_source_not_found(tmp_path):
     """Configuration exposes pysaml2's metadata-source exception contract."""
     from pygamlastan.compat.saml2.mdstore import SourceNotFound
