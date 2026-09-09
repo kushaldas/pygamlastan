@@ -493,21 +493,25 @@ def _maybe_cleanup_replay_cache(cache: Any) -> None:
 
 
 def _apply_algorithm_policy(config: SPConfig, verifier: SamlVerifier) -> SamlVerifier:
-    """Widen ``verifier``'s allowed signature algorithms per SP config, if set.
+    """Widen ``verifier``'s allowed signature/digest algorithms per SP config.
 
     Opt-in only: the default :class:`~pygamlastan.crypto.AlgorithmPolicy`
-    correctly rejects legacy algorithms (e.g. RSA-RIPEMD160). A deployment that
-    trusts a specific IdP using one anyway must say so explicitly via
-    ``allowed_signature_algorithms`` in the SP settings, mirroring
+    correctly rejects legacy algorithms (e.g. RSA-RIPEMD160 signatures, or a
+    RIPEMD-160 Reference digest -- an IdP using one legacy algorithm often
+    uses both). A deployment that trusts a specific IdP using one anyway must
+    say so explicitly via ``allowed_signature_algorithms``/
+    ``allowed_digest_algorithms`` in the SP settings, mirroring
     ``allow_unsigned_logout_requests`` for the equivalent LogoutRequest gap.
-    Digest-algorithm policy and every other verifier safety check are left
-    untouched.
+    The two lists are independent and everything else about the verifier's
+    default policy is left untouched.
     """
-    if not config.allowed_signature_algorithms:
+    if not config.allowed_signature_algorithms and not config.allowed_digest_algorithms:
         return verifier
-    policy = verifier.algorithm_policy.with_signature_algorithms(
-        config.allowed_signature_algorithms
-    )
+    policy = verifier.algorithm_policy
+    if config.allowed_signature_algorithms:
+        policy = policy.with_signature_algorithms(config.allowed_signature_algorithms)
+    if config.allowed_digest_algorithms:
+        policy = policy.with_digest_algorithms(config.allowed_digest_algorithms)
     return verifier.with_algorithm_policy(policy)
 
 
