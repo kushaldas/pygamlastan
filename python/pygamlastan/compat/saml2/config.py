@@ -76,6 +76,12 @@ class SPConfig:
         # an IdP that publishes no signing certificate. This is independent of
         # response-signature policy and stays off unless directly configured.
         self.allow_unsigned_logout_requests: bool = False
+        # Explicit opt-in: widen the verifier's allowed signature algorithms
+        # beyond pygamlastan's secure default (e.g. to accept a specific
+        # trusted IdP still signing with a legacy algorithm such as
+        # RSA-RIPEMD160). None/empty means the default policy applies
+        # unchanged. Digest-algorithm policy is not affected.
+        self.allowed_signature_algorithms: list[str] | None = None
         self.key_file: str | None = None
         self.cert_file: str | None = None
         self.metadata_key_usage: str = "both"
@@ -157,6 +163,13 @@ class SPConfig:
         self.allow_unsigned_logout_requests = _as_bool(
             sp.get("allow_unsigned_logout_requests", False)
         )
+        allowed_signature_algorithms = sp.get("allowed_signature_algorithms")
+        if allowed_signature_algorithms is not None and (
+            not isinstance(allowed_signature_algorithms, list)
+            or not all(isinstance(a, str) for a in allowed_signature_algorithms)
+        ):
+            raise TypeError("allowed_signature_algorithms must be a list of strings")
+        self.allowed_signature_algorithms = allowed_signature_algorithms
 
         # Private attributes are part of the de-facto pysaml2 configuration
         # contract consumed by djangosaml2.

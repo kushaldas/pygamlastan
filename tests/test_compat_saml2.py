@@ -208,12 +208,16 @@ def _failed_response(
 </samlp:Response>"""
 
 
-def _signature_template(elem_id: str, cert_b64: str) -> str:
+def _signature_template(
+    elem_id: str,
+    cert_b64: str,
+    sig_alg: str = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+) -> str:
     """Enveloped XML-DSig template gamlastan fills in when signing ``elem_id``."""
     return (
         '<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:SignedInfo>'
         '<ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>'
-        '<ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>'
+        f'<ds:SignatureMethod Algorithm="{sig_alg}"/>'
         f'<ds:Reference URI="#{elem_id}"><ds:Transforms>'
         '<ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/>'
         '<ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/></ds:Transforms>'
@@ -224,11 +228,16 @@ def _signature_template(elem_id: str, cert_b64: str) -> str:
     )
 
 
-def _signed_auth_response(req_id: str, cert_b64: str, priv: bytes) -> str:
+def _signed_auth_response(
+    req_id: str,
+    cert_b64: str,
+    priv: bytes,
+    sig_alg: str = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+) -> str:
     """The test AuthnResponse with an enveloped signature over the Response root."""
     resp_id, assert_id = _fresh_ids()
     unsigned = _auth_response(req_id, resp_id=resp_id, assert_id=assert_id)
-    template = _signature_template(resp_id, cert_b64)
+    template = _signature_template(resp_id, cert_b64, sig_alg)
     marker = "</saml:Issuer>"  # the Response's Issuer is the first in the doc
     idx = unsigned.index(marker) + len(marker)
     spliced = unsigned[:idx] + template + unsigned[idx:]
@@ -1539,6 +1548,67 @@ def test_signed_response_accepted(rsa_keypair, tmp_path):
     si = resp.session_info()
     assert si["issuer"] == IDP
     assert si["ava"]["eduPersonPrincipalName"] == ["hubba-bubba@eduid.se"]
+
+
+_RSA_RIPEMD160 = "http://www.w3.org/2001/04/xmldsig-more#rsa-ripemd160"
+
+
+def test_signed_response_legacy_algorithm_rejected_by_default(rsa_keypair, tmp_path):
+    """A Response signed with a legacy algorithm (RSA-RIPEMD160) is rejected by
+    default, reproducing the real-world failure against bankidp.qa.swamid.se:
+    pygamlastan's default AlgorithmPolicy correctly rejects it, and the compat
+    shim surfaces that as a plain AssertionError (matching production's
+    ``except AssertionError`` handling in eduid_saml2.py)."""
+    priv, _cert_pem, cert_der_b64 = rsa_keypair
+    client = _signed_client(tmp_path, cert_der_b64)
+    session_id, _ = client.prepare_for_authenticate(binding=BINDING_HTTP_REDIRECT)
+    signed = _signed_auth_response(session_id, cert_der_b64, priv, sig_alg=_RSA_RIPEMD160)
+    raw = base64.b64encode(signed.encode("utf-8")).decode("ascii")
+    with pytest.raises(AssertionError):
+        client.parse_authn_request_response(raw, BINDING_HTTP_POST, {session_id: "r"})
+
+
+def test_signed_response_legacy_algorithm_accepted_with_explicit_opt_in(
+    rsa_keypair, tmp_path
+):
+    """Setting ``allowed_signature_algorithms`` in the SP settings is the
+    documented, explicit opt-in (mirroring ``allow_unsigned_logout_requests``)
+    that lets a specific trusted IdP's legacy signature algorithm verify."""
+    priv, _cert_pem, cert_der_b64 = rsa_keypair
+    md_path = tmp_path / "idp_metadata.xml"
+    md_path.write_text(_idp_metadata(cert_der_b64), encoding="utf-8")
+    conf = {
+        "entityid": SP,
+        "service": {
+            "sp": {
+                "endpoints": {
+                    "assertion_consumer_service": [(ACS, BINDING_HTTP_POST)],
+                },
+                "allowed_signature_algorithms": [_RSA_RIPEMD160],
+            }
+        },
+        "metadata": {"local": [str(md_path)]},
+    }
+    client = Saml2Client(SPConfig().load(conf))
+    assert client.config.allowed_signature_algorithms == [_RSA_RIPEMD160]
+
+    session_id, _ = client.prepare_for_authenticate(binding=BINDING_HTTP_REDIRECT)
+    signed = _signed_auth_response(session_id, cert_der_b64, priv, sig_alg=_RSA_RIPEMD160)
+    raw = base64.b64encode(signed.encode("utf-8")).decode("ascii")
+    resp = client.parse_authn_request_response(raw, BINDING_HTTP_POST, {session_id: "r"})
+    si = resp.session_info()
+    assert si["issuer"] == IDP
+    assert si["ava"]["eduPersonPrincipalName"] == ["hubba-bubba@eduid.se"]
+
+
+def test_allowed_signature_algorithms_rejects_non_list_of_str():
+    """The new SP config key is validated like the other explicit opt-ins."""
+    conf = {
+        "entityid": SP,
+        "service": {"sp": {"allowed_signature_algorithms": "not-a-list"}},
+    }
+    with pytest.raises(TypeError, match="allowed_signature_algorithms"):
+        SPConfig().load(conf)
 
 
 def test_primary_key_decrypts_and_validates_encrypted_assertion(rsa_keypair, tmp_path):

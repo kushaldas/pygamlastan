@@ -492,6 +492,25 @@ def _maybe_cleanup_replay_cache(cache: Any) -> None:
         )
 
 
+def _apply_algorithm_policy(config: SPConfig, verifier: SamlVerifier) -> SamlVerifier:
+    """Widen ``verifier``'s allowed signature algorithms per SP config, if set.
+
+    Opt-in only: the default :class:`~pygamlastan.crypto.AlgorithmPolicy`
+    correctly rejects legacy algorithms (e.g. RSA-RIPEMD160). A deployment that
+    trusts a specific IdP using one anyway must say so explicitly via
+    ``allowed_signature_algorithms`` in the SP settings, mirroring
+    ``allow_unsigned_logout_requests`` for the equivalent LogoutRequest gap.
+    Digest-algorithm policy and every other verifier safety check are left
+    untouched.
+    """
+    if not config.allowed_signature_algorithms:
+        return verifier
+    policy = verifier.algorithm_policy.with_signature_algorithms(
+        config.allowed_signature_algorithms
+    )
+    return verifier.with_algorithm_policy(policy)
+
+
 class Saml2Client:
     """pysaml2-compatible SP client backed by pygamlastan.
 
@@ -864,7 +883,9 @@ class Saml2Client:
                 signing_certs = self.config.idp_signing_certs(expected_idp)
             except ValueError as exc:
                 raise MissingKey(str(exc)) from exc
-            verifier = SamlVerifier.from_certs(signing_certs)
+            verifier = _apply_algorithm_policy(
+                self.config, SamlVerifier.from_certs(signing_certs)
+            )
             try:
                 result = _profiles.process_response_verified(
                     xml,
@@ -1169,7 +1190,10 @@ class Saml2Client:
         if not certs:
             raise MissingKey(f"no signing certificate configured for {expected_idp!r}")
         try:
-            verifiers = [SamlVerifier.from_cert(cert) for cert in certs]
+            verifiers = [
+                _apply_algorithm_policy(self.config, SamlVerifier.from_cert(cert))
+                for cert in certs
+            ]
         except Exception as exc:
             raise MissingKey(
                 f"invalid signing certificate configured for {expected_idp!r}: {exc}"
@@ -1609,7 +1633,10 @@ class Saml2Client:
                 stacklevel=2,
             )
             return True
-        verifiers = [SamlVerifier.from_cert(cert) for cert in certs]
+        verifiers = [
+            _apply_algorithm_policy(self.config, SamlVerifier.from_cert(cert))
+            for cert in certs
+        ]
         verified = False
 
         # HTTP-Redirect binding: detached signature over the query string. The
