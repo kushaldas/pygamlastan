@@ -124,6 +124,13 @@ the intended policy:
    # RSA/ECDSA SHA-256/384/512 signatures and SHA-256/384/512 digests.
    verifier.set_algorithm_policy(crypto.AlgorithmPolicy())
 
+.. note::
+
+   Using the ``compat.saml2`` shim instead of this native API directly? The SP
+   settings ``service.sp.allowed_signature_algorithms`` /
+   ``allowed_digest_algorithms`` (see :doc:`pysaml2_compat`) apply the same
+   allowlist widening without constructing a ``SamlVerifier`` by hand.
+
    # Keep X.509 NotBefore/NotAfter enforcement enabled.
    verifier.set_skip_time_checks(False)
 

@@ -8,6 +8,19 @@ security handling. `pygamlastan` is a thin PyO3 binding; most entries below
 reflect adopting a change made in `gamlastan` / `uppsala` / `bergshamra` and
 surfacing it correctly to Python.
 
+## [Unreleased]
+
+### Added
+
+- Exposed the compat shim's signature/digest algorithm policy as SP settings:
+  `service.sp.allowed_signature_algorithms` and `service.sp.allowed_digest_algorithms`
+  (both `list[str]`, default unset). `SamlVerifier` already supported a
+  configurable `AlgorithmPolicy`, but `compat.saml2` had no config surface
+  reaching it, so a deployment could not opt a specific trusted IdP into a
+  non-default algorithm without patching `pygamlastan` itself. Mirrors
+  `allow_unsigned_logout_requests`'s existing shape as an explicit,
+  narrowly-scoped opt-in; the default policy is unchanged unless these are set.
+
 ## [0.5.0] - 2026-09-04
 
 Adopts the upstream `gamlastan` 0.9 security release and its matching
