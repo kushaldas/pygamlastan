@@ -26,6 +26,19 @@ surfacing it correctly to Python.
   algorithm - there is no per-IdP scoping, matching `signing_algorithm`/
   `digest_algorithm`'s existing SP-wide shape.
 
+### Fixed
+
+- `compat.saml2.config.SPConfig.load()` no longer requires every IdP entity in
+  a loaded metadata document to carry a signing certificate. pysaml2 never
+  validated this eagerly either — `mdstore.certs()` resolves a signing
+  certificate lazily, per entity, only when that specific entity is actually
+  used for verification. The compat shim's eager, whole-document check meant
+  any SP pointed at a real third-party federation aggregate (e.g. an MDX
+  `role/idp.xml` bulk document) could fail to load entirely because of an
+  unrelated entity it never talks to. `idp_signing_certs()` already enforces
+  the requirement correctly at the point it matters; only the redundant,
+  over-eager duplicate at load time is removed.
+
 ## [0.5.0] - 2026-09-04
 
 Adopts the upstream `gamlastan` 0.9 security release and its matching

@@ -114,7 +114,6 @@ class SPConfig:
         self.optional_attributes: list[str] = []
         self.organization: dict[str, Any] = {}
         self.contact_person: list[dict[str, Any]] = []
-        self._signature_policy_explicit = False
 
     # -- loading ----------------------------------------------------------
 
@@ -125,14 +124,6 @@ class SPConfig:
         sp = conf.get("service", {}).get("sp", {})
         self._sp = dict(sp)
         self.name = sp.get("name")
-        self._signature_policy_explicit = any(
-            key in sp
-            for key in (
-                "want_response_signed",
-                "want_assertions_signed",
-                "want_logout_response_signed",
-            )
-        )
         self.required_attributes = list(sp.get("required_attributes", []))
         self.optional_attributes = list(sp.get("optional_attributes", []))
         self.organization = dict(conf.get("organization", {}))
@@ -321,19 +312,19 @@ class SPConfig:
                     raise ValueError(
                         f"IdP metadata {entity.entity_id!r} has no SSO endpoint"
                     )
-                signatures_required = (
-                    self.want_response_signed
-                    or self.want_assertions_signed
-                    or self.want_logout_response_signed
-                )
-                if (
-                    signatures_required
-                    and (require_expiry or self._signature_policy_explicit)
-                    and not entity.signing_certificates("idp")
-                ):
-                    raise ValueError(
-                        f"IdP metadata {entity.entity_id!r} has no signing certificate"
-                    )
+                # Deliberately no eager "has a signing certificate" check here:
+                # pysaml2 never validates this at load time either (mdstore's
+                # certs() is resolved lazily, per entity, only when a SAML
+                # message from that specific entity is actually verified --
+                # an AuthnResponse, LogoutResponse, or LogoutRequest alike).
+                # A metadata
+                # source can be a large third-party aggregate covering many
+                # IdPs a given SP never talks to (e.g. an MDX role/idp.xml
+                # bulk document); requiring every entity in it to carry a
+                # signing certificate would fail the whole config over an
+                # unrelated entity's metadata quality. idp_signing_certs()
+                # already enforces this correctly at the point it matters --
+                # when a specific IdP is actually used.
 
     def getattr(self, attribute: str, context: str | None = None) -> Any:
         """Read a setting using pysaml2's optional service context."""
