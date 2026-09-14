@@ -145,6 +145,15 @@ the intended policy:
    # SAML federation signatures use asymmetric keys, not shared-secret HMAC.
    verifier.set_reject_hmac_signatures(True)
 
+.. note::
+
+   Using the ``compat.saml2`` shim instead of this native API directly? The SP
+   settings ``service.sp.allowed_signature_algorithms`` /
+   ``allowed_digest_algorithms`` (see :doc:`pysaml2_compat`) apply the same
+   allowlist widening without constructing a ``SamlVerifier`` by hand. It is
+   an SP-wide setting -- it applies to every IdP the SP verifies against, not
+   just the one that needs the legacy algorithm.
+
 The unsafe directions are guarded: disabling trusted-key-only mode, non-strict
 verification, reference-digest enforcement, X.509 time checks, or the HMAC
 minimum raises unless the matching ``unsafe_*`` argument is explicit. Enabling

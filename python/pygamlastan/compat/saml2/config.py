@@ -32,6 +32,16 @@ def _as_bool(value: Any) -> bool:
     return bool(value)
 
 
+def _as_str_list_or_none(sp: dict[str, Any], key: str) -> list[str] | None:
+    """Read an optional explicit-opt-in list-of-algorithm-URIs SP setting."""
+    value = sp.get(key)
+    if value is not None and (
+        not isinstance(value, list) or not all(isinstance(a, str) for a in value)
+    ):
+        raise TypeError(f"{key} must be a list of strings")
+    return value
+
+
 _MAX_REMOTE_METADATA_BYTES = 32 * 1024 * 1024
 
 
@@ -76,6 +86,19 @@ class SPConfig:
         # an IdP that publishes no signing certificate. This is independent of
         # response-signature policy and stays off unless directly configured.
         self.allow_unsigned_logout_requests: bool = False
+        # Explicit, SP-wide opt-in: widen the verifier's allowed signature/
+        # digest algorithms beyond pygamlastan's secure default (e.g. to
+        # accept an IdP still signing with a legacy algorithm such as
+        # RSA-RIPEMD160 over a RIPEMD-160 digest). Applies to every IdP this
+        # SP verifies against, not just the one that needs it -- there is no
+        # per-IdP scoping, matching signing_algorithm/digest_algorithm above.
+        # None/empty means the default policy applies unchanged for that half
+        # of the policy; the two lists are independent, matching
+        # AlgorithmPolicy's own with_signature_algorithms/
+        # with_digest_algorithms split. Both are added on top of the
+        # verifier's secure defaults, never replacing them.
+        self.allowed_signature_algorithms: list[str] | None = None
+        self.allowed_digest_algorithms: list[str] | None = None
         self.key_file: str | None = None
         self.cert_file: str | None = None
         self.metadata_key_usage: str = "both"
@@ -156,6 +179,12 @@ class SPConfig:
         self.accepted_time_diff = int(conf.get("accepted_time_diff") or 0)
         self.allow_unsigned_logout_requests = _as_bool(
             sp.get("allow_unsigned_logout_requests", False)
+        )
+        self.allowed_signature_algorithms = _as_str_list_or_none(
+            sp, "allowed_signature_algorithms"
+        )
+        self.allowed_digest_algorithms = _as_str_list_or_none(
+            sp, "allowed_digest_algorithms"
         )
 
         # Private attributes are part of the de-facto pysaml2 configuration

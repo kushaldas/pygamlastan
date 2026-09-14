@@ -492,6 +492,50 @@ def _maybe_cleanup_replay_cache(cache: Any) -> None:
         )
 
 
+def _apply_algorithm_policy(config: SPConfig, verifier: SamlVerifier) -> SamlVerifier:
+    """Widen ``verifier``'s allowed signature/digest algorithms per SP config.
+
+    Opt-in only: the default :class:`~pygamlastan.crypto.AlgorithmPolicy`
+    correctly rejects legacy algorithms (e.g. RSA-RIPEMD160 signatures, or a
+    RIPEMD-160 Reference digest -- an IdP using one legacy algorithm often
+    uses both). A deployment that needs to accept one anyway must say so
+    explicitly via ``allowed_signature_algorithms``/``allowed_digest_algorithms``
+    in the SP settings, mirroring ``allow_unsigned_logout_requests`` for the
+    equivalent LogoutRequest gap.
+
+    This is an **SP-wide** relaxation, applied to every IdP this SP verifies
+    against -- there is no per-IdP scoping. ``SPConfig`` has no other notion
+    of a per-IdP policy (``signing_algorithm``/``digest_algorithm`` are
+    SP-wide too), so a deployment with several IdPs in its metadata and only
+    one of them needing a legacy algorithm widens the check for all of them.
+    Configure a dedicated ``SPConfig``/client for that IdP if the widening
+    must not extend to the others.
+
+    The two lists are added on top of the verifier's existing defaults, not
+    substituted for them: ``AlgorithmPolicy.with_signature_algorithms``/
+    ``with_digest_algorithms`` replace their respective allowlists wholesale,
+    so configuring one legacy algorithm here must not silently drop the
+    secure defaults (SHA-256/384/512) an ordinary IdP still relies on.
+    Everything else about the verifier's default policy is left untouched.
+    """
+    if not config.allowed_signature_algorithms and not config.allowed_digest_algorithms:
+        return verifier
+    policy = verifier.algorithm_policy
+    if config.allowed_signature_algorithms:
+        merged_signature = list(policy.allowed_signature_algorithms or [])
+        for algorithm in config.allowed_signature_algorithms:
+            if algorithm not in merged_signature:
+                merged_signature.append(algorithm)
+        policy = policy.with_signature_algorithms(merged_signature)
+    if config.allowed_digest_algorithms:
+        merged_digest = list(policy.allowed_digest_algorithms or [])
+        for algorithm in config.allowed_digest_algorithms:
+            if algorithm not in merged_digest:
+                merged_digest.append(algorithm)
+        policy = policy.with_digest_algorithms(merged_digest)
+    return verifier.with_algorithm_policy(policy)
+
+
 class Saml2Client:
     """pysaml2-compatible SP client backed by pygamlastan.
 
@@ -864,7 +908,9 @@ class Saml2Client:
                 signing_certs = self.config.idp_signing_certs(expected_idp)
             except ValueError as exc:
                 raise MissingKey(str(exc)) from exc
-            verifier = SamlVerifier.from_certs(signing_certs)
+            verifier = _apply_algorithm_policy(
+                self.config, SamlVerifier.from_certs(signing_certs)
+            )
             try:
                 result = _profiles.process_response_verified(
                     xml,
@@ -1169,7 +1215,10 @@ class Saml2Client:
         if not certs:
             raise MissingKey(f"no signing certificate configured for {expected_idp!r}")
         try:
-            verifiers = [SamlVerifier.from_cert(cert) for cert in certs]
+            verifiers = [
+                _apply_algorithm_policy(self.config, SamlVerifier.from_cert(cert))
+                for cert in certs
+            ]
         except Exception as exc:
             raise MissingKey(
                 f"invalid signing certificate configured for {expected_idp!r}: {exc}"
@@ -1609,7 +1658,10 @@ class Saml2Client:
                 stacklevel=2,
             )
             return True
-        verifiers = [SamlVerifier.from_cert(cert) for cert in certs]
+        verifiers = [
+            _apply_algorithm_policy(self.config, SamlVerifier.from_cert(cert))
+            for cert in certs
+        ]
         verified = False
 
         # HTTP-Redirect binding: detached signature over the query string. The

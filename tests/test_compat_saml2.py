@@ -140,10 +140,16 @@ def _logout_response(req_id: str) -> str:
 </samlp:LogoutResponse>"""
 
 
-def _signed_logout_response(req_id: str, cert_b64: str, private_key: bytes) -> str:
+def _signed_logout_response(
+    req_id: str,
+    cert_b64: str,
+    private_key: bytes,
+    sig_alg: str = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+    digest_alg: str = "http://www.w3.org/2001/04/xmlenc#sha256",
+) -> str:
     """A LogoutResponse with an enveloped signature over its root element."""
     unsigned = _logout_response(req_id)
-    template = _signature_template("id-lr-1", cert_b64)
+    template = _signature_template("id-lr-1", cert_b64, sig_alg, digest_alg)
     issuer_end = unsigned.index("</saml:Issuer>") + len("</saml:Issuer>")
     templated = unsigned[:issuer_end] + template + unsigned[issuer_end:]
     return crypto.SamlSigner.from_pem(private_key).sign_enveloped(templated)
@@ -208,27 +214,38 @@ def _failed_response(
 </samlp:Response>"""
 
 
-def _signature_template(elem_id: str, cert_b64: str) -> str:
+def _signature_template(
+    elem_id: str,
+    cert_b64: str,
+    sig_alg: str = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+    digest_alg: str = "http://www.w3.org/2001/04/xmlenc#sha256",
+) -> str:
     """Enveloped XML-DSig template gamlastan fills in when signing ``elem_id``."""
     return (
         '<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:SignedInfo>'
         '<ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>'
-        '<ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>'
+        f'<ds:SignatureMethod Algorithm="{sig_alg}"/>'
         f'<ds:Reference URI="#{elem_id}"><ds:Transforms>'
         '<ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/>'
         '<ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/></ds:Transforms>'
-        '<ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>'
+        f'<ds:DigestMethod Algorithm="{digest_alg}"/>'
         "<ds:DigestValue/></ds:Reference></ds:SignedInfo><ds:SignatureValue/>"
         f"<ds:KeyInfo><ds:X509Data><ds:X509Certificate>{cert_b64}</ds:X509Certificate>"
         "</ds:X509Data></ds:KeyInfo></ds:Signature>"
     )
 
 
-def _signed_auth_response(req_id: str, cert_b64: str, priv: bytes) -> str:
+def _signed_auth_response(
+    req_id: str,
+    cert_b64: str,
+    priv: bytes,
+    sig_alg: str = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+    digest_alg: str = "http://www.w3.org/2001/04/xmlenc#sha256",
+) -> str:
     """The test AuthnResponse with an enveloped signature over the Response root."""
     resp_id, assert_id = _fresh_ids()
     unsigned = _auth_response(req_id, resp_id=resp_id, assert_id=assert_id)
-    template = _signature_template(resp_id, cert_b64)
+    template = _signature_template(resp_id, cert_b64, sig_alg, digest_alg)
     marker = "</saml:Issuer>"  # the Response's Issuer is the first in the doc
     idx = unsigned.index(marker) + len(marker)
     spliced = unsigned[:idx] + template + unsigned[idx:]
@@ -1541,6 +1558,235 @@ def test_signed_response_accepted(rsa_keypair, tmp_path):
     assert si["ava"]["eduPersonPrincipalName"] == ["hubba-bubba@eduid.se"]
 
 
+_RSA_RIPEMD160 = "http://www.w3.org/2001/04/xmldsig-more#rsa-ripemd160"
+
+
+def test_signed_response_legacy_algorithm_rejected_by_default(rsa_keypair, tmp_path):
+    """A Response signed with a legacy algorithm (RSA-RIPEMD160) is rejected by
+    default, reproducing the real-world failure against bankidp.qa.swamid.se:
+    pygamlastan's default AlgorithmPolicy correctly rejects it, and the compat
+    shim surfaces that as a plain AssertionError (matching production's
+    ``except AssertionError`` handling in eduid_saml2.py)."""
+    priv, _cert_pem, cert_der_b64 = rsa_keypair
+    client = _signed_client(tmp_path, cert_der_b64)
+    session_id, _ = client.prepare_for_authenticate(binding=BINDING_HTTP_REDIRECT)
+    signed = _signed_auth_response(session_id, cert_der_b64, priv, sig_alg=_RSA_RIPEMD160)
+    raw = base64.b64encode(signed.encode("utf-8")).decode("ascii")
+    with pytest.raises(AssertionError):
+        client.parse_authn_request_response(raw, BINDING_HTTP_POST, {session_id: "r"})
+
+
+def test_signed_response_legacy_algorithm_accepted_with_explicit_opt_in(
+    rsa_keypair, tmp_path
+):
+    """Setting ``allowed_signature_algorithms`` in the SP settings is the
+    documented, explicit opt-in (mirroring ``allow_unsigned_logout_requests``)
+    that lets a specific trusted IdP's legacy signature algorithm verify."""
+    priv, _cert_pem, cert_der_b64 = rsa_keypair
+    md_path = tmp_path / "idp_metadata.xml"
+    md_path.write_text(_idp_metadata(cert_der_b64), encoding="utf-8")
+    conf = {
+        "entityid": SP,
+        "service": {
+            "sp": {
+                "endpoints": {
+                    "assertion_consumer_service": [(ACS, BINDING_HTTP_POST)],
+                },
+                "allowed_signature_algorithms": [_RSA_RIPEMD160],
+            }
+        },
+        "metadata": {"local": [str(md_path)]},
+    }
+    client = Saml2Client(SPConfig().load(conf))
+    assert client.config.allowed_signature_algorithms == [_RSA_RIPEMD160]
+
+    session_id, _ = client.prepare_for_authenticate(binding=BINDING_HTTP_REDIRECT)
+    signed = _signed_auth_response(session_id, cert_der_b64, priv, sig_alg=_RSA_RIPEMD160)
+    raw = base64.b64encode(signed.encode("utf-8")).decode("ascii")
+    resp = client.parse_authn_request_response(raw, BINDING_HTTP_POST, {session_id: "r"})
+    si = resp.session_info()
+    assert si["issuer"] == IDP
+    assert si["ava"]["eduPersonPrincipalName"] == ["hubba-bubba@eduid.se"]
+
+
+def test_allowed_signature_algorithms_rejects_non_list_of_str():
+    """The new SP config key is validated like the other explicit opt-ins."""
+    conf = {
+        "entityid": SP,
+        "service": {"sp": {"allowed_signature_algorithms": "not-a-list"}},
+    }
+    with pytest.raises(TypeError, match="allowed_signature_algorithms"):
+        SPConfig().load(conf)
+
+
+def test_allowed_digest_algorithms_rejects_non_list_of_str():
+    """Same validation for the sibling digest-algorithm opt-in."""
+    conf = {
+        "entityid": SP,
+        "service": {"sp": {"allowed_digest_algorithms": "not-a-list"}},
+    }
+    with pytest.raises(TypeError, match="allowed_digest_algorithms"):
+        SPConfig().load(conf)
+
+
+_RIPEMD160_DIGEST = "http://www.w3.org/2001/04/xmlenc#ripemd160"
+
+
+def test_signed_response_legacy_digest_rejected_even_with_signature_opt_in(
+    rsa_keypair, tmp_path
+):
+    """The real bankidp.qa.swamid.se failure mode: an IdP using RIPEMD-160 for
+    both signature and digest still fails after only ``allowed_signature_algorithms``
+    is set -- digest-algorithm policy is independent and stays at its secure
+    default until explicitly widened too."""
+    priv, _cert_pem, cert_der_b64 = rsa_keypair
+    md_path = tmp_path / "idp_metadata.xml"
+    md_path.write_text(_idp_metadata(cert_der_b64), encoding="utf-8")
+    conf = {
+        "entityid": SP,
+        "service": {
+            "sp": {
+                "endpoints": {
+                    "assertion_consumer_service": [(ACS, BINDING_HTTP_POST)],
+                },
+                "allowed_signature_algorithms": [_RSA_RIPEMD160],
+            }
+        },
+        "metadata": {"local": [str(md_path)]},
+    }
+    client = Saml2Client(SPConfig().load(conf))
+    session_id, _ = client.prepare_for_authenticate(binding=BINDING_HTTP_REDIRECT)
+    signed = _signed_auth_response(
+        session_id,
+        cert_der_b64,
+        priv,
+        sig_alg=_RSA_RIPEMD160,
+        digest_alg=_RIPEMD160_DIGEST,
+    )
+    raw = base64.b64encode(signed.encode("utf-8")).decode("ascii")
+    with pytest.raises(AssertionError):
+        client.parse_authn_request_response(raw, BINDING_HTTP_POST, {session_id: "r"})
+
+
+def test_signed_response_legacy_signature_and_digest_accepted_with_both_opt_ins(
+    rsa_keypair, tmp_path
+):
+    """Setting both ``allowed_signature_algorithms`` and
+    ``allowed_digest_algorithms`` is what actually clears the real
+    bankidp.qa.swamid.se failure mode end to end."""
+    priv, _cert_pem, cert_der_b64 = rsa_keypair
+    md_path = tmp_path / "idp_metadata.xml"
+    md_path.write_text(_idp_metadata(cert_der_b64), encoding="utf-8")
+    conf = {
+        "entityid": SP,
+        "service": {
+            "sp": {
+                "endpoints": {
+                    "assertion_consumer_service": [(ACS, BINDING_HTTP_POST)],
+                },
+                "allowed_signature_algorithms": [_RSA_RIPEMD160],
+                "allowed_digest_algorithms": [_RIPEMD160_DIGEST],
+            }
+        },
+        "metadata": {"local": [str(md_path)]},
+    }
+    client = Saml2Client(SPConfig().load(conf))
+    assert client.config.allowed_digest_algorithms == [_RIPEMD160_DIGEST]
+
+    session_id, _ = client.prepare_for_authenticate(binding=BINDING_HTTP_REDIRECT)
+    signed = _signed_auth_response(
+        session_id,
+        cert_der_b64,
+        priv,
+        sig_alg=_RSA_RIPEMD160,
+        digest_alg=_RIPEMD160_DIGEST,
+    )
+    raw = base64.b64encode(signed.encode("utf-8")).decode("ascii")
+    resp = client.parse_authn_request_response(raw, BINDING_HTTP_POST, {session_id: "r"})
+    si = resp.session_info()
+    assert si["issuer"] == IDP
+    assert si["ava"]["eduPersonPrincipalName"] == ["hubba-bubba@eduid.se"]
+
+
+def test_allowed_signature_algorithms_still_accepts_default_algorithm(
+    rsa_keypair, tmp_path
+):
+    """The opt-in widens the allowlist rather than replacing it: an ordinary
+    SHA-256-signed response still verifies once a legacy algorithm has been
+    explicitly allowed alongside it."""
+    priv, _cert_pem, cert_der_b64 = rsa_keypair
+    md_path = tmp_path / "idp_metadata.xml"
+    md_path.write_text(_idp_metadata(cert_der_b64), encoding="utf-8")
+    conf = {
+        "entityid": SP,
+        "service": {
+            "sp": {
+                "endpoints": {
+                    "assertion_consumer_service": [(ACS, BINDING_HTTP_POST)],
+                },
+                "allowed_signature_algorithms": [_RSA_RIPEMD160],
+                "allowed_digest_algorithms": [_RIPEMD160_DIGEST],
+            }
+        },
+        "metadata": {"local": [str(md_path)]},
+    }
+    client = Saml2Client(SPConfig().load(conf))
+    session_id, _ = client.prepare_for_authenticate(binding=BINDING_HTTP_REDIRECT)
+    signed = _signed_auth_response(session_id, cert_der_b64, priv)  # default SHA-256
+    raw = base64.b64encode(signed.encode("utf-8")).decode("ascii")
+    resp = client.parse_authn_request_response(raw, BINDING_HTTP_POST, {session_id: "r"})
+    assert resp.session_info()["issuer"] == IDP
+
+
+def test_logout_response_legacy_algorithm_accepted_with_explicit_opt_in(
+    rsa_keypair, tmp_path
+):
+    """The algorithm-widening opt-in also reaches LogoutResponse verification,
+    which constructs its SamlVerifier at a separate call site from
+    AuthnResponse processing."""
+    private_key, _cert_pem, cert_der_b64 = rsa_keypair
+    base = _signed_client(tmp_path, cert_der_b64)
+    base.config.want_logout_response_signed = True
+    base.config.allowed_signature_algorithms = [_RSA_RIPEMD160]
+    base.config.allowed_digest_algorithms = [_RIPEMD160_DIGEST]
+    state = {"request-id": {"entity_id": IDP, "relay_state": "request-id"}}
+    client = Saml2Client(base.config, state_cache=state)
+    xml = _signed_logout_response(
+        "request-id",
+        cert_der_b64,
+        private_key,
+        sig_alg=_RSA_RIPEMD160,
+        digest_alg=_RIPEMD160_DIGEST,
+    )
+    encoded = deflate_and_base64_encode(xml)
+    assert client.parse_logout_request_response(
+        encoded, relay_state="request-id"
+    ).status_ok()
+    assert "request-id" not in state
+
+
+def test_handle_logout_request_legacy_algorithm_accepted_with_explicit_opt_in(
+    rsa_keypair, tmp_path
+):
+    """The algorithm-widening opt-in also reaches inbound LogoutRequest
+    verification, which constructs its SamlVerifier at a separate call site
+    from AuthnResponse/LogoutResponse processing."""
+    priv, _cert_pem, cert_der_b64 = rsa_keypair
+    client = _signed_client(tmp_path, cert_der_b64)
+    client.config.allowed_signature_algorithms = [_RSA_RIPEMD160]
+    client.config.allowed_digest_algorithms = [_RIPEMD160_DIGEST]
+    signed_xml = _enveloped_signed_logout(
+        "id-lr-legacy-alg-ok",
+        cert_der_b64,
+        priv,
+        sig_alg=_RSA_RIPEMD160,
+        digest_alg=_RIPEMD160_DIGEST,
+    )
+    raw = base64.b64encode(signed_xml.encode("utf-8")).decode("ascii")
+    info = client.handle_logout_request(raw, _session_nameid(), BINDING_HTTP_POST)
+    assert info["headers"][0][1].startswith(IDPSLO + "?SAMLResponse=")
+
+
 def test_primary_key_decrypts_and_validates_encrypted_assertion(rsa_keypair, tmp_path):
     private_key, cert_pem, cert_der_b64 = rsa_keypair
     key_path = tmp_path / "sp-encryption.key"
@@ -2525,10 +2771,16 @@ def _redirect_signed_logout(
     return encoded, sig_alg, base64.b64encode(signature).decode("ascii"), signed_query
 
 
-def _enveloped_signed_logout(req_id: str, cert_b64: str, priv: bytes) -> str:
+def _enveloped_signed_logout(
+    req_id: str,
+    cert_b64: str,
+    priv: bytes,
+    sig_alg: str = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+    digest_alg: str = "http://www.w3.org/2001/04/xmlenc#sha256",
+) -> str:
     """A LogoutRequest carrying an enveloped XML-DSig over the request element."""
     unsigned = _logout_request(req_id)
-    template = _signature_template(req_id, cert_b64)
+    template = _signature_template(req_id, cert_b64, sig_alg, digest_alg)
     marker = "</saml:Issuer>"
     idx = unsigned.index(marker) + len(marker)
     return crypto.SamlSigner.from_pem(priv).sign_enveloped(
