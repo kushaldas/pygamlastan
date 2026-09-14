@@ -135,7 +135,7 @@ def test_version_and_submodules():
     Guards the mixed Rust+Python layout: the `_native` extension must register
     each area (core, xml, ...) as an attribute of the `pygamlastan` package.
     """
-    assert pygamlastan.__version__ == "0.5.0"
+    assert pygamlastan.__version__ == "0.6.0"
     for name in ("core", "xml", "crypto", "bindings", "metadata", "security",
                  "profiles", "attribute_map", "idp", "logout"):
         assert hasattr(pygamlastan, name)
