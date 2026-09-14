@@ -629,6 +629,89 @@ def test_aggregate_with_unrelated_unsigned_idp_loads_fine(rsa_keypair, tmp_path)
         cfg.idp_signing_certs(bystander_id)
 
 
+def test_remote_aggregate_with_unrelated_unsigned_idp_loads_fine(
+    rsa_keypair, tmp_path, monkeypatch
+):
+    """The local-source regression above only exercises one of the two ways
+    the removed eager check used to trigger: `_signature_policy_explicit`
+    (an explicit `want_response_signed` key in `service.sp`). Remote
+    metadata's `_load_remote_metadata` always calls
+    `_validate_metadata_document(..., require_expiry=True)`, which alone
+    satisfies the check's other trigger condition regardless of any SP
+    setting -- the actual production scenario this fix targets, since eidas's
+    real aggregate is fetched remotely. A signed, finite-lived remote
+    aggregate with a certificate-less bystander entity must load fine here
+    too, with the bystander's missing certificate surfacing only if
+    something later tries to verify against it."""
+    from pygamlastan.compat.saml2 import config as config_module
+
+    root_key, root_cert, root_cert_b64 = rsa_keypair
+    cert_path = tmp_path / "aggregate-signing.crt"
+    cert_path.write_bytes(root_cert)
+    valid_until = (datetime.now(timezone.utc) + timedelta(days=1)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    bystander_id = "https://eidas.test.bankid.com/idp/metadata"
+    used_entity = _idp_metadata(root_cert_b64).split("?>", 1)[1]
+    bystander_entity = _idp_metadata().split("?>", 1)[1].replace(IDP, bystander_id)
+    aggregate = (
+        '<md:EntitiesDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" '
+        f'ID="aggregate-root" validUntil="{valid_until}">'
+        + used_entity
+        + bystander_entity
+        + "</md:EntitiesDescriptor>"
+    )
+    insert_at = aggregate.index(">") + 1
+    signed = crypto.SamlSigner.from_pem(root_key).sign_enveloped(
+        aggregate[:insert_at]
+        + _signature_template("aggregate-root", root_cert_b64)
+        + aggregate[insert_at:]
+    )
+
+    class RemoteResponse:
+        def __init__(self):
+            self.headers = {"Content-Length": str(len(signed.encode()))}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def geturl(self):
+            return "https://metadata.example.org/aggregate.xml"
+
+        def read(self, _limit):
+            return signed.encode()
+
+    class RemoteOpener:
+        def open(self, _request, timeout):
+            assert timeout == 10
+            return RemoteResponse()
+
+    monkeypatch.setattr(
+        config_module.urllib.request,
+        "build_opener",
+        lambda *_handlers: RemoteOpener(),
+    )
+    cfg = SPConfig().load(
+        {
+            "metadata": {
+                "remote": [
+                    {
+                        "url": "https://metadata.example.org/aggregate.xml",
+                        "cert": str(cert_path),
+                    }
+                ]
+            },
+        }
+    )
+
+    assert cfg.idp_signing_certs(IDP)
+    with pytest.raises(ValueError, match=f"{bystander_id!r}.*no signing certificate"):
+        cfg.idp_signing_certs(bystander_id)
+
+
 def test_missing_metadata_file_raises_source_not_found(tmp_path):
     """Configuration exposes pysaml2's metadata-source exception contract."""
     from pygamlastan.compat.saml2.mdstore import SourceNotFound
