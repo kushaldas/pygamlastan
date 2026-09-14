@@ -592,9 +592,11 @@ def test_aggregate_with_unrelated_unsigned_idp_loads_fine(rsa_keypair, tmp_path)
     entity in it lacks a signing certificate -- pysaml2 never validates this
     eagerly either (mdstore's certs() is resolved lazily, per entity, only
     when that entity is actually used for verification). Reproduces the real
-    eidas dev-environment failure: bankidp.qa.swamid.se-shaped bystander entity
-    with no KeyDescriptor at all, alongside the actually-used, properly-signed
-    IdP."""
+    eidas dev-environment failure: an `eidas.test.bankid.com`-shaped bystander
+    entity with no KeyDescriptor at all, alongside the actually-used IdP that
+    does publish a signing certificate (the fixture only embeds the
+    certificate in a KeyDescriptor -- it does not sign the metadata document
+    itself, which is orthogonal to this check)."""
     _priv, _cert_pem, cert_der_b64 = rsa_keypair
     bystander_id = "https://bystander.example.com/idp/metadata"
     used_entity = _idp_metadata(cert_der_b64).split("?>", 1)[1]

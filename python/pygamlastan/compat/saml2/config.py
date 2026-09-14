@@ -314,8 +314,10 @@ class SPConfig:
                     )
                 # Deliberately no eager "has a signing certificate" check here:
                 # pysaml2 never validates this at load time either (mdstore's
-                # certs() is resolved lazily, per entity, only when a response
-                # from that specific entity is actually verified). A metadata
+                # certs() is resolved lazily, per entity, only when a SAML
+                # message from that specific entity is actually verified --
+                # an AuthnResponse, LogoutResponse, or LogoutRequest alike).
+                # A metadata
                 # source can be a large third-party aggregate covering many
                 # IdPs a given SP never talks to (e.g. an MDX role/idp.xml
                 # bulk document); requiring every entity in it to carry a
