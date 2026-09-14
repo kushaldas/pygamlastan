@@ -86,13 +86,17 @@ class SPConfig:
         # an IdP that publishes no signing certificate. This is independent of
         # response-signature policy and stays off unless directly configured.
         self.allow_unsigned_logout_requests: bool = False
-        # Explicit opt-in: widen the verifier's allowed signature/digest
-        # algorithms beyond pygamlastan's secure default (e.g. to accept a
-        # specific trusted IdP still signing with a legacy algorithm such as
-        # RSA-RIPEMD160 over a RIPEMD-160 digest). None/empty means the
-        # default policy applies unchanged for that half of the policy; the
-        # two lists are independent, matching AlgorithmPolicy's own
-        # with_signature_algorithms/with_digest_algorithms split.
+        # Explicit, SP-wide opt-in: widen the verifier's allowed signature/
+        # digest algorithms beyond pygamlastan's secure default (e.g. to
+        # accept an IdP still signing with a legacy algorithm such as
+        # RSA-RIPEMD160 over a RIPEMD-160 digest). Applies to every IdP this
+        # SP verifies against, not just the one that needs it -- there is no
+        # per-IdP scoping, matching signing_algorithm/digest_algorithm above.
+        # None/empty means the default policy applies unchanged for that half
+        # of the policy; the two lists are independent, matching
+        # AlgorithmPolicy's own with_signature_algorithms/
+        # with_digest_algorithms split. Both are added on top of the
+        # verifier's secure defaults, never replacing them.
         self.allowed_signature_algorithms: list[str] | None = None
         self.allowed_digest_algorithms: list[str] | None = None
         self.key_file: str | None = None

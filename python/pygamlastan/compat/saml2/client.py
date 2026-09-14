@@ -498,20 +498,41 @@ def _apply_algorithm_policy(config: SPConfig, verifier: SamlVerifier) -> SamlVer
     Opt-in only: the default :class:`~pygamlastan.crypto.AlgorithmPolicy`
     correctly rejects legacy algorithms (e.g. RSA-RIPEMD160 signatures, or a
     RIPEMD-160 Reference digest -- an IdP using one legacy algorithm often
-    uses both). A deployment that trusts a specific IdP using one anyway must
-    say so explicitly via ``allowed_signature_algorithms``/
-    ``allowed_digest_algorithms`` in the SP settings, mirroring
-    ``allow_unsigned_logout_requests`` for the equivalent LogoutRequest gap.
-    The two lists are independent and everything else about the verifier's
-    default policy is left untouched.
+    uses both). A deployment that needs to accept one anyway must say so
+    explicitly via ``allowed_signature_algorithms``/``allowed_digest_algorithms``
+    in the SP settings, mirroring ``allow_unsigned_logout_requests`` for the
+    equivalent LogoutRequest gap.
+
+    This is an **SP-wide** relaxation, applied to every IdP this SP verifies
+    against -- there is no per-IdP scoping. ``SPConfig`` has no other notion
+    of a per-IdP policy (``signing_algorithm``/``digest_algorithm`` are
+    SP-wide too), so a deployment with several IdPs in its metadata and only
+    one of them needing a legacy algorithm widens the check for all of them.
+    Configure a dedicated ``SPConfig``/client for that IdP if the widening
+    must not extend to the others.
+
+    The two lists are added on top of the verifier's existing defaults, not
+    substituted for them: ``AlgorithmPolicy.with_signature_algorithms``/
+    ``with_digest_algorithms`` replace their respective allowlists wholesale,
+    so configuring one legacy algorithm here must not silently drop the
+    secure defaults (SHA-256/384/512) an ordinary IdP still relies on.
+    Everything else about the verifier's default policy is left untouched.
     """
     if not config.allowed_signature_algorithms and not config.allowed_digest_algorithms:
         return verifier
     policy = verifier.algorithm_policy
     if config.allowed_signature_algorithms:
-        policy = policy.with_signature_algorithms(config.allowed_signature_algorithms)
+        merged_signature = list(policy.allowed_signature_algorithms or [])
+        for algorithm in config.allowed_signature_algorithms:
+            if algorithm not in merged_signature:
+                merged_signature.append(algorithm)
+        policy = policy.with_signature_algorithms(merged_signature)
     if config.allowed_digest_algorithms:
-        policy = policy.with_digest_algorithms(config.allowed_digest_algorithms)
+        merged_digest = list(policy.allowed_digest_algorithms or [])
+        for algorithm in config.allowed_digest_algorithms:
+            if algorithm not in merged_digest:
+                merged_digest.append(algorithm)
+        policy = policy.with_digest_algorithms(merged_digest)
     return verifier.with_algorithm_policy(policy)
 
 

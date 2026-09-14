@@ -179,11 +179,13 @@ The relevant keys:
   particular, requiring signed AuthnResponses does not implicitly require
   signed LogoutResponses.
 * ``service.sp.allowed_signature_algorithms`` / ``allowed_digest_algorithms`` -
-  explicit, narrowly-scoped opt-in (each a list of algorithm URIs) to widen the
-  verifier's default :class:`~pygamlastan.crypto.AlgorithmPolicy` for a
-  deployment that must accept a specific trusted IdP's non-default signature or
-  digest algorithm (e.g. a legacy IdP still using ``rsa-ripemd160``). Unset by
-  default; the two lists are independent, matching ``AlgorithmPolicy``'s own
+  explicit, **SP-wide** opt-in (each a list of algorithm URIs) to widen the
+  verifier's default :class:`~pygamlastan.crypto.AlgorithmPolicy` on top of its
+  secure defaults, for a deployment that must accept a non-default signature
+  or digest algorithm from one of its IdPs (e.g. a legacy IdP still using
+  ``rsa-ripemd160``). This applies to every IdP the SP verifies against, not
+  just the one that needs it - there is no per-IdP scoping. Unset by default;
+  the two lists are independent, matching ``AlgorithmPolicy``'s own
   ``with_signature_algorithms``/``with_digest_algorithms`` split. Applies to
   AuthnResponse, LogoutResponse, and LogoutRequest verification alike.
 * ``metadata.local`` - local metadata files (single entity or a federation
