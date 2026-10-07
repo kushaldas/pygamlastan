@@ -22,3 +22,8 @@ gamlastan = "0.9.1"
 kryptering = { version = "0.6.0", default-features = false, features = ["legacy", "post-quantum", "pkcs11"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 base64 = "0.22"
+
+# gamlastan's IdP orchestrator and record-shaped `IdentityStore` are merged to
+# main but unreleased. Drop this block and bump the pin once a release has them.
+[patch.crates-io]
+gamlastan = { git = "https://github.com/kushaldas/gamlastan", rev = "da6ac5b" }

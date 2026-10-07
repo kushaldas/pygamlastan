@@ -9,10 +9,26 @@ broker, NameID storage coding, and an issued-assertion store.
 eduPersonTargetedID
 -------------------
 
-.. py:class:: Eptid(secret: str)
+.. py:class:: Eptid(secret: str, digest: str = "sha256", allow_legacy_md5: bool = False)
 
    Derives stable, per-SP opaque identifiers from a server-side ``secret``. The
    same user gets a consistent id at one SP but an unlinkable id at another.
+
+   ``digest`` is ``"sha256"`` (default) or ``"pysaml2-md5"``. The latter
+   reproduces stock pysaml2's ``idp!sp!md5(user+sp+secret)`` values, so SPs that
+   key accounts on the EPTID keep seeing the same value after a migration. It
+   is rejected (``SamlIdentError``) unless ``allow_legacy_md5=True``; use it only
+   when the old IdP entityID, SP entityID, user identifier and secret are all
+   unchanged, and plan its retirement. Methods raise ``SamlStoreError`` on a
+   storage failure.
+
+   .. note::
+
+      Derived values are cached in an in-memory store only. There is no
+      pluggable Python store yet, so existing pysaml2 EPTID mappings (shelve or
+      Mongo) cannot be imported. This matters only if the old store holds
+      hand-edited, imported or custom-computed values that recomputation would
+      not reproduce.
 
    .. py:method:: get(idp_entity_id: str, sp_entity_id: str, user_id: str) -> str
    .. py:method:: name_id(idp_entity_id: str, sp_entity_id: str, user_id: str) -> pygamlastan.core.NameId
@@ -63,9 +79,8 @@ Identity database
    ManageNameID / NameIDMapping profiles.
 
    ``idp_entity_id`` is the default NameQualifier. With ``store=None`` the
-   database is in-memory; pass an object implementing ``get(key)`` /
-   ``set(key, value)`` / ``remove(key)`` (the ``IdentityStore`` protocol) to back
-   it with Redis/SQL/Mongo. ``domain`` is appended to email-format NameIDs.
+   database is in-memory; pass an object implementing the record-shaped
+   ``IdentityStore`` protocol to back it with SQL/Mongo. ``domain`` is appended to email-format NameIDs.
 
    .. py:method:: store(user_id: str, name_id: pygamlastan.core.NameId) -> None
 
@@ -117,11 +132,27 @@ Identity database
 
 .. py:class:: IdentityStore
 
-   Protocol for a pluggable :class:`IdentDb` backend.
+   Protocol for a pluggable :class:`IdentDb` backend: one record per
+   (user, NameID). The backend must enforce two unique constraints: the NameID
+   value is unique across all records, and among durable records (every format
+   except transient) ``(user, sp_name_qualifier, name_qualifier, format)`` is
+   unique. A record with no format counts as ``unspecified``.
 
-   .. py:method:: get(key: str) -> str | None
-   .. py:method:: set(key: str, value: str) -> None
-   .. py:method:: remove(key: str) -> None
+   Raise :class:`pygamlastan.NameIdValueTaken` or
+   :class:`pygamlastan.NameIdDurableExists` for a conflict. Any other exception
+   is a backend failure and surfaces as :class:`pygamlastan.SamlStoreError`;
+   never return "no record" when the backend could not answer.
+
+   .. py:method:: for_user(user_id: str) -> Iterable[pygamlastan.core.NameId]
+   .. py:method:: user_for(value: str) -> str | None
+   .. py:method:: get_or_insert_durable(user_id: str, candidate: pygamlastan.core.NameId) -> pygamlastan.core.NameId
+   .. py:method:: insert(user_id: str, name_id: pygamlastan.core.NameId) -> None
+   .. py:method:: replace(user_id: str, name_id: pygamlastan.core.NameId) -> None
+   .. py:method:: remove(value: str) -> None
+   .. py:method:: remove_all(user_id: str) -> None
+
+   Optionally ``find_durable(user_id, sp_name_qualifier, name_qualifier, format)
+   -> NameId | None`` pushes the durable lookup down to an index.
 
 Attribute-release policy
 ------------------------

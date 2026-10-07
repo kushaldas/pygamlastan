@@ -7,26 +7,33 @@ use pyo3::types::PyModule;
 
 use chrono::{DateTime, TimeDelta, Utc};
 
+use gamlastan::core::assertion::NameId as GNameId;
+use gamlastan::core::constants;
 use gamlastan::core::protocol::name_id_mgmt::NewIdOrTerminate;
 use gamlastan::idp as gi;
 use gamlastan::idp::entity_category as gec;
-use gamlastan::idp::ident::{IdentityStore, InMemoryIdentityStore};
+use gamlastan::idp::ident::{
+    IdentError, IdentityStore, InMemoryIdentityStore, InsertError, StoreError,
+};
 use gamlastan::idp::policy as gpol;
 use gamlastan::metadata::types::sp::RequestedAttribute;
 
 use crate::convert::new_submodule;
 use crate::core::{Assertion, Attribute, NameId, NameIdPolicy, RequestedAuthnContext};
-use crate::errors::{ident_err, policy_err};
+use crate::errors::{ident_err, policy_err, store_err, NameIdDurableExists, NameIdValueTaken};
 use crate::metadata::EntityDescriptor;
 
 // ---------------------------------------------------------------------------
 // Eptid (eduPersonTargetedID)
 // ---------------------------------------------------------------------------
 
-// `gi::Eptid` is generic over an `IdentityStore`, defaulting to the in-memory
-// one (`Eptid<InMemoryIdentityStore>`). We bind only that default; eduPerson
-// TargetedID is a pure hash of (secret, idp, sp, user) and does not require a
-// persistent store for derivation, so the default is sufficient here.
+// `gi::Eptid` is generic over a `KeyValueStore` that caches derived values,
+// defaulting to the in-memory one (`Eptid<InMemoryKeyValueStore>`). We bind
+// only that default: values are derived deterministically from (secret, idp,
+// sp, user), so a fresh instance reproduces them. Known gap: no pluggable
+// Python store, so existing pysaml2 EPTID mappings (shelve/Mongo) cannot be
+// imported; that only matters for hand-edited or imported values. Add a
+// `PyKeyValueStore` adapter (same pattern as `PyIdentityStore`) if needed.
 #[pyclass(module = "pygamlastan.idp", name = "Eptid")]
 pub struct Eptid {
     inner: gi::Eptid,
@@ -35,23 +42,50 @@ pub struct Eptid {
 #[pymethods]
 impl Eptid {
     /// Create with a server-side secret used to derive opaque, per-SP IDs.
+    ///
+    /// `digest` is `"sha256"` (default) or `"pysaml2-md5"`, which reproduces
+    /// stock pysaml2's `idp!sp!md5(user+sp+secret)` values so SPs that key
+    /// accounts on the EPTID keep seeing the same value after a migration.
+    /// MD5 is only accepted with `allow_legacy_md5=True`.
     #[new]
-    fn new(secret: String) -> Self {
-        Eptid {
-            inner: gi::Eptid::new(secret),
-        }
+    #[pyo3(signature = (secret, digest="sha256", allow_legacy_md5=false))]
+    fn new(secret: String, digest: &str, allow_legacy_md5: bool) -> PyResult<Self> {
+        let options = match digest {
+            "sha256" => gi::eptid::EptidOptions::sha256(),
+            "pysaml2-md5" => gi::eptid::EptidOptions::pysaml2_md5_legacy(allow_legacy_md5),
+            other => {
+                return Err(ident_err(format!(
+                    "unknown EPTID digest {other:?} (known: sha256, pysaml2-md5)"
+                )))
+            }
+        };
+        let inner = gi::Eptid::try_new_with_options(secret, options).map_err(ident_err)?;
+        Ok(Eptid { inner })
     }
     /// The opaque persistent identifier string for (idp, sp, user).
-    fn get(&self, idp_entity_id: &str, sp_entity_id: &str, user_id: &str) -> String {
-        self.inner.get(idp_entity_id, sp_entity_id, user_id)
+    fn get(&self, idp_entity_id: &str, sp_entity_id: &str, user_id: &str) -> PyResult<String> {
+        self.inner
+            .get(idp_entity_id, sp_entity_id, user_id)
+            .map_err(store_err)
     }
     /// The identifier as a persistent NameID.
-    fn name_id(&self, idp_entity_id: &str, sp_entity_id: &str, user_id: &str) -> NameId {
-        NameId::wrap(self.inner.name_id(idp_entity_id, sp_entity_id, user_id))
+    fn name_id(&self, idp_entity_id: &str, sp_entity_id: &str, user_id: &str) -> PyResult<NameId> {
+        self.inner
+            .name_id(idp_entity_id, sp_entity_id, user_id)
+            .map(NameId::wrap)
+            .map_err(store_err)
     }
     /// The identifier as an eduPersonTargetedID attribute.
-    fn attribute(&self, idp_entity_id: &str, sp_entity_id: &str, user_id: &str) -> Attribute {
-        Attribute::wrap(self.inner.attribute(idp_entity_id, sp_entity_id, user_id))
+    fn attribute(
+        &self,
+        idp_entity_id: &str,
+        sp_entity_id: &str,
+        user_id: &str,
+    ) -> PyResult<Attribute> {
+        self.inner
+            .attribute(idp_entity_id, sp_entity_id, user_id)
+            .map(Attribute::wrap)
+            .map_err(store_err)
     }
 }
 
@@ -139,25 +173,29 @@ impl InMemoryAssertionStore {
     // `AssertionStore` trait, so each call brings the trait into scope with a
     // local `use` (cheaper than a module-level import that would look unused to
     // readers scanning the top of the file).
-    fn store_assertion(&self, assertion: &Assertion) {
+    fn store_assertion(&self, assertion: &Assertion) -> PyResult<()> {
         use gi::AssertionStore;
-        self.inner.store_assertion(assertion.inner.clone());
+        self.inner
+            .store_assertion(assertion.inner.clone())
+            .map_err(store_err)
     }
-    fn get_assertion(&self, assertion_id: &str) -> Option<Assertion> {
+    fn get_assertion(&self, assertion_id: &str) -> PyResult<Option<Assertion>> {
         use gi::AssertionStore;
-        self.inner.get_assertion(assertion_id).map(Assertion::wrap)
+        self.inner
+            .get_assertion(assertion_id)
+            .map(|a| a.map(Assertion::wrap))
+            .map_err(store_err)
     }
-    fn assertions_for_subject(&self, name_id_value: &str) -> Vec<Assertion> {
+    fn assertions_for_subject(&self, name_id_value: &str) -> PyResult<Vec<Assertion>> {
         use gi::AssertionStore;
         self.inner
             .assertions_for_subject(name_id_value)
-            .into_iter()
-            .map(Assertion::wrap)
-            .collect()
+            .map(|v| v.into_iter().map(Assertion::wrap).collect())
+            .map_err(store_err)
     }
-    fn remove_assertion(&self, assertion_id: &str) {
+    fn remove_assertion(&self, assertion_id: &str) -> PyResult<()> {
         use gi::AssertionStore;
-        self.inner.remove_assertion(assertion_id);
+        self.inner.remove_assertion(assertion_id).map_err(store_err)
     }
 }
 
@@ -166,53 +204,177 @@ impl InMemoryAssertionStore {
 // ---------------------------------------------------------------------------
 
 /// Adapter implementing the Rust `IdentityStore` trait by calling into a Python
-/// object that provides `get(key) -> str | None`, `set(key, value)`, and
-/// `remove(key)`. Lets a deployment back the NameID database with Redis/SQL/etc.
+/// object. The object provides one single-record method per trait method
+/// (NameIDs cross the boundary as `pygamlastan.core.NameId`):
+///
+/// * `for_user(user_id) -> list[NameId]`
+/// * `user_for(value) -> str | None`
+/// * `get_or_insert_durable(user_id, candidate) -> NameId`
+/// * `insert(user_id, name_id)`, `replace(user_id, name_id)`
+/// * `remove(value)`, `remove_all(user_id)`
+///
+/// `find` and `find_durable` are optional and default to filtering `for_user`.
+///
+/// Atomicity comes from two unique constraints the backend must enforce (see
+/// `IdentityStore`). A backend signals a conflict by raising `NameIdValueTaken`
+/// or `NameIdDurableExists`; any other exception is a backend failure and
+/// surfaces as `SamlStoreError`, never as "no record".
 struct PyIdentityStore {
     obj: Py<PyAny>,
 }
 
+fn py_store_err(e: PyErr) -> StoreError {
+    StoreError::new(e)
+}
+
+fn py_insert_err(py: Python<'_>, e: PyErr) -> InsertError {
+    if e.is_instance_of::<NameIdValueTaken>(py) {
+        InsertError::ValueTaken
+    } else if e.is_instance_of::<NameIdDurableExists>(py) {
+        InsertError::DurableExists
+    } else {
+        InsertError::Store(py_store_err(e))
+    }
+}
+
+fn nid_to_py(py: Python<'_>, n: GNameId) -> PyResult<Py<NameId>> {
+    Py::new(py, NameId::wrap(n))
+}
+
+fn nid_from_py(obj: &Bound<'_, PyAny>) -> PyResult<GNameId> {
+    Ok(obj.extract::<NameId>()?.inner)
+}
+
+/// Whether `n` is a durable NameID of `format` with exactly these qualifiers.
+/// Transient is never durable, and an absent format is `unspecified`
+/// (mirrors gamlastan's own check, which is crate-private).
+fn is_durable_match(
+    n: &GNameId,
+    sp_name_qualifier: Option<&str>,
+    name_qualifier: Option<&str>,
+    format: &str,
+) -> bool {
+    format != constants::NAMEID_TRANSIENT
+        && n.format.as_deref().unwrap_or(constants::NAMEID_UNSPECIFIED) == format
+        && n.sp_name_qualifier.as_deref() == sp_name_qualifier
+        && n.name_qualifier.as_deref() == name_qualifier
+}
+
+impl PyIdentityStore {
+    fn names(py: Python<'_>, r: Bound<'_, PyAny>) -> PyResult<Vec<GNameId>> {
+        let _ = py;
+        r.try_iter()?.map(|i| nid_from_py(&i?)).collect()
+    }
+}
+
 impl IdentityStore for PyIdentityStore {
-    // The `IdentityStore` trait is infallible (no `Result`), so a broken Python
-    // backend cannot raise here. Swallowing the error silently would make a
-    // backend outage look like a cache miss (e.g. minting a fresh persistent
-    // NameID instead of returning the stored one), so every failure is reported
-    // via `write_unraisable` before falling back to the "missing" answer.
-    fn get(&self, key: &str) -> Option<String> {
+    fn for_user(&self, user_id: &str) -> Result<Vec<GNameId>, StoreError> {
+        Python::attach(|py| {
+            let r = self.obj.bind(py).call_method1("for_user", (user_id,))?;
+            Self::names(py, r)
+        })
+        .map_err(py_store_err)
+    }
+
+    fn user_for(&self, value: &str) -> Result<Option<String>, StoreError> {
+        Python::attach(|py| {
+            self.obj
+                .bind(py)
+                .call_method1("user_for", (value,))?
+                .extract::<Option<String>>()
+        })
+        .map_err(py_store_err)
+    }
+
+    fn find_durable(
+        &self,
+        user_id: &str,
+        sp_name_qualifier: Option<&str>,
+        name_qualifier: Option<&str>,
+        format: &str,
+    ) -> Result<Option<GNameId>, StoreError> {
         Python::attach(|py| {
             let obj = self.obj.bind(py);
-            match obj
-                .call_method1("get", (key,))
-                .and_then(|r| r.extract::<Option<String>>())
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    e.write_unraisable(py, Some(obj));
-                    None
-                }
+            if !obj.hasattr("find_durable")? {
+                return Ok(None::<Option<GNameId>>);
+            }
+            let r = obj.call_method1(
+                "find_durable",
+                (user_id, sp_name_qualifier, name_qualifier, format),
+            )?;
+            if r.is_none() {
+                Ok(Some(None))
+            } else {
+                Ok(Some(Some(nid_from_py(&r)?)))
             }
         })
+        .map_err(py_store_err)
+        .and_then(|r| match r {
+            Some(found) => Ok(found),
+            // No pushed-down lookup on the backend: filter `for_user`.
+            None => Ok(self
+                .for_user(user_id)?
+                .into_iter()
+                .find(|n| is_durable_match(n, sp_name_qualifier, name_qualifier, format))),
+        })
     }
-    fn set(&self, key: &str, value: String) {
+
+    fn get_or_insert_durable(
+        &self,
+        user_id: &str,
+        candidate: GNameId,
+    ) -> Result<GNameId, InsertError> {
         Python::attach(|py| {
-            let obj = self.obj.bind(py);
-            if let Err(e) = obj.call_method1("set", (key, value)) {
-                e.write_unraisable(py, Some(obj));
-            }
-        });
+            let c = nid_to_py(py, candidate).map_err(|e| py_insert_err(py, e))?;
+            let r = self
+                .obj
+                .bind(py)
+                .call_method1("get_or_insert_durable", (user_id, c))
+                .map_err(|e| py_insert_err(py, e))?;
+            nid_from_py(&r).map_err(|e| py_insert_err(py, e))
+        })
     }
-    fn remove(&self, key: &str) {
+
+    fn insert(&self, user_id: &str, name_id: GNameId) -> Result<(), InsertError> {
         Python::attach(|py| {
-            let obj = self.obj.bind(py);
-            if let Err(e) = obj.call_method1("remove", (key,)) {
-                e.write_unraisable(py, Some(obj));
-            }
-        });
+            let n = nid_to_py(py, name_id).map_err(|e| py_insert_err(py, e))?;
+            self.obj
+                .bind(py)
+                .call_method1("insert", (user_id, n))
+                .map(drop)
+                .map_err(|e| py_insert_err(py, e))
+        })
+    }
+
+    fn replace(&self, user_id: &str, name_id: GNameId) -> Result<(), InsertError> {
+        Python::attach(|py| {
+            let n = nid_to_py(py, name_id).map_err(|e| py_insert_err(py, e))?;
+            self.obj
+                .bind(py)
+                .call_method1("replace", (user_id, n))
+                .map(drop)
+                .map_err(|e| py_insert_err(py, e))
+        })
+    }
+
+    fn remove(&self, value: &str) -> Result<(), StoreError> {
+        Python::attach(|py| self.obj.bind(py).call_method1("remove", (value,)).map(drop))
+            .map_err(py_store_err)
+    }
+
+    fn remove_all(&self, user_id: &str) -> Result<(), StoreError> {
+        Python::attach(|py| {
+            self.obj
+                .bind(py)
+                .call_method1("remove_all", (user_id,))
+                .map(drop)
+        })
+        .map_err(py_store_err)
     }
 }
 
 /// The store backend the bound `IdentDb` runs over: either the built-in
-/// in-memory map or a caller-supplied Python object. A single enum keeps the
+/// in-memory store or a caller-supplied Python object. A single enum keeps the
 /// generic `gi::IdentDb<S>` monomorphized to one type so one `#[pyclass]`
 /// serves both deployment modes.
 enum IdentBackend {
@@ -220,24 +382,67 @@ enum IdentBackend {
     Py(PyIdentityStore),
 }
 
+macro_rules! backend_dispatch {
+    ($self:ident, $s:ident => $call:expr) => {
+        match $self {
+            IdentBackend::InMemory($s) => $call,
+            IdentBackend::Py($s) => $call,
+        }
+    };
+}
+
 impl IdentityStore for IdentBackend {
-    fn get(&self, key: &str) -> Option<String> {
-        match self {
-            IdentBackend::InMemory(s) => s.get(key),
-            IdentBackend::Py(s) => s.get(key),
-        }
+    fn for_user(&self, user_id: &str) -> Result<Vec<GNameId>, StoreError> {
+        backend_dispatch!(self, s => s.for_user(user_id))
     }
-    fn set(&self, key: &str, value: String) {
-        match self {
-            IdentBackend::InMemory(s) => s.set(key, value),
-            IdentBackend::Py(s) => s.set(key, value),
-        }
+    fn user_for(&self, value: &str) -> Result<Option<String>, StoreError> {
+        backend_dispatch!(self, s => s.user_for(value))
     }
-    fn remove(&self, key: &str) {
-        match self {
-            IdentBackend::InMemory(s) => s.remove(key),
-            IdentBackend::Py(s) => s.remove(key),
-        }
+    fn find(
+        &self,
+        user_id: &str,
+        filter: &gamlastan::idp::ident::NameIdFilter,
+    ) -> Result<Vec<GNameId>, StoreError> {
+        backend_dispatch!(self, s => s.find(user_id, filter))
+    }
+    fn find_durable(
+        &self,
+        user_id: &str,
+        sp_name_qualifier: Option<&str>,
+        name_qualifier: Option<&str>,
+        format: &str,
+    ) -> Result<Option<GNameId>, StoreError> {
+        backend_dispatch!(self, s => s.find_durable(user_id, sp_name_qualifier, name_qualifier, format))
+    }
+    fn get_or_insert_durable(
+        &self,
+        user_id: &str,
+        candidate: GNameId,
+    ) -> Result<GNameId, InsertError> {
+        backend_dispatch!(self, s => s.get_or_insert_durable(user_id, candidate))
+    }
+    fn insert(&self, user_id: &str, name_id: GNameId) -> Result<(), InsertError> {
+        backend_dispatch!(self, s => s.insert(user_id, name_id))
+    }
+    fn replace(&self, user_id: &str, name_id: GNameId) -> Result<(), InsertError> {
+        backend_dispatch!(self, s => s.replace(user_id, name_id))
+    }
+    fn remove(&self, value: &str) -> Result<(), StoreError> {
+        backend_dispatch!(self, s => s.remove(value))
+    }
+    fn remove_all(&self, user_id: &str) -> Result<(), StoreError> {
+        backend_dispatch!(self, s => s.remove_all(user_id))
+    }
+}
+
+/// Map an `IdentError` to the Python exception hierarchy: a backend failure is
+/// `SamlStoreError`, everything else `SamlIdentError`.
+fn ident_error(e: IdentError) -> PyErr {
+    match e {
+        IdentError::Store(e) => store_err(e),
+        IdentError::DurableExists => NameIdDurableExists::new_err(e.to_string()),
+        IdentError::ValueTaken => NameIdValueTaken::new_err(e.to_string()),
+        other => ident_err(other),
     }
 }
 
@@ -254,7 +459,8 @@ pub struct IdentDb {
 impl IdentDb {
     /// Create an identity database for `idp_entity_id` (used as the default
     /// NameQualifier). With `store=None` it is in-memory; pass an object
-    /// implementing `get`/`set`/`remove` to back it with external storage.
+    /// implementing the record-shaped `IdentityStore` protocol (see `IdentityStore` in
+    /// `idp.pyi`) to back it with external storage.
     /// `domain` sets the domain appended to email-format NameIDs.
     #[new]
     #[pyo3(signature = (idp_entity_id, store=None, domain=None))]
@@ -271,20 +477,21 @@ impl IdentDb {
     }
 
     /// Associate a NameID with a local user (maintains both directions).
-    fn store(&self, user_id: &str, name_id: &NameId) {
-        self.inner.store(user_id, &name_id.inner);
+    fn store(&self, user_id: &str, name_id: &NameId) -> PyResult<()> {
+        self.inner
+            .store(user_id, &name_id.inner)
+            .map_err(ident_error)
     }
     /// The local user a NameID was issued to, if known.
-    fn find_local_id(&self, name_id: &NameId) -> Option<String> {
-        self.inner.find_local_id(&name_id.inner)
+    fn find_local_id(&self, name_id: &NameId) -> PyResult<Option<String>> {
+        self.inner.find_local_id(&name_id.inner).map_err(store_err)
     }
     /// All NameIDs stored for a local user.
-    fn name_ids_for(&self, user_id: &str) -> Vec<NameId> {
+    fn name_ids_for(&self, user_id: &str) -> PyResult<Vec<NameId>> {
         self.inner
             .name_ids_for(user_id)
-            .into_iter()
-            .map(NameId::wrap)
-            .collect()
+            .map(|v| v.into_iter().map(NameId::wrap).collect())
+            .map_err(store_err)
     }
     /// An existing non-transient NameID matching (user, SP, NameQualifier).
     #[pyo3(signature = (user_id, sp_name_qualifier=None, name_qualifier=None))]
@@ -293,20 +500,31 @@ impl IdentDb {
         user_id: &str,
         sp_name_qualifier: Option<&str>,
         name_qualifier: Option<&str>,
-    ) -> Option<NameId> {
+    ) -> PyResult<Option<NameId>> {
         self.inner
             .match_local_id(user_id, sp_name_qualifier, name_qualifier)
-            .map(NameId::wrap)
+            .map(|n| n.map(NameId::wrap))
+            .map_err(store_err)
     }
     /// Generate a fresh transient NameID for the user.
     #[pyo3(signature = (user_id, sp_name_qualifier=None))]
-    fn transient_nameid(&self, user_id: &str, sp_name_qualifier: Option<&str>) -> NameId {
-        NameId::wrap(self.inner.transient_nameid(user_id, sp_name_qualifier))
+    fn transient_nameid(&self, user_id: &str, sp_name_qualifier: Option<&str>) -> PyResult<NameId> {
+        self.inner
+            .transient_nameid(user_id, sp_name_qualifier)
+            .map(NameId::wrap)
+            .map_err(store_err)
     }
     /// Get-or-create a stable persistent NameID for (user, SP).
     #[pyo3(signature = (user_id, sp_name_qualifier=None))]
-    fn persistent_nameid(&self, user_id: &str, sp_name_qualifier: Option<&str>) -> NameId {
-        NameId::wrap(self.inner.persistent_nameid(user_id, sp_name_qualifier))
+    fn persistent_nameid(
+        &self,
+        user_id: &str,
+        sp_name_qualifier: Option<&str>,
+    ) -> PyResult<NameId> {
+        self.inner
+            .persistent_nameid(user_id, sp_name_qualifier)
+            .map(NameId::wrap)
+            .map_err(store_err)
     }
     /// Construct a NameID honoring an incoming `NameIDPolicy`, falling back to
     /// `default_format`. Raises `SamlIdentError` if no format can be determined
@@ -327,7 +545,7 @@ impl IdentDb {
                 default_format,
             )
             .map(NameId::wrap)
-            .map_err(ident_err)
+            .map_err(ident_error)
     }
     /// Apply a ManageNameID `NewID` (record the SP-provided identifier).
     /// Raises `SamlIdentError` if the NameID is unknown.
@@ -335,7 +553,7 @@ impl IdentDb {
         self.inner
             .handle_manage_name_id_request(&name_id.inner, &NewIdOrTerminate::NewId(new_id))
             .map(NameId::wrap)
-            .map_err(ident_err)
+            .map_err(ident_error)
     }
     /// Apply a ManageNameID `Terminate` (drop the association).
     /// Raises `SamlIdentError` if the NameID is unknown.
@@ -343,7 +561,7 @@ impl IdentDb {
         self.inner
             .handle_manage_name_id_request(&name_id.inner, &NewIdOrTerminate::Terminate)
             .map(NameId::wrap)
-            .map_err(ident_err)
+            .map_err(ident_error)
     }
     /// Resolve a NameIDMappingRequest: return an existing NameID matching the
     /// policy, or create one when AllowCreate permits. Raises `SamlIdentError`.
@@ -355,15 +573,15 @@ impl IdentDb {
         self.inner
             .handle_name_id_mapping_request(&name_id.inner, &name_id_policy.inner)
             .map(NameId::wrap)
-            .map_err(ident_err)
+            .map_err(ident_error)
     }
     /// Forget a single NameID.
-    fn remove_remote(&self, name_id: &NameId) {
-        self.inner.remove_remote(&name_id.inner);
+    fn remove_remote(&self, name_id: &NameId) -> PyResult<()> {
+        self.inner.remove_remote(&name_id.inner).map_err(store_err)
     }
     /// Forget every NameID for a local user.
-    fn remove_local(&self, user_id: &str) {
-        self.inner.remove_local(user_id);
+    fn remove_local(&self, user_id: &str) -> PyResult<()> {
+        self.inner.remove_local(user_id).map_err(store_err)
     }
 }
 

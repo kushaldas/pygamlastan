@@ -976,8 +976,7 @@ dependencies = [
 [[package]]
 name = "gamlastan"
 version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94eaa883c0a32ae6e426065d77f0b78c41f630740b7f8e9fbfe65e49fd378168"
+source = "git+https://github.com/kushaldas/gamlastan?rev=da6ac5b#da6ac5b1531c0938594953731ad620014a31e842"
 dependencies = [
  "base64 0.23.1",
  "bergshamra",

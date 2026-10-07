@@ -896,6 +896,7 @@ impl ResponseOptions {
         idp_entity_id, sp_entity_id, acs_url, assertion_lifetime_seconds=300,
         in_response_to=None, session_index=None, session_not_on_or_after=None,
         authn_context_class_ref=None, client_address=None, attributes=None,
+        authenticating_authorities=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -909,6 +910,7 @@ impl ResponseOptions {
         authn_context_class_ref: Option<String>,
         client_address: Option<String>,
         attributes: Option<Vec<Attribute>>,
+        authenticating_authorities: Option<Vec<String>>,
     ) -> Self {
         let attributes = attributes
             .unwrap_or_default()
@@ -927,6 +929,7 @@ impl ResponseOptions {
                 authn_context_class_ref,
                 client_address,
                 attributes,
+                authenticating_authorities: authenticating_authorities.unwrap_or_default(),
             },
         }
     }

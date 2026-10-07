@@ -98,6 +98,7 @@ class ResponseOptions:
         authn_context_class_ref: str | None = ...,
         client_address: str | None = ...,
         attributes: list[Attribute] | None = ...,
+        authenticating_authorities: list[str] | None = ...,
     ) -> None: ...
 
 class SessionParticipant:

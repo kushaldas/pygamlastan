@@ -10,10 +10,36 @@ surfacing it correctly to Python.
 
 ## [Unreleased]
 
+Tracks gamlastan `main` (PR #43, IdP orchestrator), which is not yet released;
+`Cargo.toml` carries a git `[patch.crates-io]` until it is.
+
 ### Changed
 
 - Bumped `gamlastan` to 0.9.1 (bergshamra 0.9.2) and `kryptering` to 0.6.0,
   which gamlastan 0.9.1 requires.
+- **Breaking:** the Python `IdentityStore` protocol passed as
+  `IdentDb(store=...)` is now record-shaped (one record per user/NameID):
+  `for_user`, `user_for`, `get_or_insert_durable`, `insert`, `replace`,
+  `remove`, `remove_all`, and an optional `find_durable`. The old
+  `get`/`set`/`remove` key-value protocol no longer applies to `IdentDb`. The
+  backend must enforce the two unique constraints documented on the protocol.
+- **Breaking:** store-backed calls now raise instead of falling back to "not
+  found". `IdentDb` methods, `Eptid` methods and `InMemoryAssertionStore`
+  methods raise `SamlStoreError` on a backend failure. A Python store reports a
+  conflict by raising `NameIdValueTaken` or `NameIdDurableExists`.
+- Email and unspecified NameIDs are now stable per (user, SP, format), like
+  persistent ones. Transient NameIDs are no longer stored.
+
+### Added
+
+- `SamlStoreError`, `NameIdValueTaken`, `NameIdDurableExists` exceptions
+  (subclasses of `SamlIdentError`).
+- `ResponseOptions(authenticating_authorities=...)`.
+- `Eptid(secret, digest="pysaml2-md5", allow_legacy_md5=True)` reproduces stock
+  pysaml2 MD5 EPTID values for migrations; the default stays SHA-256 and is not
+  byte-compatible with pysaml2. Known gap: `Eptid` has no pluggable Python
+  store, so existing pysaml2 EPTID mappings cannot be imported (only matters
+  for hand-edited or imported values).
 
 ## [0.6.0] - 2026-09-14
 
