@@ -8,6 +8,13 @@ security handling. `pygamlastan` is a thin PyO3 binding; most entries below
 reflect adopting a change made in `gamlastan` / `uppsala` / `bergshamra` and
 surfacing it correctly to Python.
 
+## [Unreleased]
+
+### Changed
+
+- Bumped `gamlastan` to 0.9.1 (bergshamra 0.9.2) and `kryptering` to 0.6.0,
+  which gamlastan 0.9.1 requires.
+
 ## [0.6.0] - 2026-09-14
 
 ### Added
