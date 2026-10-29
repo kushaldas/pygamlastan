@@ -33,6 +33,20 @@ dependency stack), which is not yet released; `Cargo.toml` carries a git
 - Email and unspecified NameIDs are now stable per (user, SP, format), like
   persistent ones. Transient NameIDs are no longer stored.
 
+### Security
+
+- `SamlStoreError` is no longer a `SamlIdentError`. Code written before store
+  errors existed wraps identity calls in `except SamlIdentError` to mean "no such
+  principal"; with the old hierarchy that handler would have turned a database
+  outage back into a missing record.
+- A record a Python `IdentityStore` returns from `find_durable` or
+  `get_or_insert_durable` is now checked before it is used: it must be the
+  durable slot that was asked for, and `user_for(value)` must name the same user,
+  otherwise `SamlStoreError`. A backend with a wrong filter, index or cache could
+  otherwise hand one user another user's persistent NameID. This adds one
+  `user_for` call per lookup, and requires `user_for` to see the backend's own
+  writes (not a lagging replica).
+
 ### Added
 
 - The IdP response engine, `pygamlastan.idp.ResponseEngine`, with
@@ -60,8 +74,11 @@ dependency stack), which is not yet released; `Cargo.toml` carries a git
 - `AuthnRequest.requested_subject_name_id()` and `has_requested_subject()`, and
   `ProcessedAuthnRequest.requested_sp_name_qualifier`, `has_name_id_policy` and
   `requested_authn_context_decl_refs`.
-- `SamlStoreError`, `NameIdValueTaken`, `NameIdDurableExists` exceptions
-  (subclasses of `SamlIdentError`).
+- `SamlStoreError`, `NameIdValueTaken` and `NameIdDurableExists` exceptions.
+  `NameIdValueTaken` and `NameIdDurableExists` are `SamlIdentError`s;
+  `SamlStoreError` is a direct child of `SamlError` on purpose, so an existing
+  `except SamlIdentError` (which meant "no such principal") cannot swallow a
+  database outage.
 - `ResponseOptions(authenticating_authorities=...)`.
 - `Eptid(secret, digest="pysaml2-md5", allow_legacy_md5=True)` reproduces stock
   pysaml2 MD5 EPTID values for migrations; the default stays SHA-256 and is not

@@ -62,11 +62,16 @@ create_exception!(
     SamlError,
     "Identity store error."
 );
+// A direct child of `SamlError`, deliberately NOT of `SamlIdentError`: code
+// written before store errors existed already wraps ident calls in
+// `except SamlIdentError` to mean "no such principal / no such NameID", and an
+// outage must not be caught by that handler and read as a missing record.
 create_exception!(
     pygamlastan,
     SamlStoreError,
-    SamlIdentError,
-    "A storage backend failed (an outage, not a missing record)."
+    SamlError,
+    "A storage backend failed (an outage, not a missing record). Not a \
+     SamlIdentError, so an existing `except SamlIdentError` cannot swallow it."
 );
 create_exception!(
     pygamlastan,

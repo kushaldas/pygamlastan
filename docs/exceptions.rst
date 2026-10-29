@@ -52,7 +52,34 @@ note that security validation via
 
 .. py:exception:: SamlIdentError
 
-   Identity-store error.
+   Identity-store error: an outcome of a NameID operation (no format could be
+   determined, an unknown NameID, a rejected EPTID digest).
+
+.. py:exception:: SamlStoreError
+
+   A storage backend failed: an outage, never "no record". Raised by
+   :class:`~pygamlastan.idp.IdentDb`, :class:`~pygamlastan.idp.Eptid`,
+   :class:`~pygamlastan.idp.InMemoryAssertionStore` and the response engine when
+   the backend cannot answer, and also when a Python backend returns a record
+   that is not the caller's (see :class:`~pygamlastan.idp.IdentityStore`).
+
+   It is a direct child of :class:`SamlError`, **not** of
+   :class:`SamlIdentError`. Code that wraps identity calls in
+   ``except SamlIdentError: principal = None`` therefore does not turn a
+   database outage into "no such principal"; catch ``SamlStoreError`` to handle
+   an outage on purpose.
+
+.. py:exception:: NameIdValueTaken
+
+   Raised by a Python :class:`~pygamlastan.idp.IdentityStore` to report that a
+   NameID value is already used by another user's record. A
+   :class:`SamlIdentError`.
+
+.. py:exception:: NameIdDurableExists
+
+   Raised by a Python :class:`~pygamlastan.idp.IdentityStore` to report that the
+   user already has a durable NameID of this format for the same
+   ``(SPNameQualifier, NameQualifier)``. A :class:`SamlIdentError`.
 
 Example
 -------

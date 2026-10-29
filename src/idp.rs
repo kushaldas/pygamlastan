@@ -276,6 +276,41 @@ fn is_durable_match(
 }
 
 impl PyIdentityStore {
+    /// Refuse a record a Python backend returned for `user_id` unless it is that
+    /// user's own. The backend is the part of the system least under our
+    /// control: a `find_durable` that forgot the user in its filter, a wrong
+    /// index or a stale cache would otherwise hand one user another user's
+    /// persistent NameID, with nothing written to betray it. That is account
+    /// takeover at every SP that has seen the value, so it is checked here,
+    /// where the gamlastan core cannot see the backend.
+    ///
+    /// `slot` is the `(SPNameQualifier, NameQualifier, format)` the lookup asked
+    /// for; the record must be exactly that durable slot, and the store must
+    /// attribute its value to `user_id`.
+    fn verify_own_record(
+        &self,
+        user_id: &str,
+        record: &GNameId,
+        slot: (Option<&str>, Option<&str>, &str),
+        call: &str,
+    ) -> Result<(), StoreError> {
+        let (spq, nq, format) = slot;
+        if !is_durable_match(record, spq, nq, format) {
+            return Err(StoreError::new(format!(
+                "the backend's {call} returned a record that is not the durable NameID \
+                 requested (format {format:?}, SPNameQualifier {spq:?}, NameQualifier \
+                 {nq:?}); refusing to use it"
+            )));
+        }
+        match self.user_for(&record.value)? {
+            Some(owner) if owner == user_id => Ok(()),
+            _ => Err(StoreError::new(format!(
+                "the backend's {call} returned a NameID that the store does not attribute \
+                 to this user; refusing to use it"
+            ))),
+        }
+    }
+
     fn names(py: Python<'_>, r: Bound<'_, PyAny>) -> PyResult<Vec<GNameId>> {
         let _ = py;
         r.try_iter()?.map(|i| nid_from_py(&i?)).collect()
@@ -325,7 +360,17 @@ impl IdentityStore for PyIdentityStore {
         })
         .map_err(py_store_err)
         .and_then(|r| match r {
-            Some(found) => Ok(found),
+            Some(found) => {
+                if let Some(record) = &found {
+                    self.verify_own_record(
+                        user_id,
+                        record,
+                        (sp_name_qualifier, name_qualifier, format),
+                        "find_durable",
+                    )?;
+                }
+                Ok(found)
+            }
             // No pushed-down lookup on the backend: filter `for_user`.
             None => Ok(self
                 .for_user(user_id)?
@@ -339,7 +384,19 @@ impl IdentityStore for PyIdentityStore {
         user_id: &str,
         candidate: GNameId,
     ) -> Result<GNameId, InsertError> {
-        Python::attach(|py| {
+        // What the caller asked for, kept to check the answer against. A
+        // transient candidate has no uniqueness slot (it is a plain insert), so
+        // only a durable one is checked.
+        let slot = (
+            candidate.sp_name_qualifier.clone(),
+            candidate.name_qualifier.clone(),
+            candidate
+                .format
+                .clone()
+                .unwrap_or_else(|| constants::NAMEID_UNSPECIFIED.to_string()),
+        );
+        let durable = slot.2 != constants::NAMEID_TRANSIENT;
+        let record = Python::attach(|py| {
             let c = nid_to_py(py, candidate).map_err(|e| py_insert_err(py, e))?;
             let r = self
                 .obj
@@ -347,7 +404,17 @@ impl IdentityStore for PyIdentityStore {
                 .call_method1("get_or_insert_durable", (user_id, c))
                 .map_err(|e| py_insert_err(py, e))?;
             nid_from_py(&r).map_err(|e| py_insert_err(py, e))
-        })
+        })?;
+        if durable {
+            self.verify_own_record(
+                user_id,
+                &record,
+                (slot.0.as_deref(), slot.1.as_deref(), &slot.2),
+                "get_or_insert_durable",
+            )
+            .map_err(InsertError::Store)?;
+        }
+        Ok(record)
     }
 
     fn insert(&self, user_id: &str, name_id: GNameId) -> Result<(), InsertError> {

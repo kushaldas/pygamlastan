@@ -37,6 +37,12 @@ class IdentityStore(Protocol):
     holds (a reassigned value would let the new user log in as the old one at
     every SP that has seen it).
 
+    The binding does not trust what the backend returns: a record from
+    ``find_durable`` or ``get_or_insert_durable`` must be the durable slot asked
+    for, and ``user_for(record.value)`` must name the same user, otherwise
+    ``SamlStoreError`` is raised and the record is not used. So ``user_for`` must
+    see the backend's own writes (read-your-writes), not a lagging replica.
+
     Raise ``NameIdValueTaken`` / ``NameIdDurableExists`` for a conflict. Any
     other exception is a backend failure and surfaces as ``SamlStoreError``:
     never return "no record" for a backend that could not answer.

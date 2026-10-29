@@ -160,6 +160,14 @@ Identity database
    except transient) ``(user, sp_name_qualifier, name_qualifier, format)`` is
    unique. A record with no format counts as ``unspecified``.
 
+   The binding does not trust what the backend returns. A record from
+   ``find_durable`` or ``get_or_insert_durable`` must be the durable slot that was
+   asked for, and ``user_for(record.value)`` must name the same user; otherwise
+   :class:`pygamlastan.SamlStoreError` is raised and the record is not used. A
+   query that forgot the user in its filter, a wrong index or a stale cache would
+   otherwise hand one user another user's persistent NameID. So ``user_for`` must
+   see the backend's own writes (read-your-writes), not a lagging replica.
+
    Raise :class:`pygamlastan.NameIdValueTaken` or
    :class:`pygamlastan.NameIdDurableExists` for a conflict. Any other exception
    is a backend failure and surfaces as :class:`pygamlastan.SamlStoreError`;
