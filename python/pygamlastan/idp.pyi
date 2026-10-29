@@ -3,7 +3,9 @@ from collections.abc import Iterable
 from typing import Literal, Protocol
 
 from .core import Assertion, Attribute, NameId, NameIdPolicy, RequestedAuthnContext
+from .crypto import SamlSigner
 from .metadata import EntityDescriptor
+from .profiles import ProcessedAuthnRequest
 
 COCO_V1: str
 COCO_V2: str
@@ -27,6 +29,11 @@ class IdentityStore(Protocol):
     across all records, and among durable records (every format except
     transient) ``(user, sp_name_qualifier, name_qualifier, format)`` is unique.
     A record with no ``format`` counts as ``unspecified``.
+
+    ``replace`` updates a record in place for its owner and must never move a
+    record to another user: raise ``NameIdValueTaken`` for a value another user
+    holds (a reassigned value would let the new user log in as the old one at
+    every SP that has seen it).
 
     Raise ``NameIdValueTaken`` / ``NameIdDurableExists`` for a conflict. Any
     other exception is a backend failure and surfaces as ``SamlStoreError``:
@@ -84,6 +91,7 @@ class IdentDb:
         idp_entity_id: str,
         store: IdentityStore | None = ...,
         domain: str | None = ...,
+        persist_transient: bool = ...,
     ) -> None: ...
     def store(self, user_id: str, name_id: NameId) -> None: ...
     def find_local_id(self, name_id: NameId) -> str | None: ...
@@ -193,6 +201,153 @@ class ReleasePolicy:
         optional: list[Attribute] | None = ...,
         subject_id_req: str = ...,
     ) -> list[Attribute]: ...
+
+class Denial:
+    """Why a request is refused with a signed SAML protocol error."""
+    NO_PASSIVE: Denial
+    NO_AUTHN_CONTEXT: Denial
+    INVALID_NAME_ID_POLICY: Denial
+    NAME_ID_CREATION_NOT_ALLOWED: Denial
+    MISSING_REQUIRED_ATTRIBUTES: Denial
+    INVALID_ATTRIBUTE_CONSUMING_SERVICE_INDEX: Denial
+    AUTHN_FAILED: Denial
+    CANCELLED: Denial
+
+class AuthnMethodRef:
+    """Which authentication method ran: a class ref given directly, or a method
+    registered in the ``AuthnBroker``."""
+    @staticmethod
+    def inline(class_ref: str, authn_authority: str | None = ...) -> AuthnMethodRef: ...
+    @staticmethod
+    def broker(reference: str) -> AuthnMethodRef: ...
+    @property
+    def kind(self) -> Literal["inline", "broker"]: ...
+    @property
+    def class_ref(self) -> str | None: ...
+    @property
+    def authn_authority(self) -> str | None: ...
+    @property
+    def reference(self) -> str | None: ...
+
+class AuthenticatedSubject:
+    """The authenticated subject: identifier, raw (unfiltered) attributes, the
+    method that ran, when (timezone-aware; ``None`` means now) and the session
+    index."""
+    def __init__(
+        self,
+        subject_id: str,
+        attributes: list[Attribute],
+        authn_method: AuthnMethodRef,
+        authn_instant: datetime | None = ...,
+        session_index: str | None = ...,
+    ) -> None: ...
+    @property
+    def subject_id(self) -> str: ...
+    @property
+    def attributes(self) -> list[Attribute]: ...
+    @property
+    def authn_method(self) -> AuthnMethodRef: ...
+    @property
+    def authn_instant(self) -> datetime | None: ...
+    @property
+    def session_index(self) -> str | None: ...
+
+class EstablishedSession:
+    """An SSO session the application already has for the browser."""
+    def __init__(
+        self,
+        subject_id: str,
+        authn_method: AuthnMethodRef,
+        authn_instant: datetime,
+        session_index: str,
+    ) -> None: ...
+    @property
+    def subject_id(self) -> str: ...
+    @property
+    def authn_method(self) -> AuthnMethodRef: ...
+    @property
+    def authn_instant(self) -> datetime: ...
+    @property
+    def session_index(self) -> str: ...
+
+class ResponseParams:
+    """A processed AuthnRequest bound to the trusted metadata of its SP.
+
+    Raises ``SamlProfileError`` if ``entity`` is not the SP the request was
+    validated for, or has no SAML 2.0 SP role."""
+    def __init__(self, processed: ProcessedAuthnRequest, entity: EntityDescriptor) -> None: ...
+    @property
+    def processed(self) -> ProcessedAuthnRequest: ...
+
+class Disposition:
+    """What ``ResponseEngine.check_request`` decided."""
+    @property
+    def kind(self) -> Literal["reuse_session", "authenticate", "deny"]: ...
+    @property
+    def session(self) -> EstablishedSession | None: ...
+    @property
+    def methods(self) -> list[AuthnMethod]: ...
+    @property
+    def denial(self) -> Denial | None: ...
+
+class IssuedResponse:
+    """A signed successful response with the identifiers an audit log needs."""
+    @property
+    def xml(self) -> str: ...
+    @property
+    def response_id(self) -> str: ...
+    @property
+    def assertion_id(self) -> str | None: ...
+    @property
+    def name_id(self) -> NameId: ...
+    @property
+    def session_index(self) -> str | None: ...
+    @property
+    def not_on_or_after(self) -> datetime: ...
+    @property
+    def released_attribute_names(self) -> list[str]: ...
+
+class DeniedResponse:
+    """A signed protocol error response: no assertion, subject or session."""
+    @property
+    def xml(self) -> str: ...
+    @property
+    def response_id(self) -> str: ...
+
+class ResponseOutcome:
+    @property
+    def is_issued(self) -> bool: ...
+    @property
+    def issued(self) -> IssuedResponse | None: ...
+    @property
+    def denied(self) -> DeniedResponse | None: ...
+    @property
+    def denial(self) -> Denial | None: ...
+    @property
+    def xml(self) -> str: ...
+
+class ResponseEngine:
+    """The IdP response engine. ``release`` is ``"policy"`` (filter through the
+    ``ReleasePolicy``) or ``"pass_through"`` (release what the application
+    supplied). ``cert_der_b64`` is the signing certificate, base64 DER."""
+    def __init__(
+        self,
+        idp_entity_id: str,
+        policy: ReleasePolicy,
+        idents: IdentDb,
+        broker: AuthnBroker,
+        signer: SamlSigner,
+        cert_der_b64: str,
+        assertions: InMemoryAssertionStore | None = ...,
+        release: Literal["policy", "pass_through"] = ...,
+    ) -> None: ...
+    def check_request(
+        self, params: ResponseParams, session: EstablishedSession | None = ...
+    ) -> Disposition: ...
+    def create_authn_response(
+        self, params: ResponseParams, subject: AuthenticatedSubject
+    ) -> ResponseOutcome: ...
+    def create_denial_response(self, params: ResponseParams, denial: Denial) -> DeniedResponse: ...
 
 def releasable_attributes(
     policies: list[EntityCategoryPolicy],

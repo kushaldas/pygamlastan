@@ -16,6 +16,7 @@ mod errors;
 mod idp;
 mod logout;
 mod metadata;
+mod orchestrator;
 mod profiles;
 mod security;
 mod xml;

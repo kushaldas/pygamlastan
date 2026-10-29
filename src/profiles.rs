@@ -774,7 +774,13 @@ fn process_response_verified(
     frozen
 )]
 pub struct ProcessedAuthnRequest {
-    inner: gidp::ProcessedAuthnRequest,
+    pub(crate) inner: gidp::ProcessedAuthnRequest,
+}
+
+impl ProcessedAuthnRequest {
+    pub(crate) fn wrap(inner: gidp::ProcessedAuthnRequest) -> Self {
+        ProcessedAuthnRequest { inner }
+    }
 }
 
 #[pymethods]
@@ -824,6 +830,24 @@ impl ProcessedAuthnRequest {
     #[getter]
     fn attribute_consuming_service_index(&self) -> Option<u16> {
         self.inner.attribute_consuming_service_index
+    }
+    /// `NameIDPolicy/@SPNameQualifier`, if the request carried one.
+    #[getter]
+    fn requested_sp_name_qualifier(&self) -> Option<String> {
+        self.inner.requested_sp_name_qualifier.clone()
+    }
+    /// Whether the request carried a `NameIDPolicy` element at all (a policy
+    /// with no `Format` and no policy are otherwise indistinguishable).
+    #[getter]
+    fn has_name_id_policy(&self) -> bool {
+        self.inner.has_name_id_policy
+    }
+    /// `AuthnContextDeclRef`s of the `RequestedAuthnContext`. gamlastan cannot
+    /// show a declaration is met, so a request naming only declarations is
+    /// denied by the orchestrator (`Denial.NO_AUTHN_CONTEXT`).
+    #[getter]
+    fn requested_authn_context_decl_refs(&self) -> Vec<String> {
+        self.inner.requested_authn_context_decl_refs.clone()
     }
 }
 

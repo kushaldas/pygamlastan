@@ -4,7 +4,9 @@ pygamlastan.idp
 .. py:module:: pygamlastan.idp
 
 IdP-side infrastructure: eduPersonTargetedID generation, the authentication
-broker, NameID storage coding, and an issued-assertion store.
+broker, NameID storage coding, an issued-assertion store, and the
+:class:`ResponseEngine` that composes them into the Web Browser SSO response
+flow.
 
 eduPersonTargetedID
 -------------------
@@ -71,7 +73,7 @@ Assertion store
 Identity database
 -----------------
 
-.. py:class:: IdentDb(idp_entity_id: str, store: IdentityStore | None = None, domain: str | None = None)
+.. py:class:: IdentDb(idp_entity_id: str, store: IdentityStore | None = None, domain: str | None = None, persist_transient: bool = False)
 
    The IdP identity database (pysaml2 ``IdentDB``): the bidirectional mapping
    between local user ids and the NameIDs issued to relying parties, NameID
@@ -81,6 +83,13 @@ Identity database
    ``idp_entity_id`` is the default NameQualifier. With ``store=None`` the
    database is in-memory; pass an object implementing the record-shaped
    ``IdentityStore`` protocol to back it with SQL/Mongo. ``domain`` is appended to email-format NameIDs.
+
+   Transient NameIDs are not stored by default: they are one-time-use, and the
+   default per-SP format is transient, so storing every one would add a record
+   per response. The consequence is that :meth:`find_local_id` cannot resolve a
+   transient NameID, which a back-channel (SOAP) LogoutRequest carrying one
+   needs. Set ``persist_transient=True`` to store them; the backend must then
+   expire them itself, since the record protocol has no expiry.
 
    .. py:method:: store(user_id: str, name_id: pygamlastan.core.NameId) -> None
 
@@ -148,6 +157,12 @@ Identity database
    .. py:method:: get_or_insert_durable(user_id: str, candidate: pygamlastan.core.NameId) -> pygamlastan.core.NameId
    .. py:method:: insert(user_id: str, name_id: pygamlastan.core.NameId) -> None
    .. py:method:: replace(user_id: str, name_id: pygamlastan.core.NameId) -> None
+
+      Update a record in place for its owner. It must never move a record to
+      another user: raise :class:`pygamlastan.NameIdValueTaken` for a value
+      another user holds, since a reassigned value would let the new user log in
+      as the old one at every SP that has seen it.
+
    .. py:method:: remove(value: str) -> None
    .. py:method:: remove_all(user_id: str) -> None
 
@@ -218,6 +233,137 @@ entry, then the SP's registration-authority entry (when recorded), then the
 .. py:class:: ResolvedSignTargets
 
    The concrete decision: ``sign_response`` / ``sign_assertion``.
+
+Response engine
+---------------
+
+The orchestrator (gamlastan ``idp::orchestrator``) composes the pieces above
+into the SAML Web Browser SSO response flow. The application supplies identity
+facts; the engine decides what the request requires, derives the NameID,
+releases attributes and signs the response.
+
+.. code-block:: python
+
+   engine = idp.ResponseEngine(
+       IDP, policy, idents, broker, signer, cert_der_b64)
+   req = xml.parse_authn_request(authn_request_xml)
+   params = idp.ResponseParams(
+       profiles.process_authn_request(req, sp_entity, request_signature_verified),
+       sp_entity)
+
+   disposition = engine.check_request(params, session)   # session or None
+   if disposition.kind == "deny":
+       return engine.create_denial_response(params, disposition.denial)
+   if disposition.kind == "authenticate":
+       ...  # log the user in, then build `subject`
+   outcome = engine.create_authn_response(params, subject)
+   deliver(outcome.xml)   # an issued response or a signed denial
+
+.. py:class:: ResponseEngine(idp_entity_id, policy, idents, broker, signer, cert_der_b64, assertions=None, release="policy")
+
+   ``policy`` is a :class:`ReleasePolicy`, ``idents`` an :class:`IdentDb`,
+   ``broker`` an :class:`AuthnBroker`, ``signer`` a
+   :class:`pygamlastan.crypto.SamlSigner`, ``cert_der_b64`` the signing
+   certificate as base64 DER (the body of the PEM, no header lines), and
+   ``assertions`` an optional :class:`InMemoryAssertionStore` so back-channel
+   queries can be answered. ``release="policy"`` filters attributes through the
+   policy; ``release="pass_through"`` releases what the application supplied,
+   for a proxy whose attributes were filtered upstream. The engine holds
+   references, so later changes to those objects are seen by the next call.
+
+   .. py:method:: check_request(params: ResponseParams, session: EstablishedSession | None = None) -> Disposition
+
+      Decide what to do, without any I/O: the ForceAuthn x IsPassive x
+      RequestedAuthnContext matrix, weighed against the browser's session.
+      Call it before authenticating anyone and act on ``"deny"`` without a
+      login. A request naming only ``AuthnContextDeclRef``\ s is denied: a
+      declaration cannot be shown to be met.
+
+   .. py:method:: create_authn_response(params: ResponseParams, subject: AuthenticatedSubject) -> ResponseOutcome
+
+      Assemble and sign the response. A request that cannot be satisfied (an
+      unsupported or overlong NameID format, a session that expired while the
+      user authenticated, a method that does not satisfy the requested context,
+      required attributes that were not released) is a signed denial in the
+      outcome. Raises :class:`pygamlastan.SamlStoreError` if the identity or
+      assertion store failed, and :class:`pygamlastan.SamlProfileError` for a
+      configuration fault (an unknown ``AuthnMethodRef.broker`` reference, or
+      parameters for a different SP).
+
+   .. py:method:: create_denial_response(params: ResponseParams, denial: Denial) -> DeniedResponse
+
+      A signed protocol error. The envelope is always signed, whatever the
+      per-SP signing targets.
+
+.. py:class:: ResponseParams(processed: pygamlastan.profiles.ProcessedAuthnRequest, entity: pygamlastan.metadata.EntityDescriptor)
+
+   A processed request bound to the trusted metadata of the SP it came from.
+   The SAML 2.0 SP role is taken from ``entity``, so the request, the role and
+   the entity cannot come from different SPs.
+
+.. py:class:: AuthenticatedSubject(subject_id, attributes, authn_method, authn_instant=None, session_index=None)
+
+   The authenticated subject: its identifier, raw (unfiltered) attributes, the
+   method that ran, when, and the session index. ``authn_instant`` must be
+   timezone-aware; ``None`` means now. When reusing a session, pass the
+   session's own instant.
+
+.. py:class:: AuthnMethodRef
+
+   ``AuthnMethodRef.inline(class_ref, authn_authority=None)`` gives a class ref
+   directly (a proxy, or a login flow outside the broker);
+   ``AuthnMethodRef.broker(reference)`` names a method registered with
+   :meth:`AuthnBroker.add`. A reference the broker does not know is an error,
+   never a class ref taken from the string.
+
+.. py:class:: EstablishedSession(subject_id, authn_method, authn_instant, session_index)
+
+   A session the application already has for the browser.
+
+.. py:class:: Disposition
+
+   ``kind`` is ``"reuse_session"`` (``session`` is set), ``"authenticate"``
+   (``methods`` are the registered methods that satisfy the request, strongest
+   first; empty when the broker has none) or ``"deny"`` (``denial`` says why).
+
+.. py:class:: Denial
+
+   ``NO_PASSIVE``, ``NO_AUTHN_CONTEXT``, ``INVALID_NAME_ID_POLICY``,
+   ``NAME_ID_CREATION_NOT_ALLOWED``, ``MISSING_REQUIRED_ATTRIBUTES``,
+   ``INVALID_ATTRIBUTE_CONSUMING_SERVICE_INDEX``, ``AUTHN_FAILED`` and
+   ``CANCELLED`` (the last two for a failed or user-cancelled login, which the
+   application reports itself). A closed set with a fixed SAML status: nothing
+   the SP sent reaches the status message.
+
+.. py:class:: ResponseOutcome
+
+   ``is_issued``; ``issued`` (an :class:`IssuedResponse`) or ``denied`` (a
+   :class:`DeniedResponse`) with ``denial``; and ``xml`` for whichever it is.
+
+.. py:class:: IssuedResponse
+
+   ``xml``, ``response_id``, ``assertion_id``, ``name_id``, ``session_index``,
+   ``not_on_or_after`` and ``released_attribute_names`` (names only, never
+   values): the identifiers an audit log needs.
+
+.. py:class:: DeniedResponse
+
+   ``xml`` and ``response_id``. A denial has no assertion, subject or session.
+
+What the engine does not do, and the application must:
+
+* enforce ``Scoping`` (``ProxyCount``, ``IDPList``) if it is a proxy: read it
+  from :attr:`pygamlastan.core.AuthnRequest.scoping`;
+* compare a requested ``Subject`` with the authenticated user, or refuse
+  requests that name one: see
+  :meth:`pygamlastan.core.AuthnRequest.requested_subject_name_id` and
+  ``has_requested_subject``.
+
+Several defaults follow pysaml2 and are permissive; review them for a
+production IdP. With no rule covering an SP (entity categories, attributes
+requested in its metadata, restrictions) every attribute the application
+supplies is released. Any requested NameID format is accepted and every
+non-transient one is stored. The default signing policy signs the assertion.
 
 Entity categories
 -----------------

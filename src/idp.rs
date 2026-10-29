@@ -107,7 +107,7 @@ pub struct AuthnMethod {
     reference: String,
 }
 
-fn method_to_py(m: &gi::AuthnMethod) -> AuthnMethod {
+pub(crate) fn method_to_py(m: &gi::AuthnMethod) -> AuthnMethod {
     AuthnMethod {
         class_ref: m.class_ref.clone(),
         method: m.method.clone(),
@@ -119,7 +119,7 @@ fn method_to_py(m: &gi::AuthnMethod) -> AuthnMethod {
 
 #[pyclass(module = "pygamlastan.idp", name = "AuthnBroker")]
 pub struct AuthnBroker {
-    inner: gi::AuthnBroker,
+    pub(crate) inner: gi::AuthnBroker,
 }
 
 #[pymethods]
@@ -158,7 +158,7 @@ impl AuthnBroker {
 
 #[pyclass(module = "pygamlastan.idp", name = "InMemoryAssertionStore")]
 pub struct InMemoryAssertionStore {
-    inner: gi::InMemoryAssertionStore,
+    pub(crate) inner: gi::InMemoryAssertionStore,
 }
 
 #[pymethods]
@@ -219,7 +219,7 @@ impl InMemoryAssertionStore {
 /// `IdentityStore`). A backend signals a conflict by raising `NameIdValueTaken`
 /// or `NameIdDurableExists`; any other exception is a backend failure and
 /// surfaces as `SamlStoreError`, never as "no record".
-struct PyIdentityStore {
+pub(crate) struct PyIdentityStore {
     obj: Py<PyAny>,
 }
 
@@ -377,7 +377,7 @@ impl IdentityStore for PyIdentityStore {
 /// in-memory store or a caller-supplied Python object. A single enum keeps the
 /// generic `gi::IdentDb<S>` monomorphized to one type so one `#[pyclass]`
 /// serves both deployment modes.
-enum IdentBackend {
+pub(crate) enum IdentBackend {
     InMemory(InMemoryIdentityStore),
     Py(PyIdentityStore),
 }
@@ -452,7 +452,7 @@ fn ident_error(e: IdentError) -> PyErr {
 /// ManageNameID / NameIDMapping profiles.
 #[pyclass(module = "pygamlastan.idp", name = "IdentDb")]
 pub struct IdentDb {
-    inner: gi::IdentDb<IdentBackend>,
+    pub(crate) inner: gi::IdentDb<IdentBackend>,
 }
 
 #[pymethods]
@@ -462,9 +462,21 @@ impl IdentDb {
     /// implementing the record-shaped `IdentityStore` protocol (see `IdentityStore` in
     /// `idp.pyi`) to back it with external storage.
     /// `domain` sets the domain appended to email-format NameIDs.
+    ///
+    /// Transient NameIDs are not stored by default: they are one-time-use, and
+    /// the default per-SP format is transient, so storing every one would add a
+    /// record per response. The cost is that `find_local_id` cannot resolve a
+    /// transient NameID, which a back-channel (SOAP) LogoutRequest carrying one
+    /// needs. Set `persist_transient=True` to store them (the backend must then
+    /// expire them: the record trait has no expiry).
     #[new]
-    #[pyo3(signature = (idp_entity_id, store=None, domain=None))]
-    fn new(idp_entity_id: String, store: Option<Py<PyAny>>, domain: Option<String>) -> Self {
+    #[pyo3(signature = (idp_entity_id, store=None, domain=None, persist_transient=false))]
+    fn new(
+        idp_entity_id: String,
+        store: Option<Py<PyAny>>,
+        domain: Option<String>,
+        persist_transient: bool,
+    ) -> Self {
         let backend = match store {
             Some(obj) => IdentBackend::Py(PyIdentityStore { obj }),
             None => IdentBackend::InMemory(InMemoryIdentityStore::new()),
@@ -472,6 +484,9 @@ impl IdentDb {
         let mut inner = gi::IdentDb::new(backend, idp_entity_id);
         if let Some(domain) = domain {
             inner = inner.with_domain(domain);
+        }
+        if persist_transient {
+            inner = inner.with_persist_transient(true);
         }
         IdentDb { inner }
     }
@@ -916,7 +931,7 @@ impl PolicyEntry {
 /// SP entry, then the SP's registration-authority entry, then `"default"`.
 #[pyclass(module = "pygamlastan.idp", name = "ReleasePolicy")]
 pub struct ReleasePolicy {
-    inner: gpol::ReleasePolicy,
+    pub(crate) inner: gpol::ReleasePolicy,
 }
 
 #[pymethods]
@@ -1051,6 +1066,7 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ResolvedSignTargets>()?;
     m.add_class::<PolicyEntry>()?;
     m.add_class::<ReleasePolicy>()?;
+    crate::orchestrator::register(&m)?;
     m.add_function(wrap_pyfunction!(code_name_id, &m)?)?;
     m.add_function(wrap_pyfunction!(decode_name_id, &m)?)?;
     m.add_function(wrap_pyfunction!(releasable_attributes, &m)?)?;

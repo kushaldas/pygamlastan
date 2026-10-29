@@ -671,6 +671,22 @@ impl AuthnRequest {
     fn scoping(&self) -> Option<Scoping> {
         self.inner.scoping.clone().map(Scoping::wrap)
     }
+    /// The principal the request names in `Subject` as a plaintext NameID
+    /// (pysaml2 `Request.subject_id()`). `None` when the request names no
+    /// principal or names one in an `EncryptedID`; use `has_requested_subject`
+    /// to tell those apart. The orchestrator does not compare it with the
+    /// authenticated user: an application that supports a requested subject
+    /// must do that itself, and one that cannot should refuse the request.
+    fn requested_subject_name_id(&self) -> Option<NameId> {
+        self.inner
+            .requested_subject_name_id()
+            .cloned()
+            .map(NameId::wrap)
+    }
+    /// Whether the request names a principal in `Subject` (plaintext or encrypted).
+    fn has_requested_subject(&self) -> bool {
+        self.inner.requested_subject().is_some()
+    }
     #[getter]
     fn force_authn(&self) -> Option<bool> {
         self.inner.force_authn

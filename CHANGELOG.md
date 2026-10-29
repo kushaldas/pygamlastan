@@ -35,6 +35,20 @@ dependency stack), which is not yet released; `Cargo.toml` carries a git
 
 ### Added
 
+- The IdP response engine, `pygamlastan.idp.ResponseEngine`, with
+  `check_request`, `create_authn_response` and `create_denial_response`, and the
+  types they use: `ResponseParams`, `AuthenticatedSubject`, `AuthnMethodRef`
+  (`inline` / `broker`), `EstablishedSession`, `Disposition`, `Denial`,
+  `ResponseOutcome`, `IssuedResponse` and `DeniedResponse`. `release="policy"`
+  filters through the `ReleasePolicy`; `release="pass_through"` is for a proxy
+  whose attributes were filtered upstream. A store failure is `SamlStoreError`
+  and any other fault `SamlProfileError`; neither is ever a signed denial.
+- `IdentDb(persist_transient=True)`, to store transient NameIDs so
+  `find_local_id` can resolve one (a back-channel logout needs it). Without it,
+  which is the default, they are not stored.
+- `AuthnRequest.requested_subject_name_id()` and `has_requested_subject()`, and
+  `ProcessedAuthnRequest.requested_sp_name_qualifier`, `has_name_id_policy` and
+  `requested_authn_context_decl_refs`.
 - `SamlStoreError`, `NameIdValueTaken`, `NameIdDurableExists` exceptions
   (subclasses of `SamlIdentError`).
 - `ResponseOptions(authenticating_authorities=...)`.
