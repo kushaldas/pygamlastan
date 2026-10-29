@@ -43,6 +43,17 @@ dependency stack), which is not yet released; `Cargo.toml` carries a git
   filters through the `ReleasePolicy`; `release="pass_through"` is for a proxy
   whose attributes were filtered upstream. A store failure is `SamlStoreError`
   and any other fault `SamlProfileError`; neither is ever a signed denial.
+- `PolicyEntry` settings `session_lifetime_seconds`, `supported_nameid_formats`,
+  `signing_preference` and `deny_unconfigured_release`, with the matching
+  `ReleasePolicy` readers, and the module constants `ISSUABLE_NAMEID_FORMATS` and
+  `MAX_NAMEID_FORMAT_LEN`. `supported_nameid_formats` and
+  `deny_unconfigured_release` are opt-ins: by default any requested NameID
+  format is accepted and every attribute the application supplies is released
+  to an SP no rule covers, as in pysaml2.
+- `pygamlastan.crypto.SignatureMethod`, `DigestMethod`, `SigningPreference` and
+  `SigningAlgorithms`: per-SP signature and digest algorithm selection (SHA-2
+  RSA and ECDSA only; the SP's metadata can only choose among your entries).
+- `AuthnBroker(allow_exact_level_matching=...)` and `AuthnBroker.is_empty()`.
 - `IdentDb(persist_transient=True)`, to store transient NameIDs so
   `find_local_id` can resolve one (a back-channel logout needs it). Without it,
   which is the default, they are not stored.

@@ -19,6 +19,7 @@ mod metadata;
 mod orchestrator;
 mod profiles;
 mod security;
+mod signing;
 mod xml;
 
 /// Native extension entry point. Installed as `pygamlastan._native` and

@@ -22,6 +22,7 @@ use crate::convert::new_submodule;
 use crate::core::{Assertion, Attribute, NameId, NameIdPolicy, RequestedAuthnContext};
 use crate::errors::{ident_err, policy_err, store_err, NameIdDurableExists, NameIdValueTaken};
 use crate::metadata::EntityDescriptor;
+use crate::signing::SigningPreference;
 
 // ---------------------------------------------------------------------------
 // Eptid (eduPersonTargetedID)
@@ -124,11 +125,25 @@ pub struct AuthnBroker {
 
 #[pymethods]
 impl AuthnBroker {
+    /// Create an empty broker.
+    ///
+    /// ``allow_exact_level_matching=True`` restores pysaml2's looser
+    /// ``Comparison="exact"``: any method registered at the same security level
+    /// as a requested class counts, not only a literal class-ref match
+    /// (saml-core-2.0-os 3.3.2.2.1). The default is the literal match.
     #[new]
-    fn new() -> Self {
+    #[pyo3(signature = (allow_exact_level_matching=false))]
+    fn new(allow_exact_level_matching: bool) -> Self {
         AuthnBroker {
-            inner: gi::AuthnBroker::new(),
+            inner: gi::AuthnBroker::new().allow_exact_level_matching(allow_exact_level_matching),
         }
+    }
+    /// Whether no method is registered. With an empty broker an ``exact``
+    /// request is left to the response-time check (an inline method is
+    /// accepted if its class ref matches literally); the other comparisons need
+    /// the broker's strength ordering and are denied before login.
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
     }
     /// Register an authentication method; returns its reference.
     #[pyo3(signature = (class_ref, method, level, authn_authority=None))]
@@ -856,6 +871,10 @@ impl PolicyEntry {
         entity_categories=None,
         owned_entity_categories=None,
         attribute_restrictions=None,
+        session_lifetime_seconds=None,
+        supported_nameid_formats=None,
+        signing_preference=None,
+        deny_unconfigured_release=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -867,8 +886,29 @@ impl PolicyEntry {
         entity_categories: Option<Vec<String>>,
         owned_entity_categories: Option<Vec<EntityCategoryPolicy>>,
         attribute_restrictions: Option<Vec<(String, Option<Vec<String>>)>>,
+        session_lifetime_seconds: Option<i64>,
+        supported_nameid_formats: Option<Vec<String>>,
+        signing_preference: Option<SigningPreference>,
+        deny_unconfigured_release: Option<bool>,
     ) -> PyResult<Self> {
         let mut entry = gpol::PolicyEntry::new();
+        if let Some(secs) = session_lifetime_seconds {
+            if secs < 0 {
+                return Err(policy_err(format!(
+                    "session_lifetime_seconds must be non-negative, got {secs}"
+                )));
+            }
+            entry = entry.with_session_lifetime(TimeDelta::seconds(secs));
+        }
+        if let Some(formats) = supported_nameid_formats {
+            entry = entry.with_supported_nameid_formats(formats);
+        }
+        if let Some(p) = signing_preference {
+            entry = entry.with_signing_preference(p.inner);
+        }
+        if let Some(deny) = deny_unconfigured_release {
+            entry = entry.with_deny_unconfigured_release(deny);
+        }
         if let Some(f) = nameid_format {
             entry = entry.with_nameid_format(f);
         }
@@ -987,6 +1027,32 @@ impl ReleasePolicy {
     fn fail_on_missing_requested(&self, sp_entity_id: &str) -> bool {
         self.inner.fail_on_missing_requested(sp_entity_id)
     }
+    /// SSO session lifetime in seconds for the SP
+    /// (``AuthnStatement/@SessionNotOnOrAfter``); falls back to the assertion
+    /// lifetime when unset.
+    fn session_lifetime_seconds(&self, sp_entity_id: &str) -> i64 {
+        self.inner.session_lifetime(sp_entity_id).num_seconds()
+    }
+    /// Whether this IdP will issue a NameID of ``format`` to the SP. With no
+    /// ``supported_nameid_formats`` configured every format is accepted, as in
+    /// pysaml2, except ``nameid-format:encrypted`` (never issuable) and one
+    /// longer than ``MAX_NAMEID_FORMAT_LEN``. The SP's own default format is
+    /// always allowed.
+    fn supports_nameid_format(&self, sp_entity_id: &str, format: &str) -> bool {
+        self.inner.supports_nameid_format(sp_entity_id, format)
+    }
+    /// Whether an SP that no attribute rule covers is released nothing (default
+    /// false: everything the application supplied is released).
+    fn deny_unconfigured_release(&self, sp_entity_id: &str) -> bool {
+        self.inner.deny_unconfigured_release(sp_entity_id)
+    }
+    /// The signing algorithm preference for the SP (empty by default, which
+    /// leaves the signer's defaults).
+    fn signing_preference(&self, sp_entity_id: &str) -> SigningPreference {
+        SigningPreference {
+            inner: self.inner.signing_preference(sp_entity_id),
+        }
+    }
     /// Filter `attributes` for release to `sp_entity_id`. `required` / `optional`
     /// are the SP's requested attributes (each a `core.Attribute`; values, when
     /// present, narrow the released values). `sp_entity_categories` are the SP's
@@ -1069,6 +1135,11 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::orchestrator::register(&m)?;
     m.add_function(wrap_pyfunction!(code_name_id, &m)?)?;
     m.add_function(wrap_pyfunction!(decode_name_id, &m)?)?;
+    m.add(
+        "ISSUABLE_NAMEID_FORMATS",
+        gpol::ISSUABLE_NAMEID_FORMATS.to_vec(),
+    )?;
+    m.add("MAX_NAMEID_FORMAT_LEN", gpol::MAX_NAMEID_FORMAT_LEN)?;
     m.add_function(wrap_pyfunction!(releasable_attributes, &m)?)?;
     m.add_function(wrap_pyfunction!(subject_id_req_from_metadata, &m)?)?;
 

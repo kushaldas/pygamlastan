@@ -39,9 +39,22 @@ eduPersonTargetedID
 Authentication broker
 ---------------------
 
-.. py:class:: AuthnBroker()
+.. py:class:: AuthnBroker(allow_exact_level_matching: bool = False)
 
    Registers authentication methods and selects them by authentication context.
+   ``Comparison="exact"`` is a literal class-ref match (saml-core-2.0-os
+   3.3.2.2.1); ``allow_exact_level_matching=True`` restores pysaml2's looser
+   behaviour, where any method at the same security level counts. Every listed
+   class ref is an alternative for every comparison; the result is in the
+   request's order, not sorted by strength (``check_request`` sorts its
+   ``"authenticate"`` methods strongest first).
+
+   .. py:method:: is_empty() -> bool
+
+      Whether no method is registered. With an empty broker an ``exact``
+      request is left to the response-time check (an inline method is accepted
+      if its class ref matches literally); ``minimum``, ``maximum`` and
+      ``better`` need the broker's strength ordering and are denied before login.
 
    .. py:method:: add(class_ref: str, method: str, level: int, authn_authority: str | None = None) -> str
 
@@ -214,7 +227,7 @@ entry, then the SP's registration-authority entry (when recorded), then the
       :class:`pygamlastan.SamlPolicyError` if a required attribute/value is
       missing and ``fail_on_missing_requested`` is set.
 
-.. py:class:: PolicyEntry(nameid_format: str | None = None, name_form: str | None = None, lifetime_seconds: int | None = None, sign: SignTargets | None = None, fail_on_missing_requested: bool | None = None, entity_categories: list[str] | None = None, owned_entity_categories: list[EntityCategoryPolicy] | None = None, attribute_restrictions: list[tuple[str, list[str] | None]] | None = None)
+.. py:class:: PolicyEntry(nameid_format: str | None = None, name_form: str | None = None, lifetime_seconds: int | None = None, sign: SignTargets | None = None, fail_on_missing_requested: bool | None = None, entity_categories: list[str] | None = None, owned_entity_categories: list[EntityCategoryPolicy] | None = None, attribute_restrictions: list[tuple[str, list[str] | None]] | None = None, session_lifetime_seconds: int | None = None, supported_nameid_formats: list[str] | None = None, signing_preference: pygamlastan.crypto.SigningPreference | None = None, deny_unconfigured_release: bool | None = None)
 
    One policy entry. ``entity_categories`` names shipped policies (e.g.
    ``["swamid"]``); ``owned_entity_categories`` supplies developer-built ones;
@@ -222,6 +235,26 @@ entry, then the SP's registration-authority entry (when recorded), then the
    a list of value patterns (anchored, ``re.match`` semantics) or ``None`` for
    all values; attributes not named are not released. Raises
    :class:`pygamlastan.SamlPolicyError` if a pattern fails to compile.
+
+   * ``session_lifetime_seconds``: the SSO session's absolute lifetime
+     (``AuthnStatement/@SessionNotOnOrAfter``), separate from the assertion
+     ``lifetime_seconds``; falls back to the assertion lifetime when unset.
+   * ``supported_nameid_formats``: the NameID formats this IdP will issue to the
+     SP; a requested ``NameIDPolicy/@Format`` outside the set (and the SP's own
+     default) is denied with ``Denial.INVALID_NAME_ID_POLICY`` before anything is
+     stored. **Unset, any requested format is accepted**, as in pysaml2, and
+     every non-transient one is stored, so an SP that sends invented format
+     strings gets one record per string. Set it in production;
+     ``ISSUABLE_NAMEID_FORMATS`` is a starting set. A format longer than
+     ``MAX_NAMEID_FORMAT_LEN`` (256 bytes) and ``nameid-format:encrypted`` are
+     refused whatever is configured.
+   * ``signing_preference``: a :class:`pygamlastan.crypto.SigningPreference`.
+   * ``deny_unconfigured_release``: with ``True``, an SP that no attribute rule
+     covers (no entity categories, no attributes requested in its metadata, no
+     restrictions) is released nothing. **By default it is released every
+     attribute the application supplied**, as in pysaml2: the policy only
+     narrows. Set it on the ``"default"`` entry to fail closed everywhere, and
+     ``False`` on one SP's entry to override.
 
 .. py:class:: SignTargets(response: bool = False, assertion: bool = False, on_demand: bool = False)
 
@@ -362,8 +395,40 @@ What the engine does not do, and the application must:
 Several defaults follow pysaml2 and are permissive; review them for a
 production IdP. With no rule covering an SP (entity categories, attributes
 requested in its metadata, restrictions) every attribute the application
-supplies is released. Any requested NameID format is accepted and every
-non-transient one is stored. The default signing policy signs the assertion.
+supplies is released: set ``deny_unconfigured_release``. Any requested NameID
+format is accepted and every non-transient one is stored: set
+``supported_nameid_formats``. The default signing policy signs the assertion.
+With an HSM-backed signer, list only the token's signature method in a
+``SigningPreference``.
+
+Signing algorithms
+------------------
+
+.. py:class:: pygamlastan.crypto.SignatureMethod
+.. py:class:: pygamlastan.crypto.DigestMethod
+
+   Closed sets of strong algorithms: ``RSA_SHA256``/``384``/``512``,
+   ``ECDSA_SHA256``/``384``/``512`` and ``SHA256``/``384``/``512``. SHA-1, MD5
+   and the like are not representable, so neither configuration nor an SP's
+   metadata can select them. ``.uri`` is the XML-DSig URI and
+   ``from_uri(uri)`` returns ``None`` for anything else.
+
+.. py:class:: pygamlastan.crypto.SigningPreference(signature_methods=None, digest_methods=None)
+
+   An ordered preference, set per SP with ``PolicyEntry(signing_preference=...)``.
+   For each kind the first entry the SP also advertises in its metadata wins;
+   if it advertises none (or nothing), the first entry wins; an empty list
+   leaves the signer's default. The advertisement is untrusted: it only chooses
+   among your entries. Signatures are matched against ``alg:SigningMethod`` and
+   digests against ``alg:DigestMethod``, separately.
+
+   With an HSM-backed signer list **only the token's own signature method**: a
+   response that resolves to another one fails with an error, denials included,
+   for the SPs that resolve to it, when it is signed (not at startup).
+
+   .. py:method:: resolve(sp_signature_methods=None, sp_digest_methods=None) -> SigningAlgorithms
+
+      The algorithms chosen for an SP advertising the given URIs.
 
 Entity categories
 -----------------

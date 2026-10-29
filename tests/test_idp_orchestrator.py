@@ -25,14 +25,14 @@ SP_METADATA = (
 )
 
 
-def _request_xml(attrs="", subject="", policy=""):
+def _request_xml(attrs="", subject="", policy="", context=""):
     return (
         '<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" '
         'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_req1" Version="2.0" '
         f'IssueInstant="2026-06-24T10:00:00Z" Destination="{IDP}/sso" '
         f'AssertionConsumerServiceURL="{ACS}" '
         f'ProtocolBinding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" {attrs}>'
-        f"<saml:Issuer>{SP}</saml:Issuer>{subject}{policy}</samlp:AuthnRequest>"
+        f"<saml:Issuer>{SP}</saml:Issuer>{subject}{policy}{context}</samlp:AuthnRequest>"
     )
 
 
@@ -43,10 +43,12 @@ def _params(request_xml=None, sp_metadata=SP_METADATA):
     return idp.ResponseParams(processed, metadata.parse_entity(sp_metadata))
 
 
-def _engine(rsa_keypair, *, policy=None, idents=None, assertions=None, release="policy"):
+def _engine(
+    rsa_keypair, *, policy=None, idents=None, assertions=None, release="policy", empty_broker=False
+):
     priv, _cert, cert_b64 = rsa_keypair
     broker = idp.AuthnBroker()
-    ref = broker.add(core.AUTHN_CONTEXT_PASSWORD, "/login/password", 1)
+    ref = None if empty_broker else broker.add(core.AUTHN_CONTEXT_PASSWORD, "/login/password", 1)
     signer = crypto.SamlSigner(crypto.KeysManager.build_idp(priv))
     engine = idp.ResponseEngine(
         IDP,
@@ -278,3 +280,162 @@ def test_denial_members_are_comparable_and_hashable():
     assert idp.Denial.NO_PASSIVE == idp.Denial.NO_PASSIVE
     assert idp.Denial.NO_PASSIVE != idp.Denial.CANCELLED
     assert len({idp.Denial.AUTHN_FAILED, idp.Denial.AUTHN_FAILED, idp.Denial.CANCELLED}) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Policy and signing knobs
+# --------------------------------------------------------------------------- #
+
+def _context(comparison, class_ref):
+    return (
+        f'<samlp:RequestedAuthnContext Comparison="{comparison}">'
+        f"<saml:AuthnContextClassRef>{class_ref}</saml:AuthnContextClassRef>"
+        "</samlp:RequestedAuthnContext>"
+    )
+
+
+def _invented_format_request():
+    policy = '<samlp:NameIDPolicy Format="urn:example:invented" AllowCreate="true"/>'
+    return _params(_request_xml(policy=policy))
+
+
+def test_an_invented_nameid_format_is_accepted_by_default_and_refused_when_listed(rsa_keypair):
+    engine, ref = _engine(rsa_keypair)
+    issued = engine.create_authn_response(_invented_format_request(), _subject(ref))
+    assert issued.is_issued and issued.issued.name_id.format == "urn:example:invented"
+
+    strict = idp.ReleasePolicy(
+        default=idp.PolicyEntry(supported_nameid_formats=idp.ISSUABLE_NAMEID_FORMATS)
+    )
+    idents = idp.IdentDb(IDP)
+    engine, ref = _engine(rsa_keypair, policy=strict, idents=idents)
+    outcome = engine.create_authn_response(_invented_format_request(), _subject(ref))
+    assert outcome.denial == idp.Denial.INVALID_NAME_ID_POLICY
+    assert idents.name_ids_for("alice") == []
+
+
+def test_supports_nameid_format_and_the_constants():
+    assert idp.MAX_NAMEID_FORMAT_LEN == 256
+    assert core.NAMEID_PERSISTENT in idp.ISSUABLE_NAMEID_FORMATS
+    policy = idp.ReleasePolicy()
+    assert policy.supports_nameid_format(SP, "urn:example:anything")
+    assert not policy.supports_nameid_format(SP, "urn:example:" + "a" * idp.MAX_NAMEID_FORMAT_LEN)
+    listed = idp.ReleasePolicy(
+        default=idp.PolicyEntry(supported_nameid_formats=[core.NAMEID_PERSISTENT])
+    )
+    assert listed.supports_nameid_format(SP, core.NAMEID_PERSISTENT)
+    assert not listed.supports_nameid_format(SP, "urn:example:anything")
+
+
+def test_deny_unconfigured_release_fails_closed_and_a_rule_lifts_it(rsa_keypair):
+    closed = idp.ReleasePolicy(default=idp.PolicyEntry(deny_unconfigured_release=True))
+    assert closed.deny_unconfigured_release(SP)
+    assert not idp.ReleasePolicy().deny_unconfigured_release(SP)
+    engine, ref = _engine(rsa_keypair, policy=closed)
+    assert _released(engine, ref) == []
+
+    covered = idp.ReleasePolicy(
+        default=idp.PolicyEntry(
+            deny_unconfigured_release=True, attribute_restrictions=[("mail", None)]
+        )
+    )
+    engine, ref = _engine(rsa_keypair, policy=covered)
+    assert _released(engine, ref) == ["mail"]
+
+    overridden = idp.ReleasePolicy(default=idp.PolicyEntry(deny_unconfigured_release=True))
+    overridden.insert(SP, idp.PolicyEntry(deny_unconfigured_release=False))
+    engine, ref = _engine(rsa_keypair, policy=overridden)
+    assert _released(engine, ref) == ["displayName", "mail"]
+
+
+def test_a_signing_preference_selects_the_algorithms(rsa_keypair):
+    prefer = crypto.SigningPreference(
+        [crypto.SignatureMethod.RSA_SHA512], [crypto.DigestMethod.SHA512]
+    )
+    policy = idp.ReleasePolicy(default=idp.PolicyEntry(signing_preference=prefer))
+    engine, ref = _engine(rsa_keypair, policy=policy)
+    xml_out = engine.create_authn_response(_params(), _subject(ref)).xml
+    assert crypto.SignatureMethod.RSA_SHA512.uri in xml_out
+    assert crypto.DigestMethod.SHA512.uri in xml_out
+    assert crypto.SignatureMethod.RSA_SHA256.uri not in xml_out
+
+    default_xml = _engine(rsa_keypair)[0].create_authn_response(_params(), _subject(ref)).xml
+    assert crypto.SignatureMethod.RSA_SHA256.uri in default_xml
+
+
+def test_signing_preference_resolution_only_chooses_among_your_entries():
+    sha = crypto.SignatureMethod
+    pref = crypto.SigningPreference(
+        [sha.RSA_SHA512, sha.RSA_SHA384], [crypto.DigestMethod.SHA512, crypto.DigestMethod.SHA384]
+    )
+    chosen = pref.resolve([sha.RSA_SHA384.uri], [crypto.DigestMethod.SHA384.uri])
+    assert chosen.signature == sha.RSA_SHA384 and chosen.digest == crypto.DigestMethod.SHA384
+    # Nothing usable advertised: the first entry. A URI under the wrong element
+    # does not count, and the SP cannot add an algorithm of its own.
+    fallback = pref.resolve([crypto.DigestMethod.SHA384.uri, "urn:evil"], [sha.RSA_SHA384.uri])
+    assert fallback.signature == sha.RSA_SHA512 and fallback.digest == crypto.DigestMethod.SHA512
+    assert crypto.SigningPreference().resolve().signature is None
+
+
+def test_weak_algorithms_are_not_representable():
+    assert crypto.SignatureMethod.from_uri("http://www.w3.org/2000/09/xmldsig#rsa-sha1") is None
+    assert crypto.DigestMethod.from_uri("http://www.w3.org/2000/09/xmldsig#sha1") is None
+    uri = crypto.SignatureMethod.ECDSA_SHA256.uri
+    assert crypto.SignatureMethod.from_uri(uri) == crypto.SignatureMethod.ECDSA_SHA256
+
+
+def test_session_lifetime_limits_how_long_a_session_is_reused(rsa_keypair):
+    short = idp.ReleasePolicy(default=idp.PolicyEntry(session_lifetime_seconds=60))
+    assert short.session_lifetime_seconds(SP) == 60
+    with pytest.raises(pygamlastan.SamlPolicyError):
+        idp.PolicyEntry(session_lifetime_seconds=-1)
+
+    engine, ref = _engine(rsa_keypair, policy=short)
+    session = idp.EstablishedSession(
+        "alice",
+        idp.AuthnMethodRef.broker(ref),
+        datetime.now(timezone.utc) - timedelta(minutes=5),
+        "sess-1",
+    )
+    assert engine.check_request(_params(), session).kind == "authenticate"
+    longer = _engine(rsa_keypair)[0]  # defaults to the one-hour assertion lifetime
+    assert longer.check_request(_params(), session).kind == "reuse_session"
+
+
+def test_an_empty_broker_defers_exact_requests_and_denies_the_rest(rsa_keypair):
+    assert idp.AuthnBroker().is_empty()
+    engine, _ = _engine(rsa_keypair, empty_broker=True)
+
+    exact = engine.check_request(_params(_request_xml(context=_context("exact", "urn:example:acr"))))
+    assert exact.kind == "authenticate" and exact.methods == []
+
+    minimum = engine.check_request(
+        _params(_request_xml(context=_context("minimum", "urn:example:acr")))
+    )
+    assert minimum.kind == "deny" and minimum.denial == idp.Denial.NO_AUTHN_CONTEXT
+
+    # An inline method whose class ref matches literally can then be issued.
+    subject = idp.AuthenticatedSubject("alice", [], idp.AuthnMethodRef.inline("urn:example:acr"))
+    outcome = engine.create_authn_response(
+        _params(_request_xml(context=_context("exact", "urn:example:acr"))), subject
+    )
+    assert outcome.is_issued
+
+
+def test_exact_level_matching_is_opt_in():
+    ppt = core.AUTHN_CONTEXT_PASSWORD_PROTECTED_TRANSPORT
+    requested = xml.parse_authn_request(
+        _request_xml(context=_context("exact", ppt))
+    ).requested_authn_context
+
+    def broker(flag):
+        b = idp.AuthnBroker(allow_exact_level_matching=flag)
+        b.add(core.AUTHN_CONTEXT_PASSWORD, "/login/password", 1)
+        b.add(ppt, "/login/ppt", 1)
+        return b
+
+    assert [m.class_ref for m in broker(False).pick(requested)] == [ppt]
+    assert sorted(m.class_ref for m in broker(True).pick(requested)) == sorted(
+        [core.AUTHN_CONTEXT_PASSWORD, ppt]
+    )
+    assert not broker(False).is_empty()
