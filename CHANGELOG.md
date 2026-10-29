@@ -10,13 +10,16 @@ surfacing it correctly to Python.
 
 ## [Unreleased]
 
-Tracks gamlastan `main` (PR #43, IdP orchestrator), which is not yet released;
-`Cargo.toml` carries a git `[patch.crates-io]` until it is.
+Tracks gamlastan `main` (the IdP orchestrator from PR #43 and the 0.10.0
+dependency stack), which is not yet released; `Cargo.toml` carries a git
+`[patch.crates-io]` until 0.10.0 is on crates.io.
 
 ### Changed
 
-- Bumped `gamlastan` to 0.9.1 (bergshamra 0.9.2) and `kryptering` to 0.6.0,
-  which gamlastan 0.9.1 requires.
+- Bumped `gamlastan` to 0.10.0 (bergshamra 0.11, uppsala 0.12) and `kryptering`
+  to 0.7.0, which gamlastan 0.10.0 requires. The kryptering feature list gains
+  `rustcrypto`, mirroring gamlastan. No source changes were needed for the
+  kryptering 0.7 API.
 - **Breaking:** the Python `IdentityStore` protocol passed as
   `IdentDb(store=...)` is now record-shaped (one record per user/NameID):
   `for_user`, `user_for`, `get_or_insert_durable`, `insert`, `replace`,

@@ -12,18 +12,21 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.29.2", features = ["extension-module", "abi3-py310", "chrono"] }
-# gamlastan 0.9.1 (crates.io) pulls the bergshamra 0.9.2 / kryptering 0.6.0
-# XML-security stack. For local co-development against the workspace checkout,
-# add a `[patch.crates-io]` gamlastan path override rather than editing this pin.
-gamlastan = "0.9.1"
+# gamlastan 0.10.0 pulls the bergshamra 0.11 / uppsala 0.12 / kryptering 0.7
+# XML-security stack. Until 0.10.0 is on crates.io this resolves through the
+# `[patch.crates-io]` block at the end of this file. For local co-development
+# against a workspace checkout, a gitignored `.cargo/config.toml` with a path
+# override avoids editing this pin.
+gamlastan = "0.10.0"
 # Mirror gamlastan's kryptering features so the shared `Signer` /
 # `Pkcs11Signer` types resolve to a single instance with no version or feature
 # drift across the FFI boundary.
-kryptering = { version = "0.6.0", default-features = false, features = ["legacy", "post-quantum", "pkcs11"] }
+kryptering = { version = "0.7.0", default-features = false, features = ["rustcrypto", "legacy", "post-quantum", "pkcs11"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 base64 = "0.22"
 
-# gamlastan's IdP orchestrator and record-shaped `IdentityStore` are merged to
-# main but unreleased. Drop this block and bump the pin once a release has them.
+# TEMPORARY: gamlastan's IdP orchestrator, record-shaped `IdentityStore` and the
+# 0.10.0 dependency stack are merged to main but unreleased. Delete this block
+# and run `cargo update -p gamlastan` once 0.10.0 is on crates.io.
 [patch.crates-io]
-gamlastan = { git = "https://github.com/kushaldas/gamlastan", rev = "da6ac5b" }
+gamlastan = { git = "https://github.com/kushaldas/gamlastan", rev = "e1c4680" }
