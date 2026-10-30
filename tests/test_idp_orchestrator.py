@@ -498,3 +498,64 @@ def test_a_denial_stores_no_assertion(rsa_keypair):
     policy = f'<samlp:NameIDPolicy Format="{long_format}" AllowCreate="true"/>'
     outcome = engine.create_authn_response(_params(_request_xml(policy=policy)), _subject(ref))
     assert not outcome.is_issued and store.stored == []
+
+
+# --------------------------------------------------------------------------- #
+# What the engine does not verify, recorded so it is not a surprise
+# --------------------------------------------------------------------------- #
+
+def test_an_inline_class_ref_is_the_applications_claim_and_is_never_verified(rsa_keypair):
+    # For Comparison="exact" an inline class ref satisfies the request by matching
+    # the request itself. An application that builds it from request data signs a
+    # claim that was never established, so the docs say never to do that.
+    strong = core.AUTHN_CONTEXT_PASSWORD_PROTECTED_TRANSPORT
+    ctx = _context("exact", strong)
+    echoed = idp.AuthenticatedSubject("alice", [], idp.AuthnMethodRef.inline(strong))
+
+    engine, _ = _engine(rsa_keypair, empty_broker=True)
+    outcome = engine.create_authn_response(_params(_request_xml(context=ctx)), echoed)
+    assert outcome.is_issued and strong in outcome.xml
+
+    # With a broker that registers only a weaker method, check_request refuses...
+    engine, _ = _engine(rsa_keypair)
+    assert engine.check_request(_params(_request_xml(context=ctx))).kind == "deny"
+    # ...but create_authn_response alone does not stop an application that skips it
+    # and echoes the request.
+    assert engine.create_authn_response(_params(_request_xml(context=ctx)), echoed).is_issued
+
+
+def test_authn_method_ref_describes_itself():
+    inline = idp.AuthnMethodRef.inline("urn:example:acr", "https://upstream.example")
+    assert (inline.kind, inline.class_ref, inline.reference) == ("inline", "urn:example:acr", None)
+    assert inline.authn_authority == "https://upstream.example"
+    assert "inline" in repr(inline) and "urn:example:acr" in repr(inline)
+
+    broker = idp.AuthnMethodRef.broker("ref-1")
+    assert (broker.kind, broker.reference, broker.class_ref) == ("broker", "ref-1", None)
+    assert "ref-1" in repr(broker)
+
+
+def test_a_broker_methods_authority_reaches_the_signed_assertion(rsa_keypair):
+    priv, _cert, cert_b64 = rsa_keypair
+    broker = idp.AuthnBroker()
+    ref = broker.add(core.AUTHN_CONTEXT_PASSWORD, "/login", 1, "https://upstream.example/idp")
+    engine = idp.ResponseEngine(
+        IDP, idp.ReleasePolicy(), idp.IdentDb(IDP), broker,
+        crypto.SamlSigner(crypto.KeysManager.build_idp(priv)), cert_b64,
+    )
+    outcome = engine.create_authn_response(_params(), _subject(ref))
+    assert "AuthenticatingAuthority" in outcome.xml
+    assert "https://upstream.example/idp" in outcome.xml
+
+
+def test_an_encrypted_requested_subject_is_reported_but_not_readable():
+    encrypted = (
+        "<saml:Subject><saml:EncryptedID>"
+        '<xenc:EncryptedData xmlns:xenc="http://www.w3.org/2001/04/xmlenc#" '
+        'Type="http://www.w3.org/2001/04/xmlenc#Element">'
+        "<xenc:CipherData><xenc:CipherValue>AAAA</xenc:CipherValue></xenc:CipherData>"
+        "</xenc:EncryptedData></saml:EncryptedID></saml:Subject>"
+    )
+    req = xml.parse_authn_request(_request_xml(subject=encrypted))
+    assert req.has_requested_subject()  # the SP did name a principal...
+    assert req.requested_subject_name_id() is None  # ...which we cannot read

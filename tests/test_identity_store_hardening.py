@@ -149,3 +149,127 @@ def test_an_honest_backend_is_unaffected():
     assert db.find_local_id(mine) == "alice"
     # A transient NameID has no slot to verify and is never stored.
     assert db.transient_nameid("alice", SP).format == TRANSIENT
+
+
+# --------------------------------------------------------------------------- #
+# The for_user fallback: a minimal backend defines neither `find` nor
+# `find_durable`, so the binding filters `for_user` itself. The ownership check
+# must not depend on whether those optional methods exist.
+# --------------------------------------------------------------------------- #
+
+class LeakyForUser:
+    """No `find` / `find_durable` (both optional), and a `for_user` that
+    forgot its `WHERE user_id = ...`: it returns everyone's records."""
+
+    def __init__(self):
+        self.rec = []
+
+    def for_user(self, user_id):
+        return [n for _u, n in self.rec]  # BUG: ignores user_id
+
+    def user_for(self, value):
+        return next((u for u, n in self.rec if n.value == value), None)
+
+    def insert(self, user_id, name_id):
+        self.rec.append((user_id, name_id))
+
+    def replace(self, user_id, name_id):
+        pass
+
+    def get_or_insert_durable(self, user_id, candidate):
+        self.insert(user_id, candidate)
+        return candidate
+
+    def remove(self, value):
+        pass
+
+    def remove_all(self, user_id):
+        pass
+
+
+def _leaky_db_with_victim():
+    store = LeakyForUser()
+    db = idp.IdentDb(IDP, store=store)
+    # Written through the (correct) insert path, as a real victim's would be.
+    victim = core.NameId("victim-value", format=core.NAMEID_PERSISTENT, sp_name_qualifier=SP, name_qualifier=IDP)
+    store.insert("victim", victim)
+    return store, db, victim
+
+
+def test_a_for_user_that_forgot_the_user_cannot_hand_over_a_persistent_nameid():
+    _, db, victim = _leaky_db_with_victim()
+    with pytest.raises(pygamlastan.SamlStoreError, match="does not attribute"):
+        db.persistent_nameid("mallory", SP)
+
+
+def test_a_for_user_that_forgot_the_user_cannot_leak_through_find_nameid():
+    _, db, _ = _leaky_db_with_victim()
+    with pytest.raises(pygamlastan.SamlStoreError, match="does not attribute"):
+        db.find_nameid("mallory")
+
+
+def test_a_for_user_that_forgot_the_user_cannot_leak_through_name_ids_for():
+    _, db, _ = _leaky_db_with_victim()
+    with pytest.raises(pygamlastan.SamlStoreError, match="does not attribute"):
+        db.name_ids_for("mallory")
+    # The owner still gets their own record.
+    assert [n.value for n in db.name_ids_for("victim")] == ["victim-value"]
+
+
+def test_the_conformance_suite_also_catches_a_for_user_that_forgot_the_user():
+    with pytest.raises(pygamlastan.StoreConformanceError) as caught:
+        idp.check_store_conformance(LeakyForUser)
+    assert caught.value.check  # some check named the violation
+
+
+# --------------------------------------------------------------------------- #
+# The EPTID cache is trusted, but its values must have the right shape
+# --------------------------------------------------------------------------- #
+
+class Cache:
+    def __init__(self):
+        self.data = {}
+
+    def get(self, key):
+        return self.data.get(key)
+
+    def set(self, key, value):
+        self.data[key] = value
+
+    def remove(self, key):
+        self.data.pop(key, None)
+
+
+def test_an_eptid_cache_value_of_the_wrong_shape_is_refused():
+    cache = Cache()
+    eptid = idp.Eptid("secret", store=cache)
+    good = eptid.get(IDP, SP, "alice")
+    key = f"eptid:{IDP}__{SP}__alice"
+    assert eptid.get(IDP, SP, "alice") == good  # an honest cache is unaffected
+
+    for poisoned in ("ATTACKERCONTROLLEDVALUE", f"{IDP}!{OTHER_SP}!abc", f"{IDP}!{SP}!"):
+        cache.data[key] = poisoned
+        with pytest.raises(pygamlastan.SamlStoreError, match="shape of an identifier"):
+            eptid.get(IDP, SP, "alice")
+        with pytest.raises(pygamlastan.SamlStoreError, match="shape of an identifier"):
+            eptid.name_id(IDP, SP, "alice")
+        with pytest.raises(pygamlastan.SamlStoreError, match="shape of an identifier"):
+            eptid.attribute(IDP, SP, "alice")
+
+
+def test_the_md5_eptid_digest_warns_that_it_is_in_use():
+    with pytest.warns(UserWarning, match="MD5"):
+        idp.Eptid("secret", digest="pysaml2-md5", allow_legacy_md5=True)
+
+
+# --------------------------------------------------------------------------- #
+# Policy lifetimes cannot panic the constructor
+# --------------------------------------------------------------------------- #
+
+def test_out_of_range_lifetimes_are_policy_errors_not_panics():
+    for kwarg in ("session_lifetime_seconds", "lifetime_seconds"):
+        for huge in (2**62, 10**18, 2**63 - 1):
+            with pytest.raises(pygamlastan.SamlPolicyError, match="out of range"):
+                idp.PolicyEntry(**{kwarg: huge})
+    # The largest representable value is still accepted.
+    idp.PolicyEntry(session_lifetime_seconds=9_223_372_036_854_775)

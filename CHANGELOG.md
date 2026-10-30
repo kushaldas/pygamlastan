@@ -35,6 +35,28 @@ dependency stack), which is not yet released; `Cargo.toml` carries a git
 
 ### Security
 
+- The ownership check on records from a Python `IdentityStore` no longer depends
+  on the optional methods. Without `find` / `find_durable` the binding filters
+  `for_user` itself, and that path returned its result unchecked, so the
+  simplest backend (the one most likely to have a lookup that forgot the user)
+  had the least protection. Now the record(s) it selects are verified with
+  `user_for`, and `IdentDb.name_ids_for` checks every record it returns. This
+  adds one `user_for` call per record selected.
+- A value read from the `Eptid` cache must have the shape
+  `<idp>!<sp>!<opaque>`, otherwise `SamlStoreError`: a cache shared with another
+  IdP or tenant, a wrong key or a flushed cache could otherwise issue a
+  permanently wrong identifier. A forged value of the right shape is still not
+  detected, so the cache must be private to this IdP and must not evict.
+- `Eptid(digest="pysaml2-md5", allow_legacy_md5=True)` now emits a
+  `UserWarning` that MD5 is in use; before, the opt-in was silent.
+- `PolicyEntry(lifetime_seconds=..., session_lifetime_seconds=...)` raise
+  `SamlPolicyError` for a value outside the range of a duration (above about
+  9.2e15 seconds) instead of panicking.
+- Documented that `AuthnMethodRef.inline` is never verified by the engine (for
+  an `exact` request it satisfies the request by matching the request, so it
+  must not be built from request data), and that the engine's policy, identity
+  database, broker and signer must not be mutated from inside a store callback.
+
 - `SamlStoreError` is no longer a `SamlIdentError`. Code written before store
   errors existed wraps identity calls in `except SamlIdentError` to mean "no such
   principal"; with the old hierarchy that handler would have turned a database

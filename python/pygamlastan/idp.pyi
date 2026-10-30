@@ -41,8 +41,11 @@ class IdentityStore(Protocol):
     The binding does not trust what the backend returns: a record from
     ``find_durable`` or ``get_or_insert_durable`` must be the durable slot asked
     for, and ``user_for(record.value)`` must name the same user, otherwise
-    ``SamlStoreError`` is raised and the record is not used. So ``user_for`` must
-    see the backend's own writes (read-your-writes), not a lagging replica.
+    ``SamlStoreError`` is raised and the record is not used. This holds whether
+    or not you define the optional ``find`` / ``find_durable``: without them the
+    binding filters ``for_user`` and checks the record(s) it selects. So
+    ``user_for`` must see the backend's own writes (read-your-writes), not a
+    lagging replica. ``IdentDb.name_ids_for`` checks every record it returns.
 
     Raise ``NameIdValueTaken`` / ``NameIdDurableExists`` for a conflict. Any
     other exception is a backend failure and surfaces as ``SamlStoreError``:
@@ -68,7 +71,12 @@ class KeyValueStore(Protocol):
     secret or digest cannot change what an SP already knows. The keys are
     ``eptid:<idp>__<sp>__<user>`` and the values ``idp!sp!hash`` strings. Any
     exception is a backend failure and surfaces as ``SamlStoreError``; never
-    return ``None`` for a backend that could not answer."""
+    return ``None`` for a backend that could not answer.
+
+    The cache must be private to this IdP and this secret (never shared between
+    tenants) and must not evict issued values. A value that does not have the
+    shape ``<idp>!<sp>!<opaque>`` is refused with ``SamlStoreError``; a forged
+    value of the right shape is not detected."""
     def get(self, key: str) -> str | None: ...
     def set(self, key: str, value: str) -> None: ...
     def remove(self, key: str) -> None: ...
@@ -263,7 +271,11 @@ class AuthnMethodRef:
     """Which authentication method ran: a class ref given directly, or a method
     registered in the ``AuthnBroker``."""
     @staticmethod
-    def inline(class_ref: str, authn_authority: str | None = ...) -> AuthnMethodRef: ...
+    def inline(class_ref: str, authn_authority: str | None = ...) -> AuthnMethodRef:
+        """The engine verifies nothing about an inline class ref: for
+        ``Comparison="exact"`` it satisfies the request by matching the request.
+        Never build it from request data."""
+        ...
     @staticmethod
     def broker(reference: str) -> AuthnMethodRef: ...
     @property

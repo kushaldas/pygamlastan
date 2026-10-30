@@ -118,6 +118,7 @@ impl Eptid {
     #[new]
     #[pyo3(signature = (secret, digest="sha256", allow_legacy_md5=false, store=None))]
     fn new(
+        py: Python<'_>,
         secret: String,
         digest: &str,
         allow_legacy_md5: bool,
@@ -132,6 +133,13 @@ impl Eptid {
                 )))
             }
         };
+        if digest == "pysaml2-md5" && allow_legacy_md5 {
+            crate::convert::warn(
+                py,
+                "Eptid(digest=\"pysaml2-md5\") derives identifiers with MD5. It exists only to \
+                 reproduce stock pysaml2 values during a migration; plan to retire it.",
+            );
+        }
         let backend = match store {
             Some(obj) => KvBackend::Py(PyKeyValueStore { obj }),
             None => KvBackend::InMemory(InMemoryKeyValueStore::new()),
@@ -141,13 +149,31 @@ impl Eptid {
         Ok(Eptid { inner })
     }
     /// The opaque persistent identifier string for (idp, sp, user).
+    ///
+    /// A value from the cache must have the shape gamlastan derives,
+    /// ``<idp>!<sp>!<opaque>``; anything else raises ``SamlStoreError``. That
+    /// catches the realistic faults (a cache shared with another IdP or tenant,
+    /// a key written by the wrong code, a restored or flushed cache). It cannot
+    /// catch a deliberately forged value of the right shape: the cache must be
+    /// private to this IdP and this secret.
     fn get(&self, idp_entity_id: &str, sp_entity_id: &str, user_id: &str) -> PyResult<String> {
-        self.inner
+        let value = self
+            .inner
             .get(idp_entity_id, sp_entity_id, user_id)
-            .map_err(store_err)
+            .map_err(store_err)?;
+        let prefix = format!("{idp_entity_id}!{sp_entity_id}!");
+        if value.len() <= prefix.len() || !value.starts_with(&prefix) {
+            return Err(store_err(format!(
+                "the EPTID cache returned a value that does not have the shape of an \
+                 identifier issued for this IdP and SP ({prefix}<opaque>); refusing to use \
+                 it. Is the cache shared with another IdP or tenant?"
+            )));
+        }
+        Ok(value)
     }
-    /// The identifier as a persistent NameID.
+    /// The identifier as a persistent NameID (shape-checked like ``get``).
     fn name_id(&self, idp_entity_id: &str, sp_entity_id: &str, user_id: &str) -> PyResult<NameId> {
+        self.get(idp_entity_id, sp_entity_id, user_id)?;
         self.inner
             .name_id(idp_entity_id, sp_entity_id, user_id)
             .map(NameId::wrap)
@@ -160,6 +186,7 @@ impl Eptid {
         sp_entity_id: &str,
         user_id: &str,
     ) -> PyResult<Attribute> {
+        self.get(idp_entity_id, sp_entity_id, user_id)?;
         self.inner
             .attribute(idp_entity_id, sp_entity_id, user_id)
             .map(Attribute::wrap)
@@ -386,6 +413,22 @@ impl PyIdentityStore {
                  {nq:?}); refusing to use it"
             )));
         }
+        self.verify_attributed_to(user_id, record, call)
+    }
+
+    /// The store must attribute `record`'s value to `user_id`. This is the check
+    /// that catches a lookup which forgot the user: a `for_user` without its
+    /// `WHERE user_id`, a wrong index, a stale cache. It applies to every record
+    /// handed back for a user, including the ones the binding filters out of
+    /// `for_user` itself when the backend defines no pushed-down lookup (the path
+    /// a minimal backend takes), so the control does not depend on whether an
+    /// optional method happens to exist.
+    fn verify_attributed_to(
+        &self,
+        user_id: &str,
+        record: &GNameId,
+        call: &str,
+    ) -> Result<(), StoreError> {
         match self.user_for(&record.value)? {
             Some(owner) if owner == user_id => Ok(()),
             _ => Err(StoreError::new(format!(
@@ -451,24 +494,24 @@ impl IdentityStore for PyIdentityStore {
                              filter; refusing to use it",
                         ));
                     }
-                    match self.user_for(&record.value)? {
-                        Some(owner) if owner == user_id => {}
-                        _ => {
-                            return Err(StoreError::new(
-                                "the backend's find returned a NameID that the store does not \
-                                 attribute to this user; refusing to use it",
-                            ))
-                        }
-                    }
+                    self.verify_attributed_to(user_id, record, "find")?;
                 }
                 Ok(records)
             }
-            // No pushed-down query on the backend: filter `for_user`.
-            None => Ok(self
-                .for_user(user_id)?
-                .into_iter()
-                .filter(|n| filter.matches(n))
-                .collect()),
+            // No pushed-down query on the backend: filter `for_user`, and verify the
+            // records that survive (not every row `for_user` returned: the user may
+            // hold one NameID per SP, and this runs on the login path).
+            None => {
+                let found: Vec<GNameId> = self
+                    .for_user(user_id)?
+                    .into_iter()
+                    .filter(|n| filter.matches(n))
+                    .collect();
+                for record in &found {
+                    self.verify_attributed_to(user_id, record, "for_user")?;
+                }
+                Ok(found)
+            }
         }
     }
 
@@ -507,11 +550,18 @@ impl IdentityStore for PyIdentityStore {
                 }
                 Ok(found)
             }
-            // No pushed-down lookup on the backend: filter `for_user`.
-            None => Ok(self
-                .for_user(user_id)?
-                .into_iter()
-                .find(|n| is_durable_match(n, sp_name_qualifier, name_qualifier, format))),
+            // No pushed-down lookup on the backend: filter `for_user`, and verify the
+            // record that is picked.
+            None => {
+                let found = self
+                    .for_user(user_id)?
+                    .into_iter()
+                    .find(|n| is_durable_match(n, sp_name_qualifier, name_qualifier, format));
+                if let Some(record) = &found {
+                    self.verify_attributed_to(user_id, record, "for_user")?;
+                }
+                Ok(found)
+            }
         })
     }
 
@@ -744,11 +794,24 @@ impl IdentDb {
             .map_err(store_err)
     }
     /// All NameIDs stored for a local user.
+    ///
+    /// Each record is checked to be attributed to the user by the store
+    /// (``user_for``), so a ``for_user`` that forgot its filter raises
+    /// ``SamlStoreError`` instead of listing another user's NameIDs.
     fn name_ids_for(&self, user_id: &str) -> PyResult<Vec<NameId>> {
-        self.inner
-            .name_ids_for(user_id)
-            .map(|v| v.into_iter().map(NameId::wrap).collect())
-            .map_err(store_err)
+        let records = self.inner.name_ids_for(user_id).map_err(store_err)?;
+        for record in &records {
+            match self.inner.find_local_id(record).map_err(store_err)? {
+                Some(owner) if owner == user_id => {}
+                _ => {
+                    return Err(store_err(
+                        "the backend's for_user returned a NameID that the store does not \
+                         attribute to this user; refusing to use it",
+                    ))
+                }
+            }
+        }
+        Ok(records.into_iter().map(NameId::wrap).collect())
     }
     /// An existing non-transient NameID matching (user, SP, NameQualifier).
     #[pyo3(signature = (user_id, sp_name_qualifier=None, name_qualifier=None))]
@@ -1125,7 +1188,12 @@ impl PolicyEntry {
                     "session_lifetime_seconds must be non-negative, got {secs}"
                 )));
             }
-            entry = entry.with_session_lifetime(TimeDelta::seconds(secs));
+            let lifetime = TimeDelta::try_seconds(secs).ok_or_else(|| {
+                policy_err(format!(
+                    "session_lifetime_seconds {secs} is out of range for a duration"
+                ))
+            })?;
+            entry = entry.with_session_lifetime(lifetime);
         }
         if let Some(formats) = supported_nameid_formats {
             entry = entry.with_supported_nameid_formats(formats);
@@ -1149,7 +1217,12 @@ impl PolicyEntry {
                      assertion lifetime would mint already-expired assertions"
                 )));
             }
-            entry = entry.with_lifetime(TimeDelta::seconds(secs));
+            let lifetime = TimeDelta::try_seconds(secs).ok_or_else(|| {
+                policy_err(format!(
+                    "lifetime_seconds {secs} is out of range for a duration"
+                ))
+            })?;
+            entry = entry.with_lifetime(lifetime);
         }
         if let Some(s) = sign {
             entry = entry.with_sign(s.inner);

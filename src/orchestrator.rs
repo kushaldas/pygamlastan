@@ -136,6 +136,15 @@ pub struct AuthnMethodRef {
 #[pymethods]
 impl AuthnMethodRef {
     /// A class ref supplied directly, with no broker registration.
+    ///
+    /// **The engine verifies nothing about it.** For ``Comparison="exact"`` an
+    /// inline class ref satisfies the request by *matching the request*, so an
+    /// application that builds it from request data signs an assertion claiming
+    /// an authentication context that was never established. Build it from what
+    /// your login flow actually did (a constant, or the upstream IdP's reported
+    /// context in a proxy), never from the ``AuthnRequest``. A registered
+    /// ``AuthnMethodRef.broker`` is held to the broker's registration, but is
+    /// still your claim about which method ran.
     #[staticmethod]
     #[pyo3(signature = (class_ref, authn_authority=None))]
     fn inline(class_ref: String, authn_authority: Option<String>) -> Self {
@@ -555,7 +564,10 @@ impl ResponseOutcome {
 /// exception is a backend failure (`SamlStoreError`), never "no such assertion".
 ///
 /// The engine itself only ever calls `store_assertion`; the other three serve the
-/// back-channel query responders and the application's own logout code.
+/// back-channel query responders and the application's own logout code. Nothing in
+/// pygamlastan calls them yet, so their results are not verified; whoever binds a
+/// query responder on top of this adapter must check that an assertion returned
+/// for a subject is that subject's, as `PyIdentityStore` does for NameIDs.
 struct PyAssertionStore {
     obj: Py<PyAny>,
 }
@@ -640,6 +652,10 @@ enum AssertionSource {
 ///
 /// The engine holds references to the objects it is given, so later changes to
 /// them (a policy entry added, a method registered) are seen by the next call.
+/// Make those changes between calls: the policy, identity database, broker and
+/// signer are borrowed for the whole of a call, including every callback into
+/// your stores, so mutating one from inside a store callback raises
+/// ``RuntimeError: Already borrowed`` (reported as a ``SamlStoreError``).
 ///
 /// What the engine does not do, and the application must: enforce `Scoping`
 /// (`ProxyCount`, `IDPList`) if it is a proxy, and compare a requested

@@ -16,7 +16,8 @@ eduPersonTargetedID
    Derives stable, per-SP opaque identifiers from a server-side ``secret``. The
    same user gets a consistent id at one SP but an unlinkable id at another.
 
-   ``digest`` is ``"sha256"`` (default) or ``"pysaml2-md5"``. The latter
+   ``digest`` is ``"sha256"`` (default) or ``"pysaml2-md5"`` (which emits a
+   ``UserWarning``, since MD5 is in use). The latter
    reproduces stock pysaml2's ``idp!sp!md5(user+sp+secret)`` values, so SPs that
    key accounts on the EPTID keep seeing the same value after a migration. It
    is rejected (``SamlIdentError``) unless ``allow_legacy_md5=True``; use it only
@@ -36,7 +37,12 @@ eduPersonTargetedID
       :class:`pygamlastan.SamlStoreError`; never return ``None`` for a backend
       that could not answer, because a recompute could issue a different value
       than the one already issued. The store is trusted: what it returns is the
-      identifier issued.
+      identifier issued, after one check: it must have the shape
+      ``<idp>!<sp>!<opaque>``, otherwise :class:`pygamlastan.SamlStoreError`. That
+      catches a cache shared with another IdP or tenant, a key written by the
+      wrong code, or a restored or flushed cache; it cannot catch a forged value
+      of the right shape. The cache must be private to this IdP and this secret,
+      and must not evict issued values (no TTL).
 
       Keys are ``eptid:<idp>__<sp>__<user>`` and values are ``idp!sp!hash``
       strings, the same shape pysaml2 stores. pysaml2 keys its cache
@@ -210,8 +216,14 @@ Identity database
    asked for, and ``user_for(record.value)`` must name the same user; otherwise
    :class:`pygamlastan.SamlStoreError` is raised and the record is not used. A
    query that forgot the user in its filter, a wrong index or a stale cache would
-   otherwise hand one user another user's persistent NameID. So ``user_for`` must
-   see the backend's own writes (read-your-writes), not a lagging replica.
+   otherwise hand one user another user's persistent NameID.
+
+   This holds whether or not you define the optional ``find`` and
+   ``find_durable``: without them the binding filters ``for_user`` itself and
+   checks the record(s) it selects, at the cost of one ``user_for`` call per
+   record. ``IdentDb.name_ids_for`` checks every record it returns. So
+   ``user_for`` must see the backend's own writes (read-your-writes), not a
+   lagging replica.
 
    Raise :class:`pygamlastan.NameIdValueTaken` or
    :class:`pygamlastan.NameIdDurableExists` for a conflict. Any other exception
@@ -414,7 +426,11 @@ releases attributes and signs the response.
    find the assertions it issued. ``release="policy"`` filters attributes through the
    policy; ``release="pass_through"`` releases what the application supplied,
    for a proxy whose attributes were filtered upstream. The engine holds
-   references, so later changes to those objects are seen by the next call.
+   references, so later changes to those objects are seen by the next call. Make
+   them between calls: the policy, identity database, broker and signer are
+   borrowed for the whole of a call, including every callback into your stores,
+   so mutating one from inside a store callback raises ``RuntimeError: Already
+   borrowed`` (reported as :class:`pygamlastan.SamlStoreError`).
 
    .. py:method:: check_request(params: ResponseParams, session: EstablishedSession | None = None) -> Disposition
 
@@ -456,7 +472,12 @@ releases attributes and signs the response.
 .. py:class:: AuthnMethodRef
 
    ``AuthnMethodRef.inline(class_ref, authn_authority=None)`` gives a class ref
-   directly (a proxy, or a login flow outside the broker);
+   directly (a proxy, or a login flow outside the broker). **The engine verifies
+   nothing about it**: for ``Comparison="exact"`` an inline class ref satisfies
+   the request by matching the request, so an application that builds it from
+   request data signs an assertion claiming a context that was never
+   established. Build it from what your login flow did (a constant, or the
+   upstream IdP's reported context in a proxy), never from the ``AuthnRequest``;
    ``AuthnMethodRef.broker(reference)`` names a method registered with
    :meth:`AuthnBroker.add`. A reference the broker does not know is an error,
    never a class ref taken from the string.
