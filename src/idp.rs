@@ -19,6 +19,7 @@ use gamlastan::idp::ident::{
 use gamlastan::idp::policy as gpol;
 use gamlastan::metadata::types::sp::RequestedAttribute;
 
+use crate::attribute_map::AttributeConverterSet;
 use crate::convert::new_submodule;
 use crate::core::{Assertion, Attribute, NameId, NameIdPolicy, RequestedAuthnContext};
 use crate::errors::{ident_err, policy_err, store_err, NameIdDurableExists, NameIdValueTaken};
@@ -1202,13 +1203,21 @@ pub struct ReleasePolicy {
 
 #[pymethods]
 impl ReleasePolicy {
+    /// ``converters`` is an ``attribute_map.AttributeConverterSet`` used to
+    /// resolve attribute names to local names when matching entity categories,
+    /// requested attributes and restrictions. By default the shipped maps are
+    /// used; pass your own (copied in) for a deployment whose maps differ, such
+    /// as one loaded from a pysaml2 ``attribute_map_dir``.
     #[new]
-    #[pyo3(signature = (default=None))]
-    fn new(default: Option<PolicyEntry>) -> Self {
-        let inner = match default {
+    #[pyo3(signature = (default=None, converters=None))]
+    fn new(default: Option<PolicyEntry>, converters: Option<&AttributeConverterSet>) -> Self {
+        let mut inner = match default {
             Some(entry) => gpol::ReleasePolicy::with_default(entry.inner),
             None => gpol::ReleasePolicy::new(),
         };
+        if let Some(set) = converters {
+            inner = inner.with_converters(set.inner.clone());
+        }
         ReleasePolicy { inner }
     }
     /// Add or replace the entry for an SP entity id (or `"default"`).

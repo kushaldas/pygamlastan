@@ -296,7 +296,12 @@ values - the IdP releases to each SP. Per-knob resolution is: the SP-specific
 entry, then the SP's registration-authority entry (when recorded), then the
 ``"default"`` entry, then a built-in default.
 
-.. py:class:: ReleasePolicy(default: PolicyEntry | None = None)
+.. py:class:: ReleasePolicy(default: PolicyEntry | None = None, converters: pygamlastan.attribute_map.AttributeConverterSet | None = None)
+
+   ``converters`` resolves attribute names to local names when matching entity
+   categories, requested attributes and restrictions. The shipped maps are used
+   by default; pass your own (copied in) for a deployment whose maps differ, such
+   as one loaded from a pysaml2 ``attribute_map_dir``.
 
    .. py:method:: insert(sp_entity_id: str, entry: PolicyEntry) -> None
 

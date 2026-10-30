@@ -95,6 +95,14 @@ dependency stack), which is not yet released; `Cargo.toml` carries a git
 - `Eptid(secret, digest="pysaml2-md5", allow_legacy_md5=True)` reproduces stock
   pysaml2 MD5 EPTID values for migrations; the default stays SHA-256 and is not
   byte-compatible with pysaml2.
+- `AttributeConverter.from_directions(name_format, fro, to)`,
+  `add_wire_to_local` and `add_local_to_wire`, for loading a pysaml2 attribute
+  map, whose inbound and outbound directions differ (eduID's deployed
+  `saml_uri` is 83 inbound and 99 outbound entries); `add_mapping` mirrors both
+  directions and cannot. `AttributeConverterSet(converters,
+  allow_unknown_attributes=False)` builds a set from your own converters, and
+  `ReleasePolicy(converters=...)` makes the release policy resolve names through
+  it instead of the shipped maps.
 - `ResponseEngine(assertions=...)` accepts any object implementing the new
   `AssertionStore` protocol (`store_assertion`, `get_assertion`,
   `assertions_for_subject`, `remove_assertion`), so issued assertions can be

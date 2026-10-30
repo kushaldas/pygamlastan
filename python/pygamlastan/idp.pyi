@@ -3,6 +3,7 @@ from collections.abc import Callable, Iterable
 from typing import Literal, Protocol
 
 from .core import Assertion, Attribute, NameId, NameIdPolicy, RequestedAuthnContext
+from .attribute_map import AttributeConverterSet
 from .crypto import SamlSigner, SigningPreference
 from .metadata import EntityDescriptor
 from .profiles import ProcessedAuthnRequest
@@ -217,7 +218,11 @@ class PolicyEntry:
     ) -> None: ...
 
 class ReleasePolicy:
-    def __init__(self, default: PolicyEntry | None = ...) -> None: ...
+    def __init__(
+        self,
+        default: PolicyEntry | None = ...,
+        converters: AttributeConverterSet | None = ...,
+    ) -> None: ...
     def insert(self, sp_entity_id: str, entry: PolicyEntry) -> None: ...
     def set_registration_authority(
         self, sp_entity_id: str, registration_authority: str
