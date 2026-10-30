@@ -277,3 +277,57 @@ def test_a_find_that_returns_another_users_records_is_refused():
     db.persistent_nameid("victim", SP_A)
     with pytest.raises(pygamlastan.SamlStoreError, match="does not attribute"):
         db.find_nameid("mallory", sp_name_qualifier=SP_A)
+
+
+# --------------------------------------------------------------------------- #
+# Eptid with a persistent cache
+# --------------------------------------------------------------------------- #
+
+EPTID_IDP = "https://idp.example.org/idp"
+EPTID_SP = "https://sp.example.org/sp"
+
+
+class DictCache:
+    def __init__(self):
+        self.data = {}
+        self.calls = []
+
+    def get(self, key):
+        self.calls.append(("get", key))
+        return self.data.get(key)
+
+    def set(self, key, value):
+        self.calls.append(("set", key))
+        self.data[key] = value
+
+    def remove(self, key):
+        self.data.pop(key, None)
+
+
+def test_eptid_remembers_issued_values_in_a_supplied_store():
+    cache = DictCache()
+    first = idp.Eptid("secret-1", store=cache).get(EPTID_IDP, EPTID_SP, "alice")
+    assert list(cache.data) == [f"eptid:{EPTID_IDP}__{EPTID_SP}__alice"]
+    assert cache.data[f"eptid:{EPTID_IDP}__{EPTID_SP}__alice"] == first
+    assert first.startswith(f"{EPTID_IDP}!{EPTID_SP}!")
+
+    # A fresh Eptid with a CHANGED secret still returns what was issued, because
+    # it reads the cache: that is what the cache is for.
+    changed = idp.Eptid("secret-2", store=cache)
+    assert changed.get(EPTID_IDP, EPTID_SP, "alice") == first
+    # Without the cache the new secret would issue a different value.
+    assert idp.Eptid("secret-2").get(EPTID_IDP, EPTID_SP, "alice") != first
+    # The name_id and attribute forms use the same cache.
+    assert changed.name_id(EPTID_IDP, EPTID_SP, "alice").value == first
+
+
+def test_a_failing_eptid_cache_is_an_error_not_a_recompute():
+    class Down:
+        def get(self, key):
+            raise RuntimeError("cache down")
+
+        set = remove = get
+
+    eptid = idp.Eptid("secret", store=Down())
+    with pytest.raises(pygamlastan.SamlStoreError, match="cache down"):
+        eptid.get(EPTID_IDP, EPTID_SP, "alice")

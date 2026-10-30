@@ -11,7 +11,7 @@ flow.
 eduPersonTargetedID
 -------------------
 
-.. py:class:: Eptid(secret: str, digest: str = "sha256", allow_legacy_md5: bool = False)
+.. py:class:: Eptid(secret: str, digest: str = "sha256", allow_legacy_md5: bool = False, store: KeyValueStore | None = None)
 
    Derives stable, per-SP opaque identifiers from a server-side ``secret``. The
    same user gets a consistent id at one SP but an unlinkable id at another.
@@ -24,13 +24,28 @@ eduPersonTargetedID
    unchanged, and plan its retirement. Methods raise ``SamlStoreError`` on a
    storage failure.
 
-   .. note::
+   Issued values are remembered in a cache, so a later change of secret or
+   digest cannot change what an SP already knows. By default it is in memory and
+   lost on restart; pass ``store`` to persist it.
 
-      Derived values are cached in an in-memory store only. There is no
-      pluggable Python store yet, so existing pysaml2 EPTID mappings (shelve or
-      Mongo) cannot be imported. This matters only if the old store holds
-      hand-edited, imported or custom-computed values that recomputation would
-      not reproduce.
+   .. py:class:: KeyValueStore
+
+      Protocol for the ``store`` argument: ``get(key: str) -> str | None``,
+      ``set(key: str, value: str) -> None`` and ``remove(key: str) -> None``.
+      Any exception is a backend failure and surfaces as
+      :class:`pygamlastan.SamlStoreError`; never return ``None`` for a backend
+      that could not answer, because a recompute could issue a different value
+      than the one already issued. The store is trusted: what it returns is the
+      identifier issued.
+
+      Keys are ``eptid:<idp>__<sp>__<user>`` and values are ``idp!sp!hash``
+      strings, the same shape pysaml2 stores. pysaml2 keys its cache
+      ``<sp>__<user>`` instead, so an adapter over an existing pysaml2 shelve or
+      Mongo ``eptid`` collection must translate the key; entity IDs that contain
+      ``__`` make that split ambiguous. This matters only when the old store
+      holds values that recomputation would not reproduce (a changed secret,
+      hand-edited or imported entries). With ``digest="pysaml2-md5"`` and an
+      unchanged secret, the values are reproduced without it.
 
    .. py:method:: get(idp_entity_id: str, sp_entity_id: str, user_id: str) -> str
    .. py:method:: name_id(idp_entity_id: str, sp_entity_id: str, user_id: str) -> pygamlastan.core.NameId

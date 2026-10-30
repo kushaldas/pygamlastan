@@ -13,7 +13,8 @@ use gamlastan::core::protocol::name_id_mgmt::NewIdOrTerminate;
 use gamlastan::idp as gi;
 use gamlastan::idp::entity_category as gec;
 use gamlastan::idp::ident::{
-    IdentError, IdentityStore, InMemoryIdentityStore, InsertError, NameIdFilter, StoreError,
+    IdentError, IdentityStore, InMemoryIdentityStore, InMemoryKeyValueStore, InsertError,
+    KeyValueStore, NameIdFilter, StoreError,
 };
 use gamlastan::idp::policy as gpol;
 use gamlastan::metadata::types::sp::RequestedAttribute;
@@ -28,16 +29,74 @@ use crate::signing::SigningPreference;
 // Eptid (eduPersonTargetedID)
 // ---------------------------------------------------------------------------
 
-// `gi::Eptid` is generic over a `KeyValueStore` that caches derived values,
-// defaulting to the in-memory one (`Eptid<InMemoryKeyValueStore>`). We bind
-// only that default: values are derived deterministically from (secret, idp,
-// sp, user), so a fresh instance reproduces them. Known gap: no pluggable
-// Python store, so existing pysaml2 EPTID mappings (shelve/Mongo) cannot be
-// imported; that only matters for hand-edited or imported values. Add a
-// `PyKeyValueStore` adapter (same pattern as `PyIdentityStore`) if needed.
+// `gi::Eptid` is generic over a `KeyValueStore` that caches derived values.
+// The cache matters: recomputing could return a different value than the one
+// already issued (after the secret or digest changed), which is exactly what it
+// exists to prevent. The default is in-memory; a caller-supplied Python object
+// (`get` / `set` / `remove`) makes it persistent, the same adapter pattern as
+// `PyIdentityStore`. A single enum keeps `gi::Eptid<S>` monomorphized to one
+// type so one `#[pyclass]` serves both.
+pub(crate) enum KvBackend {
+    InMemory(InMemoryKeyValueStore),
+    Py(PyKeyValueStore),
+}
+
+impl KeyValueStore for KvBackend {
+    fn get(&self, key: &str) -> Result<Option<String>, StoreError> {
+        match self {
+            KvBackend::InMemory(s) => s.get(key),
+            KvBackend::Py(s) => s.get(key),
+        }
+    }
+    fn set(&self, key: &str, value: String) -> Result<(), StoreError> {
+        match self {
+            KvBackend::InMemory(s) => s.set(key, value),
+            KvBackend::Py(s) => s.set(key, value),
+        }
+    }
+    fn remove(&self, key: &str) -> Result<(), StoreError> {
+        match self {
+            KvBackend::InMemory(s) => s.remove(key),
+            KvBackend::Py(s) => s.remove(key),
+        }
+    }
+}
+
+/// Adapter implementing `KeyValueStore` by calling `get(key) -> str | None`,
+/// `set(key, value)` and `remove(key)` on a Python object. Any exception is a
+/// backend failure (`SamlStoreError`), never a cache miss.
+pub(crate) struct PyKeyValueStore {
+    obj: Py<PyAny>,
+}
+
+impl KeyValueStore for PyKeyValueStore {
+    fn get(&self, key: &str) -> Result<Option<String>, StoreError> {
+        Python::attach(|py| {
+            self.obj
+                .bind(py)
+                .call_method1("get", (key,))?
+                .extract::<Option<String>>()
+        })
+        .map_err(py_store_err)
+    }
+    fn set(&self, key: &str, value: String) -> Result<(), StoreError> {
+        Python::attach(|py| {
+            self.obj
+                .bind(py)
+                .call_method1("set", (key, value))
+                .map(drop)
+        })
+        .map_err(py_store_err)
+    }
+    fn remove(&self, key: &str) -> Result<(), StoreError> {
+        Python::attach(|py| self.obj.bind(py).call_method1("remove", (key,)).map(drop))
+            .map_err(py_store_err)
+    }
+}
+
 #[pyclass(module = "pygamlastan.idp", name = "Eptid")]
 pub struct Eptid {
-    inner: gi::Eptid,
+    inner: gi::Eptid<KvBackend>,
 }
 
 #[pymethods]
@@ -48,9 +107,21 @@ impl Eptid {
     /// stock pysaml2's `idp!sp!md5(user+sp+secret)` values so SPs that key
     /// accounts on the EPTID keep seeing the same value after a migration.
     /// MD5 is only accepted with `allow_legacy_md5=True`.
+    ///
+    /// Issued values are remembered in a cache so a later change of secret or
+    /// digest cannot change what an SP already knows. By default it is
+    /// in-memory (lost on restart); pass `store`, an object with
+    /// `get(key) -> str | None`, `set(key, value)` and `remove(key)`, to
+    /// persist it. The store is trusted: what it returns is the identifier
+    /// issued. A failing store raises `SamlStoreError`, never a recompute.
     #[new]
-    #[pyo3(signature = (secret, digest="sha256", allow_legacy_md5=false))]
-    fn new(secret: String, digest: &str, allow_legacy_md5: bool) -> PyResult<Self> {
+    #[pyo3(signature = (secret, digest="sha256", allow_legacy_md5=false, store=None))]
+    fn new(
+        secret: String,
+        digest: &str,
+        allow_legacy_md5: bool,
+        store: Option<Py<PyAny>>,
+    ) -> PyResult<Self> {
         let options = match digest {
             "sha256" => gi::eptid::EptidOptions::sha256(),
             "pysaml2-md5" => gi::eptid::EptidOptions::pysaml2_md5_legacy(allow_legacy_md5),
@@ -60,7 +131,12 @@ impl Eptid {
                 )))
             }
         };
-        let inner = gi::Eptid::try_new_with_options(secret, options).map_err(ident_err)?;
+        let backend = match store {
+            Some(obj) => KvBackend::Py(PyKeyValueStore { obj }),
+            None => KvBackend::InMemory(InMemoryKeyValueStore::new()),
+        };
+        let inner =
+            gi::Eptid::try_with_store_options(backend, secret, options).map_err(ident_err)?;
         Ok(Eptid { inner })
     }
     /// The opaque persistent identifier string for (idp, sp, user).

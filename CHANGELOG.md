@@ -94,9 +94,13 @@ dependency stack), which is not yet released; `Cargo.toml` carries a git
 - `ResponseOptions(authenticating_authorities=...)`.
 - `Eptid(secret, digest="pysaml2-md5", allow_legacy_md5=True)` reproduces stock
   pysaml2 MD5 EPTID values for migrations; the default stays SHA-256 and is not
-  byte-compatible with pysaml2. Known gap: `Eptid` has no pluggable Python
-  store, so existing pysaml2 EPTID mappings cannot be imported (only matters
-  for hand-edited or imported values).
+  byte-compatible with pysaml2.
+- `Eptid(store=...)`: a Python object with `get(key)`, `set(key, value)` and
+  `remove(key)` to persist the cache of issued values, so a later change of
+  secret or digest cannot change what an SP already knows. A failing store is
+  `SamlStoreError`, never a recompute. Keys are `eptid:<idp>__<sp>__<user>`;
+  pysaml2 keys its cache `<sp>__<user>`, so an adapter over an existing pysaml2
+  collection must translate them.
 
 ## [0.6.0] - 2026-09-14
 
