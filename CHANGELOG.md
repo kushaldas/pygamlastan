@@ -57,6 +57,12 @@ dependency stack), which is not yet released; `Cargo.toml` carries a git
   filters through the `ReleasePolicy`; `release="pass_through"` is for a proxy
   whose attributes were filtered upstream. A store failure is `SamlStoreError`
   and any other fault `SamlProfileError`; neither is ever a signed denial.
+- `idp.check_store_conformance(new_store, threads=16)`, `check_store_conformance_one`
+  and `STORE_CONFORMANCE_CHECKS`: gamlastan's `IdentityStore` conformance suite,
+  runnable from Python against a real backend (a missing unique index compiles
+  fine and only misbehaves under load). It releases the GIL while it runs, since
+  the concurrent checks call the store from several threads. A failure raises
+  the new `StoreConformanceError` with `.check` and `.message`.
 - `PolicyEntry` settings `session_lifetime_seconds`, `supported_nameid_formats`,
   `signing_preference` and `deny_unconfigured_release`, with the matching
   `ReleasePolicy` readers, and the module constants `ISSUABLE_NAMEID_FORMATS` and

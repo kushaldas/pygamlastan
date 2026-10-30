@@ -276,6 +276,10 @@ fn is_durable_match(
 }
 
 impl PyIdentityStore {
+    pub(crate) fn new(obj: Py<PyAny>) -> Self {
+        PyIdentityStore { obj }
+    }
+
     /// Refuse a record a Python backend returned for `user_id` unless it is that
     /// user's own. The backend is the part of the system least under our
     /// control: a `find_durable` that forgot the user in its filter, a wrong
@@ -1200,6 +1204,7 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PolicyEntry>()?;
     m.add_class::<ReleasePolicy>()?;
     crate::orchestrator::register(&m)?;
+    crate::conformance::register(&m)?;
     m.add_function(wrap_pyfunction!(code_name_id, &m)?)?;
     m.add_function(wrap_pyfunction!(decode_name_id, &m)?)?;
     m.add(

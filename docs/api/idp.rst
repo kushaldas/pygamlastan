@@ -160,6 +160,8 @@ Identity database
    except transient) ``(user, sp_name_qualifier, name_qualifier, format)`` is
    unique. A record with no format counts as ``unspecified``.
 
+   Run :func:`check_store_conformance` against your backend before relying on it.
+
    The binding does not trust what the backend returns. A record from
    ``find_durable`` or ``get_or_insert_durable`` must be the durable slot that was
    asked for, and ``user_for(record.value)`` must name the same user; otherwise
@@ -189,6 +191,53 @@ Identity database
 
    Optionally ``find_durable(user_id, sp_name_qualifier, name_qualifier, format)
    -> NameId | None`` pushes the durable lookup down to an index.
+
+Checking a store backend
+------------------------
+
+The record-shaped store has no default write methods: a non-atomic default would
+silently leave a race open on a multi-instance IdP. The atomicity comes from two
+unique constraints the backend enforces, and a missing unique index compiles
+fine and only misbehaves under load (two workers issuing different "stable"
+identifiers to one user). The conformance suite checks that a backend honours
+the contract the response engine relies on.
+
+.. code-block:: python
+
+   def new_store():
+       # a fresh, EMPTY store: a new collection/table, or one that was cleared
+       coll = db[f"ident_test_{uuid4().hex}"]
+       return MongoIdentityStore(coll)
+
+   def test_my_backend_honours_the_contract():
+       idp.check_store_conformance(new_store)   # raises on the first violation
+
+.. py:function:: check_store_conformance(new_store: Callable[[], IdentityStore], threads: int = 16) -> None
+
+   Run every check. ``new_store`` is called with no arguments and must return a
+   fresh, empty store each time; each check gets its own. Raises
+   :class:`pygamlastan.StoreConformanceError` on the first violation, with the
+   failing check in ``.check`` and what it found in ``.message``. A factory that
+   raises is a setup error and propagates as it was.
+
+   Run it against a real instance of the backend, with its real indexes. It
+   releases the GIL while it runs, because the concurrent checks call your store
+   from several threads. A store that serialises every call (one global lock)
+   can pass the concurrent checks without having the constraint, and a race
+   between separate processes is not detected.
+
+.. py:function:: check_store_conformance_one(name: str, new_store: Callable[[], IdentityStore], threads: int = 16) -> None
+
+   Run the single check ``name`` (one of ``STORE_CONFORMANCE_CHECKS``), to see
+   which constraint a backend is missing.
+
+.. py:data:: STORE_CONFORMANCE_CHECKS
+
+   The check names, in the order they run: value uniqueness, lookups, durable
+   get-or-insert, the durable constraint on every write path (``insert`` and
+   ``replace`` as well as ``get_or_insert_durable``), exact durable lookups,
+   filtered lookups, ``replace`` semantics (including refusing another user's
+   value), scoped removal, and two concurrent checks.
 
 Attribute-release policy
 ------------------------

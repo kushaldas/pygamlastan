@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 
 mod attribute_map;
 mod bindings;
+mod conformance;
 mod convert;
 mod core;
 mod crypto;

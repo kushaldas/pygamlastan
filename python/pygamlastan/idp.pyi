@@ -1,5 +1,5 @@
 from datetime import datetime
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Literal, Protocol
 
 from .core import Assertion, Attribute, NameId, NameIdPolicy, RequestedAuthnContext
@@ -365,6 +365,20 @@ class ResponseEngine:
         self, params: ResponseParams, subject: AuthenticatedSubject
     ) -> ResponseOutcome: ...
     def create_denial_response(self, params: ResponseParams, denial: Denial) -> DeniedResponse: ...
+
+STORE_CONFORMANCE_CHECKS: list[str]
+
+def check_store_conformance(new_store: Callable[[], IdentityStore], threads: int = ...) -> None:
+    """Check that an ``IdentityStore`` honours the contract the response engine
+    relies on. ``new_store`` returns a fresh, empty store on every call. Raises
+    ``StoreConformanceError`` (``.check``, ``.message``) on the first violation."""
+    ...
+
+def check_store_conformance_one(
+    name: str, new_store: Callable[[], IdentityStore], threads: int = ...
+) -> None:
+    """Run one check, by name (see ``STORE_CONFORMANCE_CHECKS``)."""
+    ...
 
 def releasable_attributes(
     policies: list[EntityCategoryPolicy],

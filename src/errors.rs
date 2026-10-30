@@ -75,6 +75,13 @@ create_exception!(
 );
 create_exception!(
     pygamlastan,
+    StoreConformanceError,
+    SamlError,
+    "An IdentityStore backend failed a conformance check. The failing check and \
+     what it found are the `check` and `message` attributes."
+);
+create_exception!(
+    pygamlastan,
     NameIdValueTaken,
     SamlIdentError,
     "A NameID value is already used by another record. Raised by Python \
@@ -147,6 +154,10 @@ pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("SamlPolicyError", py.get_type::<SamlPolicyError>())?;
     m.add("SamlIdentError", py.get_type::<SamlIdentError>())?;
     m.add("SamlStoreError", py.get_type::<SamlStoreError>())?;
+    m.add(
+        "StoreConformanceError",
+        py.get_type::<StoreConformanceError>(),
+    )?;
     m.add("NameIdValueTaken", py.get_type::<NameIdValueTaken>())?;
     m.add("NameIdDurableExists", py.get_type::<NameIdDurableExists>())?;
     Ok(())

@@ -69,6 +69,12 @@ note that security validation via
    database outage into "no such principal"; catch ``SamlStoreError`` to handle
    an outage on purpose.
 
+.. py:exception:: StoreConformanceError
+
+   An :class:`~pygamlastan.idp.IdentityStore` backend failed a check of
+   :func:`pygamlastan.idp.check_store_conformance`. The failing check is in
+   ``.check`` and what it found in ``.message``.
+
 .. py:exception:: NameIdValueTaken
 
    Raised by a Python :class:`~pygamlastan.idp.IdentityStore` to report that a
