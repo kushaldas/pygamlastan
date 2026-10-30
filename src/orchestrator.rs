@@ -16,9 +16,10 @@ use pyo3::types::PyModule;
 
 use gamlastan::idp as gi;
 use gamlastan::idp::assertion_store::AssertionStore;
+use gamlastan::idp::ident::StoreError;
 use gamlastan::profiles::error::ProfileError;
 
-use crate::core::{Attribute, NameId};
+use crate::core::{Assertion, Attribute, NameId};
 use crate::crypto::SamlSigner;
 use crate::errors::{profile_err, store_err};
 use crate::idp::{
@@ -547,6 +548,85 @@ impl ResponseOutcome {
 // ResponseEngine
 // ---------------------------------------------------------------------------
 
+/// Adapter implementing `AssertionStore` by calling a Python object:
+/// `store_assertion(assertion)`, `get_assertion(id) -> Assertion | None`,
+/// `assertions_for_subject(name_id_value) -> Iterable[Assertion]` and
+/// `remove_assertion(id)`, with assertions crossing as `core.Assertion`. Any
+/// exception is a backend failure (`SamlStoreError`), never "no such assertion".
+///
+/// The engine itself only ever calls `store_assertion`; the other three serve the
+/// back-channel query responders and the application's own logout code.
+struct PyAssertionStore {
+    obj: Py<PyAny>,
+}
+
+fn store_failure(e: PyErr) -> StoreError {
+    StoreError::new(e)
+}
+
+impl AssertionStore for PyAssertionStore {
+    fn store_assertion(
+        &self,
+        assertion: gamlastan::core::assertion::Assertion,
+    ) -> Result<(), StoreError> {
+        Python::attach(|py| {
+            let a = Py::new(py, Assertion::wrap(assertion))?;
+            self.obj
+                .bind(py)
+                .call_method1("store_assertion", (a,))
+                .map(drop)
+        })
+        .map_err(store_failure)
+    }
+    fn get_assertion(
+        &self,
+        assertion_id: &str,
+    ) -> Result<Option<gamlastan::core::assertion::Assertion>, StoreError> {
+        Python::attach(|py| {
+            let r = self
+                .obj
+                .bind(py)
+                .call_method1("get_assertion", (assertion_id,))?;
+            if r.is_none() {
+                Ok(None)
+            } else {
+                Ok(Some(r.extract::<Assertion>()?.inner))
+            }
+        })
+        .map_err(store_failure)
+    }
+    fn assertions_for_subject(
+        &self,
+        name_id_value: &str,
+    ) -> Result<Vec<gamlastan::core::assertion::Assertion>, StoreError> {
+        Python::attach(|py| {
+            let r = self
+                .obj
+                .bind(py)
+                .call_method1("assertions_for_subject", (name_id_value,))?;
+            r.try_iter()?
+                .map(|a| Ok(a?.extract::<Assertion>()?.inner))
+                .collect::<PyResult<Vec<_>>>()
+        })
+        .map_err(store_failure)
+    }
+    fn remove_assertion(&self, assertion_id: &str) -> Result<(), StoreError> {
+        Python::attach(|py| {
+            self.obj
+                .bind(py)
+                .call_method1("remove_assertion", (assertion_id,))
+                .map(drop)
+        })
+        .map_err(store_failure)
+    }
+}
+
+/// The built-in store, or a caller-supplied Python object.
+enum AssertionSource {
+    Builtin(Py<InMemoryAssertionStore>),
+    Custom(PyAssertionStore),
+}
+
 /// The IdP response engine: composes a `ReleasePolicy`, an `IdentDb`, an
 /// `AuthnBroker`, an optional assertion store and a signer into the Web Browser
 /// SSO response flow.
@@ -573,7 +653,7 @@ pub struct ResponseEngine {
     broker: Py<AuthnBroker>,
     signer: Py<SamlSigner>,
     cert_der_b64: String,
-    assertions: Option<Py<InMemoryAssertionStore>>,
+    assertions: Option<AssertionSource>,
     pass_through: bool,
 }
 
@@ -585,7 +665,15 @@ impl ResponseEngine {
         let idents = self.idents.bind(py).borrow();
         let broker = self.broker.bind(py).borrow();
         let signer = self.signer.bind(py).borrow();
-        let assertions = self.assertions.as_ref().map(|a| a.bind(py).borrow());
+        let builtin = match &self.assertions {
+            Some(AssertionSource::Builtin(a)) => Some(a.bind(py).borrow()),
+            _ => None,
+        };
+        let assertions: Option<&dyn AssertionStore> = match (&self.assertions, &builtin) {
+            (Some(AssertionSource::Builtin(_)), Some(b)) => Some(&b.inner),
+            (Some(AssertionSource::Custom(c)), _) => Some(c),
+            _ => None,
+        };
         let pass_through = gi::PassThroughRelease;
         let release: &dyn gi::AttributeRelease = if self.pass_through {
             &pass_through
@@ -598,7 +686,7 @@ impl ResponseEngine {
             release,
             idents: &idents.inner,
             broker: &broker.inner,
-            assertions: assertions.as_ref().map(|a| &a.inner as &dyn AssertionStore),
+            assertions,
             signer: &signer.inner,
             cert_der_b64: &self.cert_der_b64,
         };
@@ -612,13 +700,14 @@ impl ResponseEngine {
     #[pyo3(signature = (idp_entity_id, policy, idents, broker, signer, cert_der_b64, assertions=None, release="policy"))]
     #[allow(clippy::too_many_arguments)]
     fn new(
+        py: Python<'_>,
         idp_entity_id: String,
         policy: Py<ReleasePolicy>,
         idents: Py<IdentDb>,
         broker: Py<AuthnBroker>,
         signer: Py<SamlSigner>,
         cert_der_b64: String,
-        assertions: Option<Py<InMemoryAssertionStore>>,
+        assertions: Option<Py<PyAny>>,
         release: &str,
     ) -> PyResult<Self> {
         let pass_through = match release {
@@ -637,7 +726,12 @@ impl ResponseEngine {
             broker,
             signer,
             cert_der_b64,
-            assertions,
+            assertions: assertions.map(|obj| {
+                match obj.bind(py).extract::<Py<InMemoryAssertionStore>>() {
+                    Ok(builtin) => AssertionSource::Builtin(builtin),
+                    Err(_) => AssertionSource::Custom(PyAssertionStore { obj }),
+                }
+            }),
             pass_through,
         })
     }

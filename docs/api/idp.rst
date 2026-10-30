@@ -89,6 +89,26 @@ Authentication broker
 Assertion store
 ---------------
 
+.. py:class:: AssertionStore
+
+   Protocol for a persistent store of issued assertions, passed as
+   ``ResponseEngine(assertions=...)`` (the built-in :class:`InMemoryAssertionStore`
+   is lost on restart). Assertions cross as :class:`pygamlastan.core.Assertion`.
+   Any exception is a backend failure and surfaces as
+   :class:`pygamlastan.SamlStoreError`; never return ``None`` or an empty list
+   for a backend that could not answer. If the store cannot record an assertion,
+   ``create_authn_response`` raises and nothing is issued.
+
+   .. py:method:: store_assertion(assertion: pygamlastan.core.Assertion) -> None
+   .. py:method:: get_assertion(assertion_id: str) -> pygamlastan.core.Assertion | None
+   .. py:method:: assertions_for_subject(name_id_value: str) -> Iterable[pygamlastan.core.Assertion]
+   .. py:method:: remove_assertion(assertion_id: str) -> None
+
+   The engine itself only calls ``store_assertion``. The other three serve
+   back-channel queries and your own logout code: pysaml2's
+   ``remove_authn_statements(name_id)`` is ``assertions_for_subject`` followed by
+   ``remove_assertion``.
+
 .. py:class:: InMemoryAssertionStore()
 
    Retains issued assertions to answer later queries.
@@ -384,8 +404,9 @@ releases attributes and signs the response.
    ``broker`` an :class:`AuthnBroker`, ``signer`` a
    :class:`pygamlastan.crypto.SamlSigner`, ``cert_der_b64`` the signing
    certificate as base64 DER (the body of the PEM, no header lines), and
-   ``assertions`` an optional :class:`InMemoryAssertionStore` so back-channel
-   queries can be answered. ``release="policy"`` filters attributes through the
+   ``assertions`` an optional :class:`InMemoryAssertionStore`, or any object
+   implementing :class:`AssertionStore`, so back-channel queries and logout can
+   find the assertions it issued. ``release="policy"`` filters attributes through the
    policy; ``release="pass_through"`` releases what the application supplied,
    for a proxy whose attributes were filtered upstream. The engine holds
    references, so later changes to those objects are seen by the next call.

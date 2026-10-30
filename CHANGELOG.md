@@ -95,6 +95,12 @@ dependency stack), which is not yet released; `Cargo.toml` carries a git
 - `Eptid(secret, digest="pysaml2-md5", allow_legacy_md5=True)` reproduces stock
   pysaml2 MD5 EPTID values for migrations; the default stays SHA-256 and is not
   byte-compatible with pysaml2.
+- `ResponseEngine(assertions=...)` accepts any object implementing the new
+  `AssertionStore` protocol (`store_assertion`, `get_assertion`,
+  `assertions_for_subject`, `remove_assertion`), so issued assertions can be
+  persisted, not only held in the built-in in-memory store. A store that cannot
+  record an assertion makes `create_authn_response` raise `SamlStoreError`
+  instead of issuing.
 - `Eptid(store=...)`: a Python object with `get(key)`, `set(key, value)` and
   `remove(key)` to persist the cache of issued values, so a later change of
   secret or digest cannot change what an SP already knows. A failing store is

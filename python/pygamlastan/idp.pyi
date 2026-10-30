@@ -367,6 +367,21 @@ class ResponseOutcome:
     @property
     def xml(self) -> str: ...
 
+class AssertionStore(Protocol):
+    """Where the response engine records issued assertions, so back-channel
+    queries and logout can find them. Assertions cross as ``core.Assertion``.
+    Any exception is a backend failure and surfaces as ``SamlStoreError``: never
+    return ``None`` / an empty list for a backend that could not answer.
+
+    The engine itself only calls ``store_assertion``; the other three serve the
+    back-channel query responders and your own logout code (pysaml2
+    ``remove_authn_statements`` is ``assertions_for_subject`` then
+    ``remove_assertion``)."""
+    def store_assertion(self, assertion: Assertion) -> None: ...
+    def get_assertion(self, assertion_id: str) -> Assertion | None: ...
+    def assertions_for_subject(self, name_id_value: str) -> Iterable[Assertion]: ...
+    def remove_assertion(self, assertion_id: str) -> None: ...
+
 class ResponseEngine:
     """The IdP response engine. ``release`` is ``"policy"`` (filter through the
     ``ReleasePolicy``) or ``"pass_through"`` (release what the application
@@ -379,7 +394,7 @@ class ResponseEngine:
         broker: AuthnBroker,
         signer: SamlSigner,
         cert_der_b64: str,
-        assertions: InMemoryAssertionStore | None = ...,
+        assertions: InMemoryAssertionStore | AssertionStore | None = ...,
         release: Literal["policy", "pass_through"] = ...,
     ) -> None: ...
     def check_request(

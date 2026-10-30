@@ -439,3 +439,62 @@ def test_exact_level_matching_is_opt_in():
         [core.AUTHN_CONTEXT_PASSWORD, ppt]
     )
     assert not broker(False).is_empty()
+
+
+# --------------------------------------------------------------------------- #
+# Assertion stores
+# --------------------------------------------------------------------------- #
+
+class RecordingAssertionStore:
+    def __init__(self):
+        self.stored = []
+
+    def store_assertion(self, assertion):
+        self.stored.append(assertion)
+
+    def get_assertion(self, assertion_id):
+        return next((a for a in self.stored if a.id == assertion_id), None)
+
+    def assertions_for_subject(self, name_id_value):
+        return [
+            a for a in self.stored
+            if a.subject is not None and a.subject.name_id.value == name_id_value
+        ]
+
+    def remove_assertion(self, assertion_id):
+        self.stored = [a for a in self.stored if a.id != assertion_id]
+
+
+def test_a_python_assertion_store_records_what_is_issued(rsa_keypair):
+    store = RecordingAssertionStore()
+    engine, ref = _engine(rsa_keypair, assertions=store)
+    issued = engine.create_authn_response(_params(), _subject(ref)).issued
+    assert [a.id for a in store.stored] == [issued.assertion_id]
+    assert store.assertions_for_subject(issued.name_id.value)[0].id == issued.assertion_id
+
+
+def test_the_built_in_assertion_store_still_works(rsa_keypair):
+    store = idp.InMemoryAssertionStore()
+    engine, ref = _engine(rsa_keypair, assertions=store)
+    issued = engine.create_authn_response(_params(), _subject(ref)).issued
+    assert store.get_assertion(issued.assertion_id) is not None
+    assert len(store.assertions_for_subject(issued.name_id.value)) == 1
+
+
+def test_an_assertion_store_that_cannot_record_means_nothing_is_issued(rsa_keypair):
+    class Down(RecordingAssertionStore):
+        def store_assertion(self, assertion):
+            raise RuntimeError("assertion db down")
+
+    engine, ref = _engine(rsa_keypair, assertions=Down())
+    with pytest.raises(pygamlastan.SamlStoreError, match="assertion db down"):
+        engine.create_authn_response(_params(), _subject(ref))
+
+
+def test_a_denial_stores_no_assertion(rsa_keypair):
+    store = RecordingAssertionStore()
+    engine, ref = _engine(rsa_keypair, assertions=store)
+    long_format = "urn:example:" + "a" * 300
+    policy = f'<samlp:NameIDPolicy Format="{long_format}" AllowCreate="true"/>'
+    outcome = engine.create_authn_response(_params(_request_xml(policy=policy)), _subject(ref))
+    assert not outcome.is_issued and store.stored == []
