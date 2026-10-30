@@ -47,7 +47,12 @@ class IdentityStore(Protocol):
     other exception is a backend failure and surfaces as ``SamlStoreError``:
     never return "no record" for a backend that could not answer.
     Optionally define ``find_durable(user_id, sp_name_qualifier, name_qualifier,
-    format) -> NameId | None`` to push that lookup down to an index.
+    format) -> NameId | None`` to push that lookup down to an index, and
+    ``find(user_id, format, sp_name_qualifier, name_qualifier, sp_provided_id)
+    -> Iterable[NameId]`` to push down ``IdentDb.find_nameid`` (``None`` means
+    unconstrained; a field that is set must equal the record's exactly, so a
+    record without it does not match). Each record ``find`` returns must satisfy
+    the filter and belong to ``user_id``, or ``SamlStoreError`` is raised.
     """
     def for_user(self, user_id: str) -> Iterable[NameId]: ...
     def user_for(self, value: str) -> str | None: ...
@@ -104,6 +109,14 @@ class IdentDb:
     ) -> None: ...
     def store(self, user_id: str, name_id: NameId) -> None: ...
     def find_local_id(self, name_id: NameId) -> str | None: ...
+    def find_nameid(
+        self,
+        user_id: str,
+        format: str | None = ...,
+        sp_name_qualifier: str | None = ...,
+        name_qualifier: str | None = ...,
+        sp_provided_id: str | None = ...,
+    ) -> list[NameId]: ...
     def name_ids_for(self, user_id: str) -> list[NameId]: ...
     def match_local_id(
         self,

@@ -112,6 +112,14 @@ Identity database
 
       The local user a NameID was issued to, if known.
 
+   .. py:method:: find_nameid(user_id: str, format: str | None = None, sp_name_qualifier: str | None = None, name_qualifier: str | None = None, sp_provided_id: str | None = None) -> list[pygamlastan.core.NameId]
+
+      The user's NameIDs that match every filter that is set (pysaml2
+      ``find_nameid``). An unset filter matches anything. A set one must equal
+      the record's value exactly, so a record that lacks the field does not match
+      (unlike :meth:`match_local_id`, where ``None`` means "the record has no
+      such qualifier"). Order is unspecified.
+
    .. py:method:: name_ids_for(user_id: str) -> list[pygamlastan.core.NameId]
    .. py:method:: match_local_id(user_id: str, sp_name_qualifier: str | None = None, name_qualifier: str | None = None) -> pygamlastan.core.NameId | None
 
@@ -190,7 +198,13 @@ Identity database
    .. py:method:: remove_all(user_id: str) -> None
 
    Optionally ``find_durable(user_id, sp_name_qualifier, name_qualifier, format)
-   -> NameId | None`` pushes the durable lookup down to an index.
+   -> NameId | None`` pushes the durable lookup down to an index, and
+   ``find(user_id, format, sp_name_qualifier, name_qualifier, sp_provided_id)
+   -> Iterable[NameId]`` pushes :meth:`IdentDb.find_nameid` down to a query
+   (``None`` means unconstrained). Each record ``find`` returns must satisfy the
+   filter and belong to ``user_id``, or :class:`pygamlastan.SamlStoreError` is
+   raised; the conformance suite checks it too. Without them the binding filters
+   ``for_user`` itself.
 
 Checking a store backend
 ------------------------

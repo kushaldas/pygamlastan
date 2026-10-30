@@ -13,7 +13,7 @@ use gamlastan::core::protocol::name_id_mgmt::NewIdOrTerminate;
 use gamlastan::idp as gi;
 use gamlastan::idp::entity_category as gec;
 use gamlastan::idp::ident::{
-    IdentError, IdentityStore, InMemoryIdentityStore, InsertError, StoreError,
+    IdentError, IdentityStore, InMemoryIdentityStore, InsertError, NameIdFilter, StoreError,
 };
 use gamlastan::idp::policy as gpol;
 use gamlastan::metadata::types::sp::RequestedAttribute;
@@ -228,7 +228,10 @@ impl InMemoryAssertionStore {
 /// * `insert(user_id, name_id)`, `replace(user_id, name_id)`
 /// * `remove(value)`, `remove_all(user_id)`
 ///
-/// `find` and `find_durable` are optional and default to filtering `for_user`.
+/// `find(user_id, format, sp_name_qualifier, name_qualifier, sp_provided_id)`
+/// and `find_durable` are optional and default to filtering `for_user`. In
+/// `find`, `None` means unconstrained and a field that is set must equal the
+/// record's exactly (a record that lacks the field does not match).
 ///
 /// Atomicity comes from two unique constraints the backend must enforce (see
 /// `IdentityStore`). A backend signals a conflict by raising `NameIdValueTaken`
@@ -338,6 +341,58 @@ impl IdentityStore for PyIdentityStore {
                 .extract::<Option<String>>()
         })
         .map_err(py_store_err)
+    }
+
+    fn find(&self, user_id: &str, filter: &NameIdFilter) -> Result<Vec<GNameId>, StoreError> {
+        let pushed = Python::attach(|py| {
+            let obj = self.obj.bind(py);
+            if !obj.hasattr("find")? {
+                return Ok(None::<Vec<GNameId>>);
+            }
+            let r = obj.call_method1(
+                "find",
+                (
+                    user_id,
+                    filter.format.as_deref(),
+                    filter.sp_name_qualifier.as_deref(),
+                    filter.name_qualifier.as_deref(),
+                    filter.sp_provided_id.as_deref(),
+                ),
+            )?;
+            Self::names(py, r).map(Some)
+        })
+        .map_err(py_store_err)?;
+        match pushed {
+            Some(records) => {
+                // A pushed-down query is only as good as the backend's filter, and
+                // these records can reach an SP (NameIDMapping), so each one must
+                // satisfy the filter and be this user's own.
+                for record in &records {
+                    if !filter.matches(record) {
+                        return Err(StoreError::new(
+                            "the backend's find returned a record that does not satisfy the \
+                             filter; refusing to use it",
+                        ));
+                    }
+                    match self.user_for(&record.value)? {
+                        Some(owner) if owner == user_id => {}
+                        _ => {
+                            return Err(StoreError::new(
+                                "the backend's find returned a NameID that the store does not \
+                                 attribute to this user; refusing to use it",
+                            ))
+                        }
+                    }
+                }
+                Ok(records)
+            }
+            // No pushed-down query on the backend: filter `for_user`.
+            None => Ok(self
+                .for_user(user_id)?
+                .into_iter()
+                .filter(|n| filter.matches(n))
+                .collect()),
+        }
     }
 
     fn find_durable(
@@ -586,6 +641,30 @@ impl IdentDb {
     /// The local user a NameID was issued to, if known.
     fn find_local_id(&self, name_id: &NameId) -> PyResult<Option<String>> {
         self.inner.find_local_id(&name_id.inner).map_err(store_err)
+    }
+    /// The NameIDs stored for a local user that match every filter that is set
+    /// (pysaml2 `find_nameid`). An unset filter matches anything; a set one must
+    /// equal the record's value exactly, so a record without that field does not
+    /// match. Order is unspecified.
+    #[pyo3(signature = (user_id, format=None, sp_name_qualifier=None, name_qualifier=None, sp_provided_id=None))]
+    fn find_nameid(
+        &self,
+        user_id: &str,
+        format: Option<String>,
+        sp_name_qualifier: Option<String>,
+        name_qualifier: Option<String>,
+        sp_provided_id: Option<String>,
+    ) -> PyResult<Vec<NameId>> {
+        let filter = NameIdFilter {
+            format,
+            sp_name_qualifier,
+            name_qualifier,
+            sp_provided_id,
+        };
+        self.inner
+            .find_nameid(user_id, &filter)
+            .map(|v| v.into_iter().map(NameId::wrap).collect())
+            .map_err(store_err)
     }
     /// All NameIDs stored for a local user.
     fn name_ids_for(&self, user_id: &str) -> PyResult<Vec<NameId>> {

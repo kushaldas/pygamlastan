@@ -57,6 +57,12 @@ dependency stack), which is not yet released; `Cargo.toml` carries a git
   filters through the `ReleasePolicy`; `release="pass_through"` is for a proxy
   whose attributes were filtered upstream. A store failure is `SamlStoreError`
   and any other fault `SamlProfileError`; neither is ever a signed denial.
+- `IdentDb.find_nameid(user_id, format=None, sp_name_qualifier=None,
+  name_qualifier=None, sp_provided_id=None)` (pysaml2 `find_nameid`), and an
+  optional `find(...)` on the Python store protocol to push the filter into a
+  query. The records a pushed-down `find` returns are checked like the durable
+  lookups: each must satisfy the filter and belong to the user, otherwise
+  `SamlStoreError`. The conformance suite now exercises the backend's own `find`.
 - `idp.check_store_conformance(new_store, threads=16)`, `check_store_conformance_one`
   and `STORE_CONFORMANCE_CHECKS`: gamlastan's `IdentityStore` conformance suite,
   runnable from Python against a real backend (a missing unique index compiles

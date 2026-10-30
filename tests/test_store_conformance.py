@@ -181,3 +181,99 @@ def test_a_store_that_passes_also_backs_the_identity_database():
     first = db.persistent_nameid("alice", sp)
     assert db.persistent_nameid("alice", sp).value == first.value
     assert db.find_local_id(first) == "alice"
+
+
+# --------------------------------------------------------------------------- #
+# Filtered lookup: IdentDb.find_nameid and the optional `find` pushdown
+# --------------------------------------------------------------------------- #
+
+IDP = "https://idp.example.org/idp"
+SP_A = "https://a.example.org/sp"
+SP_B = "https://b.example.org/sp"
+
+
+def test_find_nameid_filters_on_every_field():
+    db = idp.IdentDb(IDP)
+    a = db.persistent_nameid("alice", SP_A)
+    b = db.persistent_nameid("alice", SP_B)
+    db.persistent_nameid("bob", SP_A)
+    persistent = "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"
+
+    assert {n.value for n in db.find_nameid("alice")} == {a.value, b.value}  # no filter
+    assert [n.value for n in db.find_nameid("alice", sp_name_qualifier=SP_A)] == [a.value]
+    assert {n.value for n in db.find_nameid("alice", format=persistent)} == {a.value, b.value}
+    assert db.find_nameid("alice", format="urn:example:other") == []
+    assert db.find_nameid("nobody") == []
+    # Users are isolated.
+    assert all(n.value != a.value for n in db.find_nameid("bob"))
+    # A set field must equal the record's exactly: a record without it is no match.
+    assert db.find_nameid("alice", sp_provided_id="alias") == []
+    updated = db.manage_name_id_new_id(a, "alias")
+    assert [n.value for n in db.find_nameid("alice", sp_provided_id="alias")] == [updated.value]
+    assert db.find_nameid("alice", name_qualifier=a.name_qualifier, sp_name_qualifier=SP_B)[0].value == b.value
+
+
+class GoodStoreWithFind(GoodStore):
+    """The same correct store, with the filter pushed down."""
+
+    def __init__(self):
+        super().__init__()
+        self.find_calls = []
+
+    def find(self, user_id, format, sp_name_qualifier, name_qualifier, sp_provided_id):
+        self.find_calls.append((user_id, format, sp_name_qualifier, name_qualifier, sp_provided_id))
+        want = {
+            "format": format,
+            "sp_name_qualifier": sp_name_qualifier,
+            "name_qualifier": name_qualifier,
+            "sp_provided_id": sp_provided_id,
+        }
+        with self.lock:
+            return [
+                n
+                for u, n in self.records
+                if u == user_id
+                and all(w is None or getattr(n, k) == w for k, w in want.items())
+            ]
+
+
+def test_a_pushed_down_find_is_used_and_passes_the_suite():
+    store = GoodStoreWithFind()
+    db = idp.IdentDb(IDP, store=store)
+    mine = db.persistent_nameid("alice", SP_A)
+    db.persistent_nameid("alice", SP_B)
+    found = db.find_nameid("alice", sp_name_qualifier=SP_A)
+    assert [n.value for n in found] == [mine.value]
+    assert store.find_calls == [("alice", None, SP_A, None, None)]
+    # The suite checks the backend's own `find` against the filter semantics.
+    idp.check_store_conformance(GoodStoreWithFind)
+
+
+class FindIgnoresFilter(GoodStoreWithFind):
+    def find(self, user_id, format, sp_name_qualifier, name_qualifier, sp_provided_id):
+        return self.for_user(user_id)  # the filter is dropped
+
+
+class FindReturnsAnotherUser(GoodStoreWithFind):
+    def find(self, user_id, format, sp_name_qualifier, name_qualifier, sp_provided_id):
+        return [n for u, n in self.records if u != user_id]  # forgot the user
+
+
+def test_a_find_that_ignores_the_filter_is_refused_and_caught_by_the_suite():
+    store = FindIgnoresFilter()
+    db = idp.IdentDb(IDP, store=store)
+    db.persistent_nameid("alice", SP_A)
+    db.persistent_nameid("alice", SP_B)
+    with pytest.raises(pygamlastan.SamlStoreError, match="does not satisfy the"):
+        db.find_nameid("alice", sp_name_qualifier=SP_A)
+    with pytest.raises(pygamlastan.StoreConformanceError) as caught:
+        idp.check_store_conformance_one("find_filters_on_every_field", FindIgnoresFilter)
+    assert caught.value.check == "find_filters_on_every_field"
+
+
+def test_a_find_that_returns_another_users_records_is_refused():
+    store = FindReturnsAnotherUser()
+    db = idp.IdentDb(IDP, store=store)
+    db.persistent_nameid("victim", SP_A)
+    with pytest.raises(pygamlastan.SamlStoreError, match="does not attribute"):
+        db.find_nameid("mallory", sp_name_qualifier=SP_A)
