@@ -58,7 +58,7 @@ stack), which is not yet released; `Cargo.toml` carries a git
   name_qualifier=None, sp_provided_id=None)` (pysaml2 `find_nameid`), and an
   optional `find(...)` on the Python store protocol to push the filter into a
   query. A pushed-down `find` must treat a record with no `format` as `unspecified`,
-  as the fallback over `for_user` does.
+  as the fallback over `for_user` does; `check_store_conformance` checks it.
 - `IdentDb(verify_store=True)` and `Eptid(verify_store=True)`: opt-outs for the
   checks described under Security, for a store you fully trust. The built-in
   in-memory stores are never checked.

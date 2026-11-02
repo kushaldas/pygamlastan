@@ -30,4 +30,4 @@ base64 = "0.22"
 # to main but unreleased. Delete this block and run `cargo update -p gamlastan`
 # once 0.10.0 is on crates.io.
 [patch.crates-io]
-gamlastan = { git = "https://github.com/kushaldas/gamlastan", rev = "4ca6b33" }
+gamlastan = { git = "https://github.com/kushaldas/gamlastan", rev = "b3506c3" }

@@ -1027,7 +1027,7 @@ dependencies = [
 [[package]]
 name = "gamlastan"
 version = "0.10.0"
-source = "git+https://github.com/kushaldas/gamlastan?rev=4ca6b33#4ca6b33bbe2dd9ca654caf04084e88a4249921b3"
+source = "git+https://github.com/kushaldas/gamlastan?rev=b3506c3#b3506c3af20843ee7256e7493c8e3ed8d81a3ea0"
 dependencies = [
  "base64 0.23.1",
  "bergshamra",

@@ -275,6 +275,37 @@ def test_a_record_with_no_format_counts_as_unspecified_in_find_nameid(store_clas
     assert values(format=UNSPECIFIED, sp_name_qualifier=SP_B) == []
 
 
+class FindComparesFormatLiterally(GoodStoreWithFind):
+    """A `WHERE format = ?` pushdown: a record stored without a Format never equals
+    `unspecified`, so it is silently lost to a filter on that format."""
+
+    def find(self, user_id, format, sp_name_qualifier, name_qualifier, sp_provided_id):
+        want = {
+            "format": format,
+            "sp_name_qualifier": sp_name_qualifier,
+            "name_qualifier": name_qualifier,
+            "sp_provided_id": sp_provided_id,
+        }
+        with self.lock:
+            return [
+                n
+                for u, n in self.records
+                if u == user_id
+                and all(w is None or getattr(n, k) == w for k, w in want.items())
+            ]
+
+
+def test_a_find_that_compares_the_format_literally_is_caught_by_the_suite():
+    # IdentDb only checks that what a `find` returns satisfies the filter; it cannot
+    # know a record was left out. The suite can: it stores one with no Format.
+    with pytest.raises(pygamlastan.StoreConformanceError) as caught:
+        idp.check_store_conformance(FindComparesFormatLiterally)
+    assert caught.value.check == "find_filters_on_every_field"
+    assert "an absent Format is `unspecified`" in caught.value.message
+    # The correct pushed-down backend still passes.
+    idp.check_store_conformance(GoodStoreWithFind)
+
+
 class FindIgnoresFilter(GoodStoreWithFind):
     def find(self, user_id, format, sp_name_qualifier, name_qualifier, sp_provided_id):
         return self.for_user(user_id)  # the filter is dropped
