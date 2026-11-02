@@ -69,6 +69,58 @@ def _subject(ref, user="alice", attributes=None, **kw):
     return idp.AuthenticatedSubject(user, attributes, idp.AuthnMethodRef.broker(ref), **kw)
 
 
+# --------------------------------------------------------------------------- #
+# Lifetimes that cannot be added to a date
+# --------------------------------------------------------------------------- #
+
+LATEST = datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("knob", ["session_lifetime_seconds", "lifetime_seconds"])
+@pytest.mark.parametrize(
+    "seconds",
+    [
+        3 * 10**11,  # about 9 500 years: fine for chrono, but not an xs:dateTime
+        10**13,  # past anything chrono holds: used to be a PanicException
+        9_223_372_036_854_775,  # the longest duration PolicyEntry accepts
+    ],
+)
+def test_a_lifetime_too_long_to_add_is_an_error_and_nothing_is_stored(rsa_keypair, knob, seconds):
+    idents = idp.IdentDb(IDP)
+    policy = idp.ReleasePolicy(
+        default=idp.PolicyEntry(nameid_format=core.NAMEID_PERSISTENT, **{knob: seconds})
+    )
+    engine, ref = _engine(rsa_keypair, policy=policy, idents=idents)
+
+    with pytest.raises(pygamlastan.SamlProfileError, match="years 0001-9999"):
+        engine.create_authn_response(_params(), _subject(ref))
+    assert idents.name_ids_for("alice") == []
+
+
+def test_an_authn_instant_at_the_end_of_time_is_an_error_not_a_panic(rsa_keypair):
+    engine, ref = _engine(rsa_keypair, policy=_persistent_policy())
+    with pytest.raises(pygamlastan.SamlProfileError, match="years 0001-9999"):
+        # The default session lifetime added to the last day Python can pass in.
+        engine.create_authn_response(_params(), _subject(ref, authn_instant=LATEST))
+
+
+def test_a_long_but_writable_lifetime_is_still_issued(rsa_keypair):
+    policy = idp.ReleasePolicy(
+        default=idp.PolicyEntry(session_lifetime_seconds=100 * 365 * 24 * 3600)
+    )
+    engine, ref = _engine(rsa_keypair, policy=policy)
+    assert engine.create_authn_response(_params(), _subject(ref)).is_issued
+
+
+def test_not_on_or_after_saturates_instead_of_panicking():
+    now = datetime(2026, 11, 2, 12, 0, tzinfo=timezone.utc)
+    ordinary = idp.ReleasePolicy(default=idp.PolicyEntry(lifetime_seconds=300))
+    assert ordinary.not_on_or_after(SP, now) == now + timedelta(seconds=300)
+    for seconds in (3 * 10**11, 10**13, 9_223_372_036_854_775):
+        policy = idp.ReleasePolicy(default=idp.PolicyEntry(lifetime_seconds=seconds))
+        assert policy.not_on_or_after(SP, now) == LATEST
+
+
 def _persistent_policy():
     return idp.ReleasePolicy(default=idp.PolicyEntry(nameid_format=core.NAMEID_PERSISTENT))
 

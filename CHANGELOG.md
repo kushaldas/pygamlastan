@@ -151,7 +151,12 @@ stack), which is not yet released; `Cargo.toml` carries a git
   values issued under an earlier IdP entity ID or a cache you fully trust.
 - `PolicyEntry(lifetime_seconds=..., session_lifetime_seconds=...)` raise
   `SamlPolicyError` for a value outside the range of a duration (above about
-  9.2e15 seconds) instead of panicking.
+  9.2e15 seconds) instead of panicking. A lifetime that is a valid duration but
+  cannot be added to a date a response can carry (years 0001-9999, so from about
+  3e11 seconds) makes `create_authn_response` raise `SamlProfileError` before
+  anything is stored, where the engine used to panic; so does an `authn_instant`
+  that close to the end of time. `ReleasePolicy.not_on_or_after` saturates at
+  9999-12-31T23:59:59Z in the same case.
 
 ## [0.6.0] - 2026-09-14
 

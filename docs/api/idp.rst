@@ -387,6 +387,10 @@ entry, then the SP's registration-authority entry (when recorded), then the
    .. py:method:: name_form(sp_entity_id: str) -> str
    .. py:method:: lifetime_seconds(sp_entity_id: str) -> int
    .. py:method:: not_on_or_after(sp_entity_id: str, now: datetime.datetime) -> datetime.datetime
+
+      ``now`` plus the assertion lifetime. A lifetime too long to add saturates at
+      ``9999-12-31T23:59:59Z``, the last date an ``xs:dateTime`` can carry.
+
    .. py:method:: sign(sp_entity_id: str) -> SignTargets
    .. py:method:: fail_on_missing_requested(sp_entity_id: str) -> bool
 
@@ -502,8 +506,11 @@ releases attributes and signs the response.
       required attributes that were not released) is a signed denial in the
       outcome. Raises :class:`pygamlastan.SamlStoreError` if the identity or
       assertion store failed, and :class:`pygamlastan.SamlProfileError` for a
-      configuration fault (an unknown ``AuthnMethodRef.broker`` reference, or
-      parameters for a different SP).
+      configuration fault (an unknown ``AuthnMethodRef.broker`` reference,
+      parameters for a different SP, or a lifetime that cannot be added to a
+      date a response can carry: years 0001-9999, so from about 3e11 seconds, or an
+      ``authn_instant`` that close to the end of time). It raises before anything
+      is stored.
 
    .. py:method:: create_denial_response(params: ResponseParams, denial: Denial) -> DeniedResponse
 
