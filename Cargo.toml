@@ -25,10 +25,9 @@ kryptering = { version = "0.7.0", default-features = false, features = ["rustcry
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 base64 = "0.22"
 
-# TEMPORARY: gamlastan's IdP orchestrator, record-shaped `IdentityStore` and the
-# 0.10.0 dependency stack are merged to main but unreleased, and `c761287` is the
-# head of the open backend-trust PR (kushaldas/gamlastan#73): point this at the
-# merge commit once it lands, before that branch is deleted. Delete this block
-# and run `cargo update -p gamlastan` once 0.10.0 is on crates.io.
+# TEMPORARY: gamlastan's IdP orchestrator, record-shaped `IdentityStore`, store
+# verification and conformance suites, and the 0.10.0 dependency stack are merged
+# to main but unreleased. Delete this block and run `cargo update -p gamlastan`
+# once 0.10.0 is on crates.io.
 [patch.crates-io]
-gamlastan = { git = "https://github.com/kushaldas/gamlastan", rev = "c761287" }
+gamlastan = { git = "https://github.com/kushaldas/gamlastan", rev = "97d5a83" }
