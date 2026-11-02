@@ -149,6 +149,14 @@ stack), which is not yet released; `Cargo.toml` carries a git
   value. The cache must be private to this IdP and this secret and must not
   evict. `Eptid(verify_store=False)` turns the check off (with a `UserWarning`), for
   values issued under an earlier IdP entity ID or a cache you fully trust.
+- `profiles.process_authn_request` holds a request to the entity's SAML 2.0
+  `SPSSODescriptor`, chosen by `protocolSupportEnumeration`, not to whichever role
+  is listed first. With a legacy (for example SAML 1.1) role listed before the
+  SAML 2.0 one, an unsigned request used to be checked against the legacy role's
+  signing requirement and `AssertionConsumerService`s, then answered under the
+  SAML 2.0 role (`idp.ResponseParams` already selects that role), bypassing a
+  required signature. Metadata with no SAML 2.0 SP role now raises
+  `SamlProfileError`.
 - `PolicyEntry(lifetime_seconds=..., session_lifetime_seconds=...)` raise
   `SamlPolicyError` for a value outside the range of a duration (above about
   9.2e15 seconds) instead of panicking. A lifetime that is a valid duration but

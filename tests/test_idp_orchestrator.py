@@ -70,6 +70,70 @@ def _subject(ref, user="alice", attributes=None, **kw):
 
 
 # --------------------------------------------------------------------------- #
+# The SAML 2.0 SP role is the one a request is held to
+# --------------------------------------------------------------------------- #
+
+def _two_role_metadata(*, legacy_first, saml2_requires_signed=True):
+    """An SP with a legacy SAML 1.1 role (which does not require signed requests)
+    and a SAML 2.0 role (which does, by default), in the order asked for."""
+    legacy = (
+        '<md:SPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:1.1:protocol" '
+        'AuthnRequestsSigned="false">'
+        '<md:AssertionConsumerService Binding="urn:oasis:names:tc:SAML:1.0:profiles:browser-post" '
+        'Location="https://sp.example.org/legacy-acs" index="0" isDefault="true"/>'
+        "</md:SPSSODescriptor>"
+    )
+    saml2 = (
+        '<md:SPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol" '
+        f'AuthnRequestsSigned="{str(saml2_requires_signed).lower()}">'
+        '<md:AssertionConsumerService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" '
+        f'Location="{ACS}" index="0" isDefault="true"/>'
+        "</md:SPSSODescriptor>"
+    )
+    roles = legacy + saml2 if legacy_first else saml2 + legacy
+    return (
+        '<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" '
+        f'entityID="{SP}">{roles}</md:EntityDescriptor>'
+    )
+
+
+@pytest.mark.parametrize("legacy_first", [True, False])
+def test_an_unsigned_request_is_held_to_the_saml2_roles_signing_requirement(legacy_first):
+    # The legacy role does not require signed requests; the SAML 2.0 role does. Which
+    # role is listed first must not decide which requirement applies.
+    entity = metadata.parse_entity(_two_role_metadata(legacy_first=legacy_first))
+    req = xml.parse_authn_request(_request_xml())
+
+    with pytest.raises(pygamlastan.SamlProfileError, match="signature"):
+        profiles.process_authn_request(req, entity)
+    # A verified signature satisfies it, and the ACS is the SAML 2.0 role's.
+    processed = profiles.process_authn_request(req, entity, request_signature_verified=True)
+    assert processed.acs_url == ACS
+
+
+def test_the_saml2_role_alone_decides_whether_a_signature_is_required():
+    entity = metadata.parse_entity(
+        _two_role_metadata(legacy_first=False, saml2_requires_signed=False)
+    )
+    req = xml.parse_authn_request(_request_xml())
+    assert profiles.process_authn_request(req, entity).acs_url == ACS
+
+
+def test_metadata_with_no_saml2_sp_role_cannot_process_a_request():
+    legacy_only = (
+        '<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" '
+        f'entityID="{SP}"><md:SPSSODescriptor '
+        'protocolSupportEnumeration="urn:oasis:names:tc:SAML:1.1:protocol">'
+        '<md:AssertionConsumerService Binding="urn:oasis:names:tc:SAML:1.0:profiles:browser-post" '
+        f'Location="{ACS}" index="0"/></md:SPSSODescriptor></md:EntityDescriptor>'
+    )
+    entity = metadata.parse_entity(legacy_only)
+    req = xml.parse_authn_request(_request_xml())
+    with pytest.raises(pygamlastan.SamlProfileError, match="SAML 2.0 SPSSODescriptor"):
+        profiles.process_authn_request(req, entity)
+
+
+# --------------------------------------------------------------------------- #
 # Lifetimes that cannot be added to a date
 # --------------------------------------------------------------------------- #
 

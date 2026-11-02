@@ -894,10 +894,14 @@ fn process_authn_request(
             issuer.value, sp_metadata.inner.entity_id
         )));
     }
-    let sp_descs = sp_metadata.inner.sp_sso_descriptors();
-    let sp_desc = sp_descs
-        .first()
-        .ok_or_else(|| profile_err("SP metadata does not contain an SPSSODescriptor"))?;
+    // The SAML 2.0 role, chosen by `protocolSupportEnumeration`, not the first one
+    // listed: a legacy role can come first, and its signing requirement and
+    // AssertionConsumerServices are not the ones this request is held to. This is
+    // the role `idp.ResponseParams` uses too, so the two cannot disagree.
+    let sp_desc = sp_metadata
+        .inner
+        .saml2_sp_sso_descriptor()
+        .ok_or_else(|| profile_err("SP metadata does not contain a SAML 2.0 SPSSODescriptor"))?;
     let processed =
         gidp::process_authn_request(&request.inner, sp_desc, request_signature_verified)
             .map_err(profile_err)?;
