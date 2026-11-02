@@ -49,7 +49,11 @@ dependency stack), which is not yet released; `Cargo.toml` carries a git
   `user_for`, and `IdentDb.name_ids_for` checks every record it returns. This
   adds one `user_for` call per record selected.
 - A value read from the `Eptid` cache must have the shape
-  `<idp>!<sp>!<opaque>`, otherwise `SamlStoreError`: a cache shared with another
+  `<idp>!<sp>!<opaque>` (no `!` in the opaque part, since an entity ID may
+  contain one), otherwise `SamlStoreError`. gamlastan does the check now
+  (gamlastan#73) instead of a copy in the binding, and `Eptid(verify_store=False)`
+  turns it off for values issued under an earlier IdP entity ID or a cache you
+  fully trust: a cache shared with another
   IdP or tenant, a wrong key or a flushed cache could otherwise issue a
   permanently wrong identifier. A forged value of the right shape is still not
   detected, so the cache must be private to this IdP and must not evict.

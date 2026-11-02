@@ -113,16 +113,25 @@ impl Eptid {
     /// digest cannot change what an SP already knows. By default it is
     /// in-memory (lost on restart); pass `store`, an object with
     /// `get(key) -> str | None`, `set(key, value)` and `remove(key)`, to
-    /// persist it. The store is trusted: what it returns is the identifier
-    /// issued. A failing store raises `SamlStoreError`, never a recompute.
+    /// persist it. The store is trusted to return what was issued, but not
+    /// blindly: a value that does not have the shape of an identifier issued for
+    /// this IdP and SP (``<idp>!<sp>!<opaque>``, no ``!`` in the opaque part)
+    /// raises ``SamlStoreError``. That catches a cache shared with another IdP or
+    /// tenant, a key written by the wrong code, a restored or flushed cache. It
+    /// cannot catch a deliberately forged value of the right shape, so the cache
+    /// must be private to this IdP and this secret and must not evict. Pass
+    /// ``verify_store=False`` for values issued under an earlier IdP entity ID, or
+    /// a cache you fully trust. A failing store raises `SamlStoreError`, never a
+    /// recompute.
     #[new]
-    #[pyo3(signature = (secret, digest="sha256", allow_legacy_md5=false, store=None))]
+    #[pyo3(signature = (secret, digest="sha256", allow_legacy_md5=false, store=None, verify_store=true))]
     fn new(
         py: Python<'_>,
         secret: String,
         digest: &str,
         allow_legacy_md5: bool,
         store: Option<Py<PyAny>>,
+        verify_store: bool,
     ) -> PyResult<Self> {
         let options = match digest {
             "sha256" => gi::eptid::EptidOptions::sha256(),
@@ -144,36 +153,22 @@ impl Eptid {
             Some(obj) => KvBackend::Py(PyKeyValueStore { obj }),
             None => KvBackend::InMemory(InMemoryKeyValueStore::new()),
         };
-        let inner =
-            gi::Eptid::try_with_store_options(backend, secret, options).map_err(ident_err)?;
+        let inner = gi::Eptid::try_with_store_options(backend, secret, options)
+            .map_err(ident_err)?
+            .with_store_verification(verify_store);
         Ok(Eptid { inner })
     }
     /// The opaque persistent identifier string for (idp, sp, user).
     ///
-    /// A value from the cache must have the shape gamlastan derives,
-    /// ``<idp>!<sp>!<opaque>``; anything else raises ``SamlStoreError``. That
-    /// catches the realistic faults (a cache shared with another IdP or tenant,
-    /// a key written by the wrong code, a restored or flushed cache). It cannot
-    /// catch a deliberately forged value of the right shape: the cache must be
-    /// private to this IdP and this secret.
+    /// A value from the cache is shape-checked (see the constructor); a wrong one
+    /// raises ``SamlStoreError``.
     fn get(&self, idp_entity_id: &str, sp_entity_id: &str, user_id: &str) -> PyResult<String> {
-        let value = self
-            .inner
+        self.inner
             .get(idp_entity_id, sp_entity_id, user_id)
-            .map_err(store_err)?;
-        let prefix = format!("{idp_entity_id}!{sp_entity_id}!");
-        if value.len() <= prefix.len() || !value.starts_with(&prefix) {
-            return Err(store_err(format!(
-                "the EPTID cache returned a value that does not have the shape of an \
-                 identifier issued for this IdP and SP ({prefix}<opaque>); refusing to use \
-                 it. Is the cache shared with another IdP or tenant?"
-            )));
-        }
-        Ok(value)
+            .map_err(store_err)
     }
     /// The identifier as a persistent NameID (shape-checked like ``get``).
     fn name_id(&self, idp_entity_id: &str, sp_entity_id: &str, user_id: &str) -> PyResult<NameId> {
-        self.get(idp_entity_id, sp_entity_id, user_id)?;
         self.inner
             .name_id(idp_entity_id, sp_entity_id, user_id)
             .map(NameId::wrap)
@@ -186,7 +181,6 @@ impl Eptid {
         sp_entity_id: &str,
         user_id: &str,
     ) -> PyResult<Attribute> {
-        self.get(idp_entity_id, sp_entity_id, user_id)?;
         self.inner
             .attribute(idp_entity_id, sp_entity_id, user_id)
             .map(Attribute::wrap)

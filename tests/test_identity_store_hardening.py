@@ -269,7 +269,13 @@ def test_an_eptid_cache_value_of_the_wrong_shape_is_refused():
     key = f"eptid:{IDP}__{SP}__alice"
     assert eptid.get(IDP, SP, "alice") == good  # an honest cache is unaffected
 
-    for poisoned in ("ATTACKERCONTROLLEDVALUE", f"{IDP}!{OTHER_SP}!abc", f"{IDP}!{SP}!"):
+    # `!` is legal in an entity ID, so a longer SP ID must not pass for this one.
+    for poisoned in (
+        "ATTACKERCONTROLLEDVALUE",
+        f"{IDP}!{OTHER_SP}!abc",
+        f"{IDP}!{SP}!",
+        f"{IDP}!{SP}!other!abc",
+    ):
         cache.data[key] = poisoned
         with pytest.raises(pygamlastan.SamlStoreError, match="shape of an identifier"):
             eptid.get(IDP, SP, "alice")
@@ -277,6 +283,15 @@ def test_an_eptid_cache_value_of_the_wrong_shape_is_refused():
             eptid.name_id(IDP, SP, "alice")
         with pytest.raises(pygamlastan.SamlStoreError, match="shape of an identifier"):
             eptid.attribute(IDP, SP, "alice")
+
+
+def test_eptid_verification_can_be_turned_off_for_values_from_an_older_entity_id():
+    cache = Cache()
+    old = "https://old-idp.example/idp!" + SP + "!abc"
+    cache.data[f"eptid:{IDP}__{SP}__alice"] = old
+    with pytest.raises(pygamlastan.SamlStoreError, match="shape of an identifier"):
+        idp.Eptid("secret", store=cache).get(IDP, SP, "alice")
+    assert idp.Eptid("secret", store=cache, verify_store=False).get(IDP, SP, "alice") == old
 
 
 def test_the_md5_eptid_digest_warns_that_it_is_in_use():

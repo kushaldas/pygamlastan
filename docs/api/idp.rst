@@ -11,7 +11,7 @@ flow.
 eduPersonTargetedID
 -------------------
 
-.. py:class:: Eptid(secret: str, digest: str = "sha256", allow_legacy_md5: bool = False, store: KeyValueStore | None = None)
+.. py:class:: Eptid(secret: str, digest: str = "sha256", allow_legacy_md5: bool = False, store: KeyValueStore | None = None, verify_store: bool = True)
 
    Derives stable, per-SP opaque identifiers from a server-side ``secret``. The
    same user gets a consistent id at one SP but an unlinkable id at another.
@@ -38,7 +38,10 @@ eduPersonTargetedID
       that could not answer, because a recompute could issue a different value
       than the one already issued. The store is trusted: what it returns is the
       identifier issued, after one check: it must have the shape
-      ``<idp>!<sp>!<opaque>``, otherwise :class:`pygamlastan.SamlStoreError`. That
+      ``<idp>!<sp>!<opaque>`` with no ``!`` in the opaque part (an entity ID may
+      contain one, so ``<idp>!<sp>!x!y`` could be another SP's), otherwise
+      :class:`pygamlastan.SamlStoreError`. Pass ``verify_store=False`` for values
+      issued under an earlier IdP entity ID, or a cache you fully trust. That
       catches a cache shared with another IdP or tenant, a key written by the
       wrong code, or a restored or flushed cache; it cannot catch a forged value
       of the right shape. The cache must be private to this IdP and this secret,
