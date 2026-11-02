@@ -127,7 +127,7 @@ Assertion store
 Identity database
 -----------------
 
-.. py:class:: IdentDb(idp_entity_id: str, store: IdentityStore | None = None, domain: str | None = None, persist_transient: bool = False)
+.. py:class:: IdentDb(idp_entity_id: str, store: IdentityStore | None = None, domain: str | None = None, persist_transient: bool = False, verify_store: bool = True)
 
    The IdP identity database (pysaml2 ``IdentDB``): the bidirectional mapping
    between local user ids and the NameIDs issued to relying parties, NameID
@@ -144,6 +144,10 @@ Identity database
    transient NameID, which a back-channel (SOAP) LogoutRequest carrying one
    needs. Set ``persist_transient=True`` to store them; the backend must then
    expire them itself, since the record protocol has no expiry.
+
+   A caller-supplied ``store`` is checked, not trusted (see
+   :class:`IdentityStore`); ``verify_store=False`` turns that off for a store you
+   fully trust. The built-in in-memory store is never checked.
 
    .. py:method:: store(user_id: str, name_id: pygamlastan.core.NameId) -> None
 
@@ -211,19 +215,22 @@ Identity database
 
    Run :func:`check_store_conformance` against your backend before relying on it.
 
-   The binding does not trust what the backend returns. A record from
+   :class:`IdentDb` does not trust what the backend returns (gamlastan's
+   ``IdentDb`` does this for every backend, Rust or Python). A record from
    ``find_durable`` or ``get_or_insert_durable`` must be the durable slot that was
    asked for, and ``user_for(record.value)`` must name the same user; otherwise
    :class:`pygamlastan.SamlStoreError` is raised and the record is not used. A
    query that forgot the user in its filter, a wrong index or a stale cache would
-   otherwise hand one user another user's persistent NameID.
+   otherwise hand one user another user's persistent NameID. ``find_local_id``
+   is confirmed the same way: the owner ``user_for`` names must hold that value
+   in its own ``for_user`` listing.
 
    This holds whether or not you define the optional ``find`` and
-   ``find_durable``: without them the binding filters ``for_user`` itself and
-   checks the record(s) it selects, at the cost of one ``user_for`` call per
+   ``find_durable``: without them the binding filters ``for_user`` and the
+   records it selects are checked, at the cost of one ``user_for`` call per
    record. ``IdentDb.name_ids_for`` checks every record it returns. So
    ``user_for`` must see the backend's own writes (read-your-writes), not a
-   lagging replica.
+   lagging replica; read from the primary.
 
    Raise :class:`pygamlastan.NameIdValueTaken` or
    :class:`pygamlastan.NameIdDurableExists` for a conflict. Any other exception

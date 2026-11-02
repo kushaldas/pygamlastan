@@ -26,6 +26,7 @@ class Store:
         self.wrong_user_for = None  # find_durable ignores the user and returns this user's record
         self.wrong_slot = False  # find_durable returns the user's record for another SP
         self.hijack_insert = None  # get_or_insert_durable returns this user's record
+        self.wrong_owner = None  # user_for names this user whoever holds the value
 
     @staticmethod
     def _slot(n):
@@ -36,6 +37,8 @@ class Store:
         return [n for u, n in self.records if u == user_id]
 
     def user_for(self, value):
+        if self.wrong_owner is not None:
+            return self.wrong_owner
         return next((u for u, n in self.records if n.value == value), None)
 
     def find_durable(self, user_id, sp_name_qualifier, name_qualifier, format):
@@ -139,6 +142,25 @@ def test_a_get_or_insert_durable_that_returns_another_users_record_is_refused():
     # find_durable finds nothing for mallory, so the insert path is taken.
     with pytest.raises(pygamlastan.SamlStoreError, match="does not attribute"):
         db.persistent_nameid("mallory", SP)
+
+
+def test_a_reverse_index_that_names_the_wrong_owner_is_refused():
+    store, db, victim = _db_with_victim()
+    store.wrong_owner = "mallory"  # a stale or wrong user_for index
+    with pytest.raises(pygamlastan.SamlStoreError, match="do not include it"):
+        db.find_local_id(victim)
+    # NameIDMapping / ManageNameID act on this answer, so they refuse it too.
+    with pytest.raises(pygamlastan.SamlStoreError):
+        db.manage_name_id_terminate(victim)
+
+
+def test_verification_can_be_turned_off_for_a_trusted_store():
+    store = Store()
+    db = idp.IdentDb(IDP, store=store, verify_store=False)
+    victim = db.persistent_nameid("victim", SP)
+    store.wrong_user_for = "victim"
+    # With the check off the wrong record is believed: that is what it protects.
+    assert db.persistent_nameid("mallory", SP).value == victim.value
 
 
 def test_an_honest_backend_is_unaffected():

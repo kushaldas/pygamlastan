@@ -16,6 +16,12 @@ dependency stack), which is not yet released; `Cargo.toml` carries a git
 
 ### Changed
 
+- `IdentDb` now relies on gamlastan's own verification of what a store returns
+  (gamlastan#73) instead of a copy in the binding, so `find_local_id` is checked
+  too and the checks apply on every path through `IdentDb`. New
+  `IdentDb(verify_store=True)` turns it off for a store you fully trust; the
+  built-in in-memory store is never checked. Messages are unchanged apart from
+  the store's name.
 - Bumped `gamlastan` to 0.10.0 (bergshamra 0.11, uppsala 0.12) and `kryptering`
   to 0.7.0, which gamlastan 0.10.0 requires. The kryptering feature list gains
   `rustcrypto`, mirroring gamlastan. No source changes were needed for the

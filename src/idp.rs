@@ -368,8 +368,9 @@ fn nid_from_py(obj: &Bound<'_, PyAny>) -> PyResult<GNameId> {
 }
 
 /// Whether `n` is a durable NameID of `format` with exactly these qualifiers.
-/// Transient is never durable, and an absent format is `unspecified`
-/// (mirrors gamlastan's own check, which is crate-private).
+/// Transient is never durable, and an absent format is `unspecified`. Used only by
+/// the `find_durable` fallback over `for_user`; checking what a backend returned is
+/// `IdentDb`'s job (`with_store_verification`).
 fn is_durable_match(
     n: &GNameId,
     sp_name_qualifier: Option<&str>,
@@ -385,57 +386,6 @@ fn is_durable_match(
 impl PyIdentityStore {
     pub(crate) fn new(obj: Py<PyAny>) -> Self {
         PyIdentityStore { obj }
-    }
-
-    /// Refuse a record a Python backend returned for `user_id` unless it is that
-    /// user's own. The backend is the part of the system least under our
-    /// control: a `find_durable` that forgot the user in its filter, a wrong
-    /// index or a stale cache would otherwise hand one user another user's
-    /// persistent NameID, with nothing written to betray it. That is account
-    /// takeover at every SP that has seen the value, so it is checked here,
-    /// where the gamlastan core cannot see the backend.
-    ///
-    /// `slot` is the `(SPNameQualifier, NameQualifier, format)` the lookup asked
-    /// for; the record must be exactly that durable slot, and the store must
-    /// attribute its value to `user_id`.
-    fn verify_own_record(
-        &self,
-        user_id: &str,
-        record: &GNameId,
-        slot: (Option<&str>, Option<&str>, &str),
-        call: &str,
-    ) -> Result<(), StoreError> {
-        let (spq, nq, format) = slot;
-        if !is_durable_match(record, spq, nq, format) {
-            return Err(StoreError::new(format!(
-                "the backend's {call} returned a record that is not the durable NameID \
-                 requested (format {format:?}, SPNameQualifier {spq:?}, NameQualifier \
-                 {nq:?}); refusing to use it"
-            )));
-        }
-        self.verify_attributed_to(user_id, record, call)
-    }
-
-    /// The store must attribute `record`'s value to `user_id`. This is the check
-    /// that catches a lookup which forgot the user: a `for_user` without its
-    /// `WHERE user_id`, a wrong index, a stale cache. It applies to every record
-    /// handed back for a user, including the ones the binding filters out of
-    /// `for_user` itself when the backend defines no pushed-down lookup (the path
-    /// a minimal backend takes), so the control does not depend on whether an
-    /// optional method happens to exist.
-    fn verify_attributed_to(
-        &self,
-        user_id: &str,
-        record: &GNameId,
-        call: &str,
-    ) -> Result<(), StoreError> {
-        match self.user_for(&record.value)? {
-            Some(owner) if owner == user_id => Ok(()),
-            _ => Err(StoreError::new(format!(
-                "the backend's {call} returned a NameID that the store does not attribute \
-                 to this user; refusing to use it"
-            ))),
-        }
     }
 
     fn names(py: Python<'_>, r: Bound<'_, PyAny>) -> PyResult<Vec<GNameId>> {
@@ -483,35 +433,16 @@ impl IdentityStore for PyIdentityStore {
         })
         .map_err(py_store_err)?;
         match pushed {
-            Some(records) => {
-                // A pushed-down query is only as good as the backend's filter, and
-                // these records can reach an SP (NameIDMapping), so each one must
-                // satisfy the filter and be this user's own.
-                for record in &records {
-                    if !filter.matches(record) {
-                        return Err(StoreError::new(
-                            "the backend's find returned a record that does not satisfy the \
-                             filter; refusing to use it",
-                        ));
-                    }
-                    self.verify_attributed_to(user_id, record, "find")?;
-                }
-                Ok(records)
-            }
-            // No pushed-down query on the backend: filter `for_user`, and verify the
-            // records that survive (not every row `for_user` returned: the user may
-            // hold one NameID per SP, and this runs on the login path).
-            None => {
-                let found: Vec<GNameId> = self
-                    .for_user(user_id)?
-                    .into_iter()
-                    .filter(|n| filter.matches(n))
-                    .collect();
-                for record in &found {
-                    self.verify_attributed_to(user_id, record, "for_user")?;
-                }
-                Ok(found)
-            }
+            // `IdentDb` checks that every record satisfies the filter and is the
+            // user's own, so a pushed-down query is not trusted here.
+            Some(records) => Ok(records),
+            // No pushed-down query on the backend: filter `for_user`, as the trait
+            // default does.
+            None => Ok(self
+                .for_user(user_id)?
+                .into_iter()
+                .filter(|n| filter.matches(n))
+                .collect()),
         }
     }
 
@@ -539,29 +470,13 @@ impl IdentityStore for PyIdentityStore {
         })
         .map_err(py_store_err)
         .and_then(|r| match r {
-            Some(found) => {
-                if let Some(record) = &found {
-                    self.verify_own_record(
-                        user_id,
-                        record,
-                        (sp_name_qualifier, name_qualifier, format),
-                        "find_durable",
-                    )?;
-                }
-                Ok(found)
-            }
-            // No pushed-down lookup on the backend: filter `for_user`, and verify the
-            // record that is picked.
-            None => {
-                let found = self
-                    .for_user(user_id)?
-                    .into_iter()
-                    .find(|n| is_durable_match(n, sp_name_qualifier, name_qualifier, format));
-                if let Some(record) = &found {
-                    self.verify_attributed_to(user_id, record, "for_user")?;
-                }
-                Ok(found)
-            }
+            // `IdentDb` checks the record is this user's and the slot asked for.
+            Some(found) => Ok(found),
+            // No pushed-down lookup on the backend: filter `for_user`.
+            None => Ok(self
+                .for_user(user_id)?
+                .into_iter()
+                .find(|n| is_durable_match(n, sp_name_qualifier, name_qualifier, format))),
         })
     }
 
@@ -570,19 +485,8 @@ impl IdentityStore for PyIdentityStore {
         user_id: &str,
         candidate: GNameId,
     ) -> Result<GNameId, InsertError> {
-        // What the caller asked for, kept to check the answer against. A
-        // transient candidate has no uniqueness slot (it is a plain insert), so
-        // only a durable one is checked.
-        let slot = (
-            candidate.sp_name_qualifier.clone(),
-            candidate.name_qualifier.clone(),
-            candidate
-                .format
-                .clone()
-                .unwrap_or_else(|| constants::NAMEID_UNSPECIFIED.to_string()),
-        );
-        let durable = slot.2 != constants::NAMEID_TRANSIENT;
-        let record = Python::attach(|py| {
+        // `IdentDb` checks the answer is this user's record for the slot asked for.
+        Python::attach(|py| {
             let c = nid_to_py(py, candidate).map_err(|e| py_insert_err(py, e))?;
             let r = self
                 .obj
@@ -590,17 +494,7 @@ impl IdentityStore for PyIdentityStore {
                 .call_method1("get_or_insert_durable", (user_id, c))
                 .map_err(|e| py_insert_err(py, e))?;
             nid_from_py(&r).map_err(|e| py_insert_err(py, e))
-        })?;
-        if durable {
-            self.verify_own_record(
-                user_id,
-                &record,
-                (slot.0.as_deref(), slot.1.as_deref(), &slot.2),
-                "get_or_insert_durable",
-            )
-            .map_err(InsertError::Store)?;
-        }
-        Ok(record)
+        })
     }
 
     fn insert(&self, user_id: &str, name_id: GNameId) -> Result<(), InsertError> {
@@ -737,19 +631,30 @@ impl IdentDb {
     /// transient NameID, which a back-channel (SOAP) LogoutRequest carrying one
     /// needs. Set `persist_transient=True` to store them (the backend must then
     /// expire them: the record trait has no expiry).
+    ///
+    /// A caller-supplied ``store`` is not trusted: every record a lookup returns
+    /// for a user must be one its ``user_for`` attributes to that user, a durable
+    /// lookup must return the slot that was asked for, and a pushed-down ``find``
+    /// must satisfy its filter; otherwise ``SamlStoreError``. That needs
+    /// ``user_for`` to see the store's own writes (read from the primary, not a
+    /// lagging replica) and costs one ``user_for`` per record returned. Pass
+    /// ``verify_store=False`` for a store you fully trust. The built-in in-memory
+    /// store is never checked.
     #[new]
-    #[pyo3(signature = (idp_entity_id, store=None, domain=None, persist_transient=false))]
+    #[pyo3(signature = (idp_entity_id, store=None, domain=None, persist_transient=false, verify_store=true))]
     fn new(
         idp_entity_id: String,
         store: Option<Py<PyAny>>,
         domain: Option<String>,
         persist_transient: bool,
+        verify_store: bool,
     ) -> Self {
+        let verify = verify_store && store.is_some();
         let backend = match store {
             Some(obj) => IdentBackend::Py(PyIdentityStore { obj }),
             None => IdentBackend::InMemory(InMemoryIdentityStore::new()),
         };
-        let mut inner = gi::IdentDb::new(backend, idp_entity_id);
+        let mut inner = gi::IdentDb::new(backend, idp_entity_id).with_store_verification(verify);
         if let Some(domain) = domain {
             inner = inner.with_domain(domain);
         }
