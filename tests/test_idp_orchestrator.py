@@ -664,6 +664,50 @@ def test_a_broker_methods_authority_reaches_the_signed_assertion(rsa_keypair):
     assert "https://upstream.example/idp" in outcome.xml
 
 
+@pytest.mark.parametrize(
+    "authority",
+    [
+        "not-a-uri",  # no scheme
+        " https://ok.example",  # leading whitespace
+        "https://ok.example /x",  # embedded whitespace
+        "https://ok.example/\x00x",  # control character
+        "https://ok.example/" + "a" * 1100,  # over 1024 bytes
+    ],
+)
+def test_a_malformed_authenticating_authority_is_refused_before_anything_is_stored(
+    rsa_keypair, authority
+):
+    idents = idp.IdentDb(IDP)
+    assertions = idp.InMemoryAssertionStore()
+    engine, _ = _engine(
+        rsa_keypair, policy=_persistent_policy(), idents=idents, assertions=assertions
+    )
+    subject = idp.AuthenticatedSubject(
+        "alice",
+        [core.Attribute("mail", values=["alice@example.org"])],
+        idp.AuthnMethodRef.inline(core.AUTHN_CONTEXT_PASSWORD, authority),
+    )
+    with pytest.raises(pygamlastan.SamlProfileError, match="authenticating authority"):
+        engine.create_authn_response(_params(), subject)
+    assert idents.name_ids_for("alice") == []
+    assert assertions.assertions_for_subject("alice") == []
+
+
+def test_markup_in_an_authenticating_authority_is_escaped_not_injected(rsa_keypair):
+    # The validator checks the shape of a URI, not for markup: what keeps a payload from
+    # becoming structure is the serializer's escaping. Pin that, so it stays true.
+    engine, _ = _engine(rsa_keypair, policy=_persistent_policy())
+    payload = "https://ok.example</saml:AuthenticatingAuthority><saml:AuthenticatingAuthority>evil"
+    subject = idp.AuthenticatedSubject(
+        "alice",
+        [core.Attribute("mail", values=["alice@example.org"])],
+        idp.AuthnMethodRef.inline(core.AUTHN_CONTEXT_PASSWORD, payload),
+    )
+    xml_out = engine.create_authn_response(_params(), subject).xml
+    assert "<saml:AuthenticatingAuthority>evil" not in xml_out
+    assert xml_out.count("<saml:AuthenticatingAuthority>") == 1
+
+
 def test_an_encrypted_requested_subject_is_reported_but_not_readable():
     encrypted = (
         "<saml:Subject><saml:EncryptedID>"

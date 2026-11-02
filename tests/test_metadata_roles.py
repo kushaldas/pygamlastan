@@ -208,3 +208,79 @@ def test_the_compat_layer_does_not_trust_a_key_published_only_for_a_legacy_role(
     only_legacy = config(legacy_only_xml)
     with pytest.raises(ValueError, match="only in roles that do not declare SAML 2.0"):
         only_legacy.idp_signing_certs(IDP)
+
+
+def _aggregate(*entities):
+    return (
+        '<md:EntitiesDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" '
+        'Name="federation">' + "".join(entities) + "</md:EntitiesDescriptor>"
+    )
+
+
+def _idp_entity(entity_id, protocols, sso_binding, sso_location, cert=None):
+    key = _key(cert, "signing") if cert else ""
+    return (
+        f'<md:EntityDescriptor entityID="{entity_id}">'
+        f'<md:IDPSSODescriptor protocolSupportEnumeration="{protocols}">{key}'
+        f'<md:SingleSignOnService Binding="{sso_binding}" Location="{sso_location}"/>'
+        "</md:IDPSSODescriptor></md:EntityDescriptor>"
+    )
+
+
+@pytest.mark.parametrize("legacy_first", [True, False])
+def test_one_legacy_only_idp_does_not_stop_a_shared_aggregate_from_loading(
+    tmp_path, rsa_keypair, rsa_keypair2, legacy_first
+):
+    # A federation aggregate covers many IdPs this SP never talks to. An entity that
+    # only speaks SAML 1.1 has no SAML 2.0 endpoint, but that is not this SP's problem
+    # and must not discard every other IdP in the file.
+    good = _idp_entity(IDP, SAML2, HTTP_REDIRECT, SAML2_SSO, rsa_keypair2[2])
+    legacy_id = "https://legacy.example.org/idp"
+    legacy = _idp_entity(legacy_id, SAML11, SHIB1_SSO, LEGACY_SSO, rsa_keypair[2])
+    path = tmp_path / "aggregate.xml"
+    path.write_text(_aggregate(*((legacy, good) if legacy_first else (good, legacy))), encoding="utf-8")
+
+    cfg = SPConfig().load(
+        {"service": {"sp": {"want_response_signed": True}}, "metadata": {"local": [str(path)]}}
+    )
+
+    # The good IdP is usable...
+    assert cfg.idp_signing_certs(IDP) == [_der(rsa_keypair2[2])]
+    assert cfg.single_sign_on_service(IDP, HTTP_REDIRECT) == SAML2_SSO
+    # ...and the legacy-only one fails where it is used, with the reason, not at load.
+    with pytest.raises(ValueError, match="only in roles that do not declare SAML 2.0"):
+        cfg.idp_signing_certs(legacy_id)
+    with pytest.raises(ValueError, match="no SingleSignOnService"):
+        cfg.single_sign_on_service(legacy_id, HTTP_REDIRECT)
+
+
+
+def test_a_role_declaring_several_protocols_is_read_as_a_whole(rsa_keypair, tmp_path):
+    # The filter selects roles, not keys or endpoints. One descriptor that declares
+    # SAML 2.0 alongside SAML 1.1 is a SAML 2.0 role, so all of its keys and endpoints
+    # are read; choose endpoints by binding, or split the roles, to separate them.
+    # Documented in docs/api/metadata.rst; pinned here so it cannot change unnoticed.
+    cert = rsa_keypair[2]
+    xml = (
+        f'<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="{IDP}">'
+        f'<md:IDPSSODescriptor protocolSupportEnumeration="{SAML2} {SAML11} urn:mace:shibboleth:1.0">'
+        f"{_key(cert, 'signing')}"
+        f'<md:SingleSignOnService Binding="{SHIB1_SSO}" Location="{LEGACY_SSO}"/>'
+        f'<md:SingleSignOnService Binding="{HTTP_REDIRECT}" Location="{SAML2_SSO}"/>'
+        "</md:IDPSSODescriptor></md:EntityDescriptor>"
+    )
+    ed = metadata.parse_entity(xml)
+
+    assert ed.signing_certificates("idp") == [_der(cert)]
+    assert _locations(ed.single_sign_on_services()) == sorted([LEGACY_SSO, SAML2_SSO])
+    # Selecting by binding is the lever that keeps the legacy endpoint out.
+    saml2_only = [e for e in ed.single_sign_on_services() if e.binding == HTTP_REDIRECT]
+    assert [e.location for e in saml2_only] == [SAML2_SSO]
+
+    path = tmp_path / "idp.xml"
+    path.write_text(xml, encoding="utf-8")
+    cfg = SPConfig().load(
+        {"service": {"sp": {"want_response_signed": True}}, "metadata": {"local": [str(path)]}}
+    )
+    assert cfg.idp_signing_certs(IDP) == [_der(cert)]
+    assert cfg.single_sign_on_service(IDP, HTTP_REDIRECT) == SAML2_SSO

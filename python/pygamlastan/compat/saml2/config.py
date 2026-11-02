@@ -308,7 +308,12 @@ class SPConfig:
             if expiry is not None and expiry <= now:
                 raise ValueError(f"metadata entity {entity.entity_id!r} has expired")
             if entity.is_idp():
-                if not entity.single_sign_on_services():
+                # A document-quality check, not a trust decision, so it reads every
+                # role (`protocol=None`): the accessors default to SAML 2.0, and an
+                # entity that only speaks a legacy protocol would otherwise fail here
+                # and discard every other IdP in a shared aggregate. Whether an IdP
+                # can serve a SAML 2.0 message is decided where it is used.
+                if not entity.single_sign_on_services(protocol=None):
                     raise ValueError(
                         f"IdP metadata {entity.entity_id!r} has no SSO endpoint"
                     )

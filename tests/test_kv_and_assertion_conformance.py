@@ -246,3 +246,29 @@ def test_threads_must_be_positive_for_every_suite():
     ):
         with pytest.raises(ValueError, match="threads"):
             check(factory, threads=0)
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        idp.check_store_conformance,
+        idp.check_kv_conformance,
+        idp.check_assertion_store_conformance,
+        lambda factory: idp.check_store_conformance_one(
+            "concurrent_insert_of_one_value_has_one_winner", factory, threads=16
+        ),
+    ],
+)
+def test_a_failing_factory_is_called_once_and_nothing_else_runs(run):
+    # A setup error stops at the first check, so a backend's constructor is not run
+    # again for every check, and the concurrent checks never start their worker threads.
+    calls = []
+
+    def broken():
+        calls.append(1)
+        raise RuntimeError("no database")
+
+    with pytest.raises(RuntimeError, match="no database"):
+        run(broken)
+    assert len(calls) == 1
+
