@@ -91,8 +91,8 @@ stack), which is not yet released; `Cargo.toml` carries a git
   use; the default stays SHA-256 and is not byte-compatible with pysaml2.
 - `AttributeConverter.from_directions(name_format, fro, to)`,
   `add_wire_to_local` and `add_local_to_wire`, for loading a pysaml2 attribute
-  map, whose inbound and outbound directions differ (eduID's deployed
-  `saml_uri` is 83 inbound and 99 outbound entries); `add_mapping` mirrors both
+  map, whose inbound and outbound directions differ (one production `saml_uri`
+  map has 83 inbound and 99 outbound entries); `add_mapping` mirrors both
   directions and cannot. `AttributeConverterSet(converters,
   allow_unknown_attributes=False)` builds a set from your own converters, and
   `ReleasePolicy(converters=...)` makes the release policy resolve names through

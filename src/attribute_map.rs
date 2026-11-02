@@ -46,8 +46,8 @@ impl AttributeConverter {
     ///
     /// ``fro`` holds ``(wire name, local name)`` pairs and ``to`` holds
     /// ``(local name, wire name)`` pairs. Use this, not ``add_mapping``, for a
-    /// map whose two directions differ. Real maps do: eduID's deployed
-    /// ``saml_uri`` has 83 inbound and 99 outbound entries. Mirroring one would
+    /// map whose two directions differ. Real maps do: one production
+    /// ``saml_uri`` map has 83 inbound and 99 outbound entries. Mirroring one would
     /// make an SP-supplied attribute name resolve to a local attribute it did not
     /// before, and where several wire names share a local name it would make the
     /// outbound name depend on insertion order. A key that repeats within one

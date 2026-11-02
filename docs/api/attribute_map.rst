@@ -46,7 +46,7 @@ the shipped maps. See the :doc:`../guides/attributes` guide.
       keeps its later entry.
 
       Use this, not :meth:`add_mapping`, for a map whose two directions differ.
-      Real maps do: eduID's deployed ``saml_uri`` has 83 inbound and 99 outbound
+      Real maps do: one production ``saml_uri`` map has 83 inbound and 99 outbound
       entries, with 13 local names that can be sent but are not recognised on
       the way in. Mirroring such a map would make an SP-supplied attribute name
       resolve to a local attribute it did not before (which feeds release
