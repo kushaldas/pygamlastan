@@ -565,11 +565,19 @@ impl ResponseOutcome {
 ///
 /// The engine itself only ever calls `store_assertion`; the other three serve the
 /// back-channel query responders and the application's own logout code. Nothing in
-/// pygamlastan calls them yet, so their results are not verified; whoever binds a
-/// query responder on top of this adapter must check that an assertion returned
-/// for a subject is that subject's, as `PyIdentityStore` does for NameIDs.
-struct PyAssertionStore {
+/// pygamlastan calls them yet. gamlastan's query helpers
+/// (`get_authn_statements`, `create_assertion_id_request_response`) refuse an
+/// assertion for the wrong subject or ID, so whoever binds a responder on top of
+/// this adapter gets that check by going through them; calling the adapter
+/// directly does not. `check_assertion_store_conformance` tests a backend.
+pub(crate) struct PyAssertionStore {
     obj: Py<PyAny>,
+}
+
+impl PyAssertionStore {
+    pub(crate) fn new(obj: Py<PyAny>) -> Self {
+        PyAssertionStore { obj }
+    }
 }
 
 fn store_failure(e: PyErr) -> StoreError {

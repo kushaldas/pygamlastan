@@ -310,6 +310,46 @@ the contract the response engine relies on.
    filtered lookups, ``replace`` semantics (including refusing another user's
    value), scoped removal, and two concurrent checks.
 
+Checking a cache or assertion-store backend
+-------------------------------------------
+
+The same applies to the other two pluggable backends, and for the same reason: a
+subtle fault passes a smoke test and only shows under load or in production.
+
+.. code-block:: python
+
+   idp.check_kv_conformance(lambda: MyEptidCache(fresh_collection()))
+   idp.check_assertion_store_conformance(lambda: MyAssertionStore(fresh_collection()))
+
+.. py:function:: check_kv_conformance(new_store: Callable[[], KeyValueStore], threads: int = 16) -> None
+.. py:function:: check_kv_conformance_one(name: str, new_store: Callable[[], KeyValueStore], threads: int = 16) -> None
+.. py:data:: KV_CONFORMANCE_CHECKS
+
+   For the ``store`` of an :class:`Eptid`. The checks: an absent key reads as
+   ``None``, values round-trip, a key means exactly itself (no case folding, no
+   prefix or substring matching), ``remove`` drops that key only, **no eviction**
+   (a size limit or TTL silently re-derives an identifier that may differ), and
+   concurrent writers each read back a whole value of their own.
+
+.. py:function:: check_assertion_store_conformance(new_store: Callable[[], AssertionStore], threads: int = 16) -> None
+.. py:function:: check_assertion_store_conformance_one(name: str, new_store: Callable[[], AssertionStore], threads: int = 16) -> None
+.. py:data:: ASSERTION_STORE_CONFORMANCE_CHECKS
+
+   For an assertion store. The checks: an absent assertion reads as absent, a
+   stored assertion round-trips (each ID returns its own, and the validity window
+   and authentication statement survive both ``get_assertion`` and
+   ``assertions_for_subject``), a subject lookup is exact and case sensitive, an
+   ID stored twice is not listed twice, an ID stored again for another subject
+   moves, removal clears the subject index, and concurrent stores lose nothing and
+   leave an ID under one subject.
+
+Both behave like :func:`check_store_conformance`: ``new_store`` returns a fresh,
+empty store each time, a violation raises :class:`pygamlastan.StoreConformanceError`
+(``.check``, ``.message``), a factory that raises propagates as it was, and the GIL
+is released while they run. Run them against a real instance with its real indexes;
+a store that serialises every call can pass the concurrent checks without being
+safe, and a race between separate processes is not detected.
+
 Attribute-release policy
 ------------------------
 

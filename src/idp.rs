@@ -70,6 +70,12 @@ pub(crate) struct PyKeyValueStore {
     obj: Py<PyAny>,
 }
 
+impl PyKeyValueStore {
+    pub(crate) fn new(obj: Py<PyAny>) -> Self {
+        PyKeyValueStore { obj }
+    }
+}
+
 impl KeyValueStore for PyKeyValueStore {
     fn get(&self, key: &str) -> Result<Option<String>, StoreError> {
         Python::attach(|py| {

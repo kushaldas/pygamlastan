@@ -14,6 +14,17 @@ Tracks gamlastan `main` (the IdP orchestrator from PR #43 and the 0.10.0
 dependency stack), which is not yet released; `Cargo.toml` carries a git
 `[patch.crates-io]` until 0.10.0 is on crates.io.
 
+### Added
+
+- `idp.check_kv_conformance` / `check_kv_conformance_one` /
+  `KV_CONFORMANCE_CHECKS` and `idp.check_assertion_store_conformance` /
+  `check_assertion_store_conformance_one` /
+  `ASSERTION_STORE_CONFORMANCE_CHECKS`: gamlastan's conformance suites for the
+  `Eptid` cache and for an assertion store, with the same shape as
+  `check_store_conformance` (fresh store per call, `StoreConformanceError` with
+  `.check` and `.message`, GIL released). The cache suite includes the no-eviction
+  check: an evicted EPTID is re-derived, and the new value can differ.
+
 ### Changed
 
 - `IdentDb` now relies on gamlastan's own verification of what a store returns

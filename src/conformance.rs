@@ -1,4 +1,5 @@
-//! Binding for gamlastan's `IdentityStore` conformance suite.
+//! Bindings for gamlastan's backend conformance suites: `IdentityStore`,
+//! `KeyValueStore` (the `Eptid` cache) and `AssertionStore`.
 //!
 //! The record-shaped store has no default write methods because a non-atomic
 //! default would silently leave a race open, and nothing in a Python adapter
@@ -11,10 +12,13 @@ use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use std::sync::Mutex;
 
+use gamlastan::idp::assertion_store::conformance as aconf;
 use gamlastan::idp::ident::conformance as gconf;
+use gamlastan::idp::ident::kv_conformance as kconf;
 
 use crate::errors::StoreConformanceError;
-use crate::idp::PyIdentityStore;
+use crate::idp::{PyIdentityStore, PyKeyValueStore};
+use crate::orchestrator::PyAssertionStore;
 
 fn conformance_err(py: Python<'_>, e: gconf::ConformanceError) -> PyErr {
     let err = StoreConformanceError::new_err(e.to_string());
@@ -31,20 +35,21 @@ fn conformance_err(py: Python<'_>, e: gconf::ConformanceError) -> PyErr {
 ///
 /// A factory that raises is a setup error, not a conformance failure: the first
 /// such exception is re-raised as it was.
-fn run_suite(
+fn run_suite<S>(
     py: Python<'_>,
     new_store: Py<PyAny>,
-    run: impl FnOnce(&dyn Fn() -> PyIdentityStore) -> Result<(), gconf::ConformanceError> + Send,
+    adapt: fn(Py<PyAny>) -> S,
+    run: impl FnOnce(&dyn Fn() -> S) -> Result<(), gconf::ConformanceError> + Send,
 ) -> PyResult<()> {
     let factory_failure: Mutex<Option<PyErr>> = Mutex::new(None);
     let result = py.detach(|| {
         let make = || {
             Python::attach(|py| match new_store.bind(py).call0() {
-                Ok(obj) => PyIdentityStore::new(obj.unbind()),
+                Ok(obj) => adapt(obj.unbind()),
                 Err(e) => {
                     factory_failure.lock().unwrap().get_or_insert(e);
                     // Nothing to test; the failure above is raised afterwards.
-                    PyIdentityStore::new(py.None())
+                    adapt(py.None())
                 }
             })
         };
@@ -79,7 +84,9 @@ fn options(threads: usize) -> PyResult<gconf::Options> {
 #[pyo3(signature = (new_store, threads=16))]
 fn check_store_conformance(py: Python<'_>, new_store: Py<PyAny>, threads: usize) -> PyResult<()> {
     let opts = options(threads)?;
-    run_suite(py, new_store, |make| gconf::check_with(make, &opts))
+    run_suite(py, new_store, PyIdentityStore::new, |make| {
+        gconf::check_with(make, &opts)
+    })
 }
 
 /// Run the single check called `name` (one of `STORE_CONFORMANCE_CHECKS`).
@@ -93,12 +100,81 @@ fn check_store_conformance_one(
     threads: usize,
 ) -> PyResult<()> {
     let opts = options(threads)?;
-    run_suite(py, new_store, |make| gconf::check_one(&name, make, &opts))
+    run_suite(py, new_store, PyIdentityStore::new, |make| {
+        gconf::check_one(&name, make, &opts)
+    })
+}
+
+/// Check that a key-value cache backend (the `store` of an `Eptid`) honours its
+/// contract: absent keys, exact keys, scoped removal, no eviction, and concurrent
+/// writers. Raises `StoreConformanceError` (with `.check` and `.message`) on the
+/// first violation. `new_store` returns a **fresh, empty** store each call.
+#[pyfunction]
+#[pyo3(signature = (new_store, threads=16))]
+fn check_kv_conformance(py: Python<'_>, new_store: Py<PyAny>, threads: usize) -> PyResult<()> {
+    let opts = options(threads)?;
+    run_suite(py, new_store, PyKeyValueStore::new, |make| {
+        kconf::check_with(make, &opts)
+    })
+}
+
+/// Run the single check called `name` (one of `KV_CONFORMANCE_CHECKS`).
+#[pyfunction]
+#[pyo3(signature = (name, new_store, threads=16))]
+fn check_kv_conformance_one(
+    py: Python<'_>,
+    name: String,
+    new_store: Py<PyAny>,
+    threads: usize,
+) -> PyResult<()> {
+    let opts = options(threads)?;
+    run_suite(py, new_store, PyKeyValueStore::new, |make| {
+        kconf::check_one(&name, make, &opts)
+    })
+}
+
+/// Check that an `AssertionStore` backend honours its contract: exact subject
+/// lookup, no duplicates, a re-stored ID moving between subjects, removal
+/// clearing the subject index, the validity window surviving, and concurrent
+/// stores. Raises `StoreConformanceError` (with `.check` and `.message`) on the
+/// first violation. `new_store` returns a **fresh, empty** store each call.
+#[pyfunction]
+#[pyo3(signature = (new_store, threads=16))]
+fn check_assertion_store_conformance(
+    py: Python<'_>,
+    new_store: Py<PyAny>,
+    threads: usize,
+) -> PyResult<()> {
+    let opts = options(threads)?;
+    run_suite(py, new_store, PyAssertionStore::new, |make| {
+        aconf::check_with(make, &opts)
+    })
+}
+
+/// Run the single check called `name` (one of `ASSERTION_STORE_CONFORMANCE_CHECKS`).
+#[pyfunction]
+#[pyo3(signature = (name, new_store, threads=16))]
+fn check_assertion_store_conformance_one(
+    py: Python<'_>,
+    name: String,
+    new_store: Py<PyAny>,
+    threads: usize,
+) -> PyResult<()> {
+    let opts = options(threads)?;
+    run_suite(py, new_store, PyAssertionStore::new, |make| {
+        aconf::check_one(&name, make, &opts)
+    })
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("STORE_CONFORMANCE_CHECKS", gconf::CHECKS.to_vec())?;
     m.add_function(wrap_pyfunction!(check_store_conformance, m)?)?;
     m.add_function(wrap_pyfunction!(check_store_conformance_one, m)?)?;
+    m.add("KV_CONFORMANCE_CHECKS", kconf::CHECKS.to_vec())?;
+    m.add_function(wrap_pyfunction!(check_kv_conformance, m)?)?;
+    m.add_function(wrap_pyfunction!(check_kv_conformance_one, m)?)?;
+    m.add("ASSERTION_STORE_CONFORMANCE_CHECKS", aconf::CHECKS.to_vec())?;
+    m.add_function(wrap_pyfunction!(check_assertion_store_conformance, m)?)?;
+    m.add_function(wrap_pyfunction!(check_assertion_store_conformance_one, m)?)?;
     Ok(())
 }

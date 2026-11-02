@@ -438,6 +438,39 @@ def check_store_conformance_one(
     """Run one check, by name (see ``STORE_CONFORMANCE_CHECKS``)."""
     ...
 
+KV_CONFORMANCE_CHECKS: list[str]
+
+def check_kv_conformance(new_store: Callable[[], KeyValueStore], threads: int = ...) -> None:
+    """Check that a key-value cache (the ``store`` of an ``Eptid``) honours its
+    contract: exact keys, scoped removal, no eviction, concurrent writers.
+    ``new_store`` returns a fresh, empty store on every call. Raises
+    ``StoreConformanceError`` (``.check``, ``.message``) on the first violation."""
+    ...
+
+def check_kv_conformance_one(
+    name: str, new_store: Callable[[], KeyValueStore], threads: int = ...
+) -> None:
+    """Run one check, by name (see ``KV_CONFORMANCE_CHECKS``)."""
+    ...
+
+ASSERTION_STORE_CONFORMANCE_CHECKS: list[str]
+
+def check_assertion_store_conformance(
+    new_store: Callable[[], AssertionStore], threads: int = ...
+) -> None:
+    """Check that an assertion store honours its contract: exact subject lookup,
+    no duplicates, a re-stored ID moving between subjects, removal clearing the
+    subject index, the validity window surviving, concurrent stores. ``new_store``
+    returns a fresh, empty store on every call. Raises ``StoreConformanceError``
+    (``.check``, ``.message``) on the first violation."""
+    ...
+
+def check_assertion_store_conformance_one(
+    name: str, new_store: Callable[[], AssertionStore], threads: int = ...
+) -> None:
+    """Run one check, by name (see ``ASSERTION_STORE_CONFORMANCE_CHECKS``)."""
+    ...
+
 def releasable_attributes(
     policies: list[EntityCategoryPolicy],
     sp_entity_categories: list[str],
