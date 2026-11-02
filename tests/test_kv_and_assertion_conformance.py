@@ -174,6 +174,14 @@ def test_a_broken_assertion_store_is_caught_by_the_right_check(broken, check):
     assert caught.value.check == check
 
 
+def test_an_assertion_factory_that_raises_is_a_setup_error():
+    def broken():
+        raise RuntimeError("no database")
+
+    with pytest.raises(RuntimeError, match="no database"):
+        idp.check_assertion_store_conformance(broken)
+
+
 def test_a_single_assertion_check_can_be_run_by_name():
     idp.check_assertion_store_conformance_one("missing_assertion_is_absent", Delegating)
     with pytest.raises(pygamlastan.StoreConformanceError, match="no_such_check"):

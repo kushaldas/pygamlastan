@@ -134,15 +134,17 @@ stack), which is not yet released; `Cargo.toml` carries a git
   wrong index or a stale cache could otherwise hand one user another user's
   persistent NameID, which is account takeover at every SP that has seen it. It
   costs one `user_for` call per record returned. `IdentDb(verify_store=False)`
-  turns it off.
+  turns it off, with a `UserWarning`.
 - A value read from the `Eptid` cache must have the shape
   `<idp>!<sp>!<opaque>` (no `!` in the opaque part, since an entity ID may
-  contain one), otherwise `SamlStoreError`: a cache shared with another IdP or
-  tenant, a wrong key or a flushed cache could otherwise issue a permanently
-  wrong identifier. A forged value of the right shape is not detected, so the
-  cache must be private to this IdP and must not evict. `Eptid(verify_store=False)`
-  turns it off, for values issued under an earlier IdP entity ID or a cache you
-  fully trust.
+  contain one), otherwise `SamlStoreError`. This rejects another IdP's or SP's
+  value and a key written by the wrong code. It cannot tell two right-shaped
+  values apart: a cache shared with another deployment that uses the same IdP
+  entity ID, a backup restored from one, and a forged value are not detected, and
+  a flush is a miss, after which a changed secret or digest issues a different
+  value. The cache must be private to this IdP and this secret and must not
+  evict. `Eptid(verify_store=False)` turns the check off (with a `UserWarning`), for
+  values issued under an earlier IdP entity ID or a cache you fully trust.
 - `PolicyEntry(lifetime_seconds=..., session_lifetime_seconds=...)` raise
   `SamlPolicyError` for a value outside the range of a duration (above about
   9.2e15 seconds) instead of panicking.

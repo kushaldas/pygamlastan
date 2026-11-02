@@ -119,16 +119,19 @@ impl Eptid {
     /// digest cannot change what an SP already knows. By default it is
     /// in-memory (lost on restart); pass `store`, an object with
     /// `get(key) -> str | None`, `set(key, value)` and `remove(key)`, to
-    /// persist it. The store is trusted to return what was issued, but not
-    /// blindly: a value that does not have the shape of an identifier issued for
+    /// persist it. The store is trusted to return what was issued, with one
+    /// check: a value that does not have the shape of an identifier issued for
     /// this IdP and SP (``<idp>!<sp>!<opaque>``, no ``!`` in the opaque part)
-    /// raises ``SamlStoreError``. That catches a cache shared with another IdP or
-    /// tenant, a key written by the wrong code, a restored or flushed cache. It
-    /// cannot catch a deliberately forged value of the right shape, so the cache
+    /// raises ``SamlStoreError``. That rejects another IdP's or SP's value and a
+    /// key written by the wrong code. It cannot tell two right-shaped values
+    /// apart, so it does **not** catch a cache shared with another deployment
+    /// that uses the same IdP entity ID, a backup restored from one, or a
+    /// forged value; and it cannot see a flush, which is a miss: after a flush a
+    /// changed secret or digest silently issues a different value. The cache
     /// must be private to this IdP and this secret and must not evict. Pass
     /// ``verify_store=False`` for values issued under an earlier IdP entity ID, or
-    /// a cache you fully trust. A failing store raises `SamlStoreError`, never a
-    /// recompute.
+    /// a cache you fully trust (this emits a ``UserWarning``). A failing store
+    /// raises `SamlStoreError`, never a recompute.
     #[new]
     #[pyo3(signature = (secret, digest="sha256", allow_legacy_md5=false, store=None, verify_store=true))]
     fn new(
@@ -153,6 +156,13 @@ impl Eptid {
                 py,
                 "Eptid(digest=\"pysaml2-md5\") derives identifiers with MD5. It exists only to \
                  reproduce stock pysaml2 values during a migration; plan to retire it.",
+            );
+        }
+        if !verify_store && store.is_some() {
+            crate::convert::warn(
+                py,
+                "Eptid(verify_store=False) accepts whatever the cache returns, including \
+                 another IdP's or SP's identifier",
             );
         }
         let backend = match store {
@@ -638,17 +648,25 @@ impl IdentDb {
     /// must satisfy its filter; otherwise ``SamlStoreError``. That needs
     /// ``user_for`` to see the store's own writes (read from the primary, not a
     /// lagging replica) and costs one ``user_for`` per record returned. Pass
-    /// ``verify_store=False`` for a store you fully trust. The built-in in-memory
-    /// store is never checked.
+    /// ``verify_store=False`` for a store you fully trust (this emits a
+    /// ``UserWarning``). The built-in in-memory store is never checked.
     #[new]
     #[pyo3(signature = (idp_entity_id, store=None, domain=None, persist_transient=false, verify_store=true))]
     fn new(
+        py: Python<'_>,
         idp_entity_id: String,
         store: Option<Py<PyAny>>,
         domain: Option<String>,
         persist_transient: bool,
         verify_store: bool,
     ) -> Self {
+        if !verify_store && store.is_some() {
+            crate::convert::warn(
+                py,
+                "IdentDb(verify_store=False) accepts whatever the store returns; a lookup \
+                 that forgot its user can hand one principal another's persistent NameID",
+            );
+        }
         let verify = verify_store && store.is_some();
         let backend = match store {
             Some(obj) => IdentBackend::Py(PyIdentityStore { obj }),
@@ -700,23 +718,14 @@ impl IdentDb {
     }
     /// All NameIDs stored for a local user.
     ///
-    /// Each record is checked to be attributed to the user by the store
-    /// (``user_for``), so a ``for_user`` that forgot its filter raises
-    /// ``SamlStoreError`` instead of listing another user's NameIDs.
+    /// Unless ``verify_store=False``, each record is checked to be attributed to
+    /// the user by the store (``user_for``), so a ``for_user`` that forgot its
+    /// filter raises ``SamlStoreError`` instead of listing another user's NameIDs.
     fn name_ids_for(&self, user_id: &str) -> PyResult<Vec<NameId>> {
-        let records = self.inner.name_ids_for(user_id).map_err(store_err)?;
-        for record in &records {
-            match self.inner.find_local_id(record).map_err(store_err)? {
-                Some(owner) if owner == user_id => {}
-                _ => {
-                    return Err(store_err(
-                        "the backend's for_user returned a NameID that the store does not \
-                         attribute to this user; refusing to use it",
-                    ))
-                }
-            }
-        }
-        Ok(records.into_iter().map(NameId::wrap).collect())
+        self.inner
+            .name_ids_for(user_id)
+            .map(|v| v.into_iter().map(NameId::wrap).collect())
+            .map_err(store_err)
     }
     /// An existing non-transient NameID matching (user, SP, NameQualifier).
     #[pyo3(signature = (user_id, sp_name_qualifier=None, name_qualifier=None))]

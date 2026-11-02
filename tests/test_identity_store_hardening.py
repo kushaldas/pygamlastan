@@ -156,7 +156,8 @@ def test_a_reverse_index_that_names_the_wrong_owner_is_refused():
 
 def test_verification_can_be_turned_off_for_a_trusted_store():
     store = Store()
-    db = idp.IdentDb(IDP, store=store, verify_store=False)
+    with pytest.warns(UserWarning, match="verify_store=False"):
+        db = idp.IdentDb(IDP, store=store, verify_store=False)
     victim = db.persistent_nameid("victim", SP)
     store.wrong_user_for = "victim"
     # With the check off the wrong record is believed: that is what it protects.
@@ -291,7 +292,68 @@ def test_eptid_verification_can_be_turned_off_for_values_from_an_older_entity_id
     cache.data[f"eptid:{IDP}__{SP}__alice"] = old
     with pytest.raises(pygamlastan.SamlStoreError, match="shape of an identifier"):
         idp.Eptid("secret", store=cache).get(IDP, SP, "alice")
-    assert idp.Eptid("secret", store=cache, verify_store=False).get(IDP, SP, "alice") == old
+    with pytest.warns(UserWarning, match="verify_store=False"):
+        trusting = idp.Eptid("secret", store=cache, verify_store=False)
+    assert trusting.get(IDP, SP, "alice") == old
+
+
+def test_switching_verification_off_is_only_silent_when_nothing_is_switched_off():
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        # The built-in stores are never checked, so there is nothing to warn about.
+        idp.IdentDb(IDP, verify_store=False)
+        idp.Eptid("secret", verify_store=False)
+        # And leaving verification on is silent.
+        idp.IdentDb(IDP, store=Store())
+        idp.Eptid("secret", store=Cache())
+
+
+def test_name_ids_for_costs_one_user_for_per_record_and_none_when_trusted():
+    class Counting(Store):
+        def __init__(self):
+            super().__init__()
+            self.calls = {"for_user": 0, "user_for": 0}
+
+        def for_user(self, user_id):
+            self.calls["for_user"] += 1
+            return super().for_user(user_id)
+
+        def user_for(self, value):
+            self.calls["user_for"] += 1
+            return super().user_for(value)
+
+    for verify, expected_user_for in ((True, 3), (False, 0)):
+        store = Counting()
+        if verify:
+            db = idp.IdentDb(IDP, store=store)
+        else:
+            with pytest.warns(UserWarning):
+                db = idp.IdentDb(IDP, store=store, verify_store=False)
+        for sp in (SP, OTHER_SP, "https://third.example.org/sp"):
+            db.persistent_nameid("alice", sp)
+        store.calls.update(for_user=0, user_for=0)
+        assert len(db.name_ids_for("alice")) == 3
+        assert store.calls == {"for_user": 1, "user_for": expected_user_for}, verify
+
+
+def test_the_eptid_check_cannot_tell_two_right_shaped_values_apart():
+    # Pins the documented limit: the cache must be private to this IdP and this
+    # secret. A value derived from another secret, but shaped like ours, is used.
+    shared = Cache()
+    a = idp.Eptid("secret-A", store=shared)
+    b = idp.Eptid("secret-B", store=Cache())
+    from_a = a.get(IDP, SP, "alice")
+    assert idp.Eptid("secret-B", store=shared).get(IDP, SP, "alice") == from_a
+    assert from_a != b.get(IDP, SP, "alice")
+
+
+def test_a_flushed_eptid_cache_is_a_miss_and_a_changed_secret_then_changes_the_value():
+    cache = Cache()
+    before = idp.Eptid("old-secret", store=cache).get(IDP, SP, "alice")
+    cache.data.clear()  # a flush is a miss: nothing for the shape check to see
+    assert idp.Eptid("new-secret", store=cache).get(IDP, SP, "alice") != before
 
 
 def test_the_md5_eptid_digest_warns_that_it_is_in_use():

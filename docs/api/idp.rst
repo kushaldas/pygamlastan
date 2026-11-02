@@ -40,12 +40,15 @@ eduPersonTargetedID
       identifier issued, after one check: it must have the shape
       ``<idp>!<sp>!<opaque>`` with no ``!`` in the opaque part (an entity ID may
       contain one, so ``<idp>!<sp>!x!y`` could be another SP's), otherwise
-      :class:`pygamlastan.SamlStoreError`. Pass ``verify_store=False`` for values
-      issued under an earlier IdP entity ID, or a cache you fully trust. That
-      catches a cache shared with another IdP or tenant, a key written by the
-      wrong code, or a restored or flushed cache; it cannot catch a forged value
-      of the right shape. The cache must be private to this IdP and this secret,
-      and must not evict issued values (no TTL).
+      :class:`pygamlastan.SamlStoreError`. That rejects another IdP's or SP's
+      value and a key written by the wrong code. It cannot tell two right-shaped
+      values apart, so it does **not** catch a cache shared with another
+      deployment that uses the same IdP entity ID, a backup restored from one, or
+      a forged value; and it cannot see a flush, which is a miss: after a flush, a
+      changed secret or digest silently issues a different value. The cache must
+      be private to this IdP and this secret, and must not evict issued values
+      (no TTL). Pass ``verify_store=False`` for values issued under an earlier IdP
+      entity ID, or a cache you fully trust; it emits a ``UserWarning``.
 
       Keys are ``eptid:<idp>__<sp>__<user>`` and values are ``idp!sp!hash``
       strings, the same shape pysaml2 stores. pysaml2 keys its cache
@@ -150,7 +153,8 @@ Identity database
 
    A caller-supplied ``store`` is checked, not trusted (see
    :class:`IdentityStore`); ``verify_store=False`` turns that off for a store you
-   fully trust. The built-in in-memory store is never checked.
+   fully trust, and emits a ``UserWarning``. The built-in in-memory store is
+   never checked.
 
    .. py:method:: store(user_id: str, name_id: pygamlastan.core.NameId) -> None
 
@@ -531,6 +535,12 @@ releases attributes and signs the response.
    ``AuthnMethodRef.broker(reference)`` names a method registered with
    :meth:`AuthnBroker.add`. A reference the broker does not know is an error,
    never a class ref taken from the string.
+
+   ``authn_authority`` (here and in :meth:`AuthnBroker.add`) goes into the
+   signed assertion's ``AuthenticatingAuthority``. It must be an absolute URI: a
+   scheme, no whitespace, control or non-XML characters, at most 1024 bytes.
+   Anything else raises :class:`pygamlastan.SamlProfileError` before anything is
+   stored.
 
 .. py:class:: EstablishedSession(subject_id, authn_method, authn_instant, session_index)
 

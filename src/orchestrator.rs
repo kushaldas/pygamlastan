@@ -145,6 +145,11 @@ impl AuthnMethodRef {
     /// context in a proxy), never from the ``AuthnRequest``. A registered
     /// ``AuthnMethodRef.broker`` is held to the broker's registration, but is
     /// still your claim about which method ran.
+    ///
+    /// ``authn_authority``, if given, goes into the signed assertion's
+    /// ``AuthenticatingAuthority``: it must be an absolute URI (a scheme, no
+    /// whitespace, control or non-XML characters, at most 1024 bytes), otherwise
+    /// ``SamlProfileError`` before anything is stored.
     #[staticmethod]
     #[pyo3(signature = (class_ref, authn_authority=None))]
     fn inline(class_ref: String, authn_authority: Option<String>) -> Self {
@@ -565,11 +570,13 @@ impl ResponseOutcome {
 ///
 /// The engine itself only ever calls `store_assertion`; the other three serve the
 /// back-channel query responders and the application's own logout code. Nothing in
-/// pygamlastan calls them yet. gamlastan's query helpers
-/// (`get_authn_statements`, `create_assertion_id_request_response`) refuse an
-/// assertion for the wrong subject or ID, so whoever binds a responder on top of
-/// this adapter gets that check by going through them; calling the adapter
-/// directly does not. `check_assertion_store_conformance` tests a backend.
+/// pygamlastan calls them yet, and nothing here checks their results.
+/// gamlastan's query helpers (`get_authn_statements`,
+/// `create_assertion_id_request_response`) refuse an assertion for the wrong
+/// subject or ID, but they are not bound to Python: whoever builds a back-channel
+/// responder on this adapter must check that an assertion returned for a subject
+/// is that subject's, and one returned for an ID has that ID, or bind the helpers
+/// first. `check_assertion_store_conformance` tests a backend.
 pub(crate) struct PyAssertionStore {
     obj: Py<PyAny>,
 }
