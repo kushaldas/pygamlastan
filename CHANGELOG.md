@@ -119,6 +119,9 @@ stack), which is not yet released; `Cargo.toml` carries a git
   found". `IdentDb` methods, `Eptid` methods and `InMemoryAssertionStore`
   methods raise `SamlStoreError` on a backend failure. A Python store reports a
   conflict by raising `NameIdValueTaken` or `NameIdDurableExists`.
+- **Breaking:** `EntityDescriptor`'s role accessors take `protocol` and, by default,
+  read only SAML 2.0 roles (see Security). Metadata whose SAML 2.0 role is not marked
+  as such now yields no keys or endpoints, where it used to be read regardless.
 - Email and unspecified NameIDs are now stable per (user, SP, format), like
   persistent ones. Transient NameIDs are no longer stored unless
   `IdentDb(persist_transient=True)`.
@@ -149,6 +152,20 @@ stack), which is not yet released; `Cargo.toml` carries a git
   value. The cache must be private to this IdP and this secret and must not
   evict. `Eptid(verify_store=False)` turns the check off (with a `UserWarning`), for
   values issued under an earlier IdP entity ID or a cache you fully trust.
+- `EntityDescriptor`'s role accessors read only the roles that declare SAML 2.0.
+  An entity can carry a legacy (for example SAML 1.1) role beside a SAML 2.0 one, and
+  `signing_certificates`, `encryption_certificates`, `assertion_consumer_services`,
+  `single_sign_on_services`, `single_logout_services`, `name_id_formats` and
+  `requested_attributes` used to read every role, so a key published only for the
+  legacy role was trusted to verify SAML 2.0 messages (`compat`'s
+  `idp_signing_certs` and the Django IdP example verify signatures with them), and
+  the legacy role's endpoints and requested attributes were mixed in. They now take
+  `protocol` (default `"urn:oasis:names:tc:SAML:2.0:protocol"`); `protocol=None`
+  reads every role, for inspection tools, and must not be used for a trust
+  decision. A role that declares several protocols is still read as a whole, so
+  choose endpoints by binding. A key listed in both roles is returned once, not
+  twice. `idp_signing_certs` says so when the only signing key is in a role that
+  does not declare SAML 2.0.
 - `profiles.process_authn_request` holds a request to the entity's SAML 2.0
   `SPSSODescriptor`, chosen by `protocolSupportEnumeration`, not to whichever role
   is listed first. With a legacy (for example SAML 1.1) role listed before the

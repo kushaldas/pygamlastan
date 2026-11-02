@@ -442,6 +442,12 @@ class SPConfig:
             raise ValueError(f"no metadata for IdP {idp_entity_id!r}")
         certs = ed.signing_certificates("idp")
         if not certs:
+            if ed.signing_certificates("idp", protocol=None):
+                raise ValueError(
+                    f"IdP {idp_entity_id!r} metadata has a signing certificate only in "
+                    f"roles that do not declare SAML 2.0, so it cannot verify a SAML 2.0 "
+                    f"response"
+                )
             raise ValueError(
                 f"IdP {idp_entity_id!r} metadata has no signing certificate"
             )
