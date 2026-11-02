@@ -187,6 +187,11 @@ class Status:
     def is_success(self) -> bool: ...
 
 class Assertion:
+    def to_xml(self) -> str:
+        """Serialize to a standalone ``<saml:Assertion>`` (inverse of
+        ``xml.parse_assertion``). The model carries no signature; the signed
+        document the SP received is ``IssuedResponse.xml``."""
+        ...
     @property
     def id(self) -> str: ...
     @property

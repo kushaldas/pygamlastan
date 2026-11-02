@@ -551,6 +551,17 @@ impl Status {
 
 #[pymethods]
 impl Assertion {
+    /// Serialize this assertion to a standalone ``<saml:Assertion>`` document, the
+    /// inverse of ``xml.parse_assertion``. A persistent assertion store writes this
+    /// and reads it back with ``xml.parse_assertion``.
+    ///
+    /// It serializes the assertion *model*, which carries no signature
+    /// (``has_signature`` only records that one was requested). The signed
+    /// document the SP received is ``IssuedResponse.xml``.
+    fn to_xml(&self) -> PyResult<String> {
+        use gamlastan::xml::serialize::SamlSerialize;
+        self.inner.to_xml_string().map_err(crate::errors::xml_err)
+    }
     #[getter]
     fn id(&self) -> &str {
         &self.inner.id

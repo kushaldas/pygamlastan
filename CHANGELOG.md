@@ -35,6 +35,10 @@ stack), which is not yet released; `Cargo.toml` carries a git
   persisted, not only held in the built-in in-memory store. A store that cannot
   record an assertion makes `create_authn_response` raise `SamlStoreError`
   instead of issuing.
+- `core.Assertion.to_xml()`, the inverse of `xml.parse_assertion`, so a persistent
+  assertion store can write an assertion out and read it back. It serializes the
+  assertion model, which carries no signature; the signed document the SP received
+  is `IssuedResponse.xml`.
 - `PolicyEntry` settings `session_lifetime_seconds`, `supported_nameid_formats`,
   `signing_preference` and `deny_unconfigured_release`, with the matching
   `ReleasePolicy` readers, and the module constants `ISSUABLE_NAMEID_FORMATS` and

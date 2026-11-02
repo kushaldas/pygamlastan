@@ -83,6 +83,15 @@ read-only.
    None), ``authn_statements`` (list of :class:`AuthnStatement`),
    ``attribute_statements`` (list of :class:`AttributeStatement`).
 
+   .. py:method:: to_xml() -> str
+
+      Serialize to a standalone ``<saml:Assertion>``; the inverse of
+      :func:`pygamlastan.xml.parse_assertion`. A persistent assertion store
+      writes this and reads it back with ``parse_assertion``. It serializes the
+      assertion *model*, which carries no signature (``has_signature`` only
+      records that one was requested); the signed document the SP received is
+      ``IssuedResponse.xml``.
+
 .. py:class:: Response
 
    ``id``, ``issue_instant``, ``destination``, ``in_response_to``, ``issuer``,

@@ -10,7 +10,7 @@ import threading
 import pytest
 
 import pygamlastan
-from pygamlastan import idp
+from pygamlastan import idp, xml
 
 
 # --------------------------------------------------------------------------- #
@@ -146,6 +146,57 @@ class ListsEveryonesAssertions(Delegating):
 class RemoveDoesNothingAssertions(Delegating):
     def remove_assertion(self, assertion_id):
         pass
+
+
+class XmlAssertionStore:
+    """Persists assertions the way a SQL or Mongo backend has to: as XML, keeping
+    nothing live. Reads rebuild native assertions with ``xml.parse_assertion``."""
+
+    def __init__(self):
+        self.xml_by_id = {}
+        self.lock = threading.Lock()
+
+    def store_assertion(self, assertion):
+        with self.lock:
+            # Replacing the document also moves an ID that is stored for a new subject.
+            self.xml_by_id[assertion.id] = assertion.to_xml()
+
+    def get_assertion(self, assertion_id):
+        with self.lock:
+            doc = self.xml_by_id.get(assertion_id)
+        return None if doc is None else xml.parse_assertion(doc)
+
+    def assertions_for_subject(self, value):
+        with self.lock:
+            docs = list(self.xml_by_id.values())
+        parsed = (xml.parse_assertion(doc) for doc in docs)
+        return [a for a in parsed if a.subject.name_id.value == value]
+
+    def remove_assertion(self, assertion_id):
+        with self.lock:
+            self.xml_by_id.pop(assertion_id, None)
+
+
+def test_an_assertion_store_that_persists_xml_passes_every_check():
+    # Needs Assertion.to_xml: a backend that cannot serialize an assertion cannot
+    # persist one, and the checks include the validity window and statements that
+    # must survive the round trip.
+    idp.check_assertion_store_conformance(XmlAssertionStore)
+
+
+def test_the_engine_stores_assertions_as_xml_without_a_signature(rsa_keypair):
+    from test_idp_orchestrator import _engine, _params, _subject
+
+    store = XmlAssertionStore()
+    engine, ref = _engine(rsa_keypair, assertions=store)
+    issued = engine.create_authn_response(_params(), _subject(ref)).issued
+
+    persisted = store.get_assertion(issued.assertion_id)
+    assert persisted.id == issued.assertion_id
+    assert persisted.subject.name_id.value
+    # The model is persisted, not the signed document the SP received.
+    assert "SignatureValue" in issued.xml
+    assert "SignatureValue" not in store.xml_by_id[issued.assertion_id]
 
 
 def test_the_assertion_check_names_are_listed():
