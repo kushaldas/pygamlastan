@@ -31,6 +31,8 @@ eduPersonTargetedID
 
    .. py:class:: KeyValueStore
 
+      A runtime-checkable ``typing.Protocol``, importable as ``pygamlastan.idp.KeyValueStore``, for annotations, ``isinstance`` checks and explicit inheritance. It lists the required methods only; ``isinstance`` checks that they exist, not their signatures, so run the conformance suite.
+
       Protocol for the ``store`` argument: ``get(key: str) -> str | None``,
       ``set(key: str, value: str) -> None`` and ``remove(key: str) -> None``.
       Any exception is a backend failure and surfaces as
@@ -102,6 +104,8 @@ Assertion store
 ---------------
 
 .. py:class:: AssertionStore
+
+   A runtime-checkable ``typing.Protocol``, importable as ``pygamlastan.idp.AssertionStore``, for annotations, ``isinstance`` checks and explicit inheritance. It lists the required methods only; ``isinstance`` checks that they exist, not their signatures, so run the conformance suite.
 
    Protocol for a persistent store of issued assertions, passed as
    ``ResponseEngine(assertions=...)`` (the built-in :class:`InMemoryAssertionStore`
@@ -213,6 +217,9 @@ Identity database
    ``NewEncryptedID`` (which requires decryption first) is not supported.
 
 .. py:class:: IdentityStore
+
+   A runtime-checkable ``typing.Protocol``, importable as ``pygamlastan.idp.IdentityStore``, for annotations, ``isinstance`` checks and explicit inheritance. It lists the required methods only; ``isinstance`` checks that they exist, not their signatures, so run the conformance suite. The optional ``find`` and
+   ``find_durable`` are not members, so a minimal backend still matches.
 
    Protocol for a pluggable :class:`IdentDb` backend: one record per
    (user, NameID). The backend must enforce two unique constraints: the NameID
