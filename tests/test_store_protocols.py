@@ -4,7 +4,9 @@
 `ImportError`.
 """
 
+import ast
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -74,3 +76,30 @@ def test_the_protocols_are_not_confused_with_each_other():
     assert not isinstance(cache, idp.AssertionStore)
     assert not isinstance(cache, idp.IdentityStore)
     assert pygamlastan.idp.KeyValueStore is not pygamlastan.idp.AssertionStore
+
+
+STUB = Path(__file__).resolve().parent.parent / "python" / "pygamlastan" / "idp.pyi"
+
+
+@pytest.mark.skipif(not STUB.exists(), reason="stub not in this checkout")
+@pytest.mark.parametrize("name", NAMES)
+def test_the_stub_declares_the_same_runtime_checkable_protocol(name):
+    # Type checkers read the stub, so a protocol that is runtime-checkable at runtime
+    # must be declared so there too, or `isinstance(store, idp.<Name>)` is rejected.
+    # The two definitions are written twice, so keep them from drifting apart.
+    tree = ast.parse(STUB.read_text(encoding="utf-8"))
+    (node,) = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == name]
+
+    decorators = {ast.unparse(d) for d in node.decorator_list}
+    assert "runtime_checkable" in decorators, f"{name} in idp.pyi is not @runtime_checkable"
+
+    stub_methods = {
+        item.name
+        for item in node.body
+        if isinstance(item, ast.FunctionDef) and not item.name.startswith("_")
+    }
+    runtime = getattr(idp, name)
+    runtime_methods = {
+        attr for attr, value in vars(runtime).items() if callable(value) and not attr.startswith("_")
+    }
+    assert stub_methods == runtime_methods, f"{name}: stub and runtime protocol disagree"

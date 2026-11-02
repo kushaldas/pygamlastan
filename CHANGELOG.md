@@ -83,9 +83,10 @@ stack), which is not yet released; `Cargo.toml` carries a git
 - `idp.IdentityStore`, `idp.KeyValueStore` and `idp.AssertionStore`, runtime-checkable
   `typing.Protocol`s for the three pluggable backends, so backend authors can import
   them for annotations, `isinstance` checks and explicit inheritance. The stub
-  declared them, so they type-checked while raising `ImportError` at runtime. They
-  list the required methods only; the optional `find` / `find_durable` are not
-  members.
+  declared them, so they type-checked while raising `ImportError` at runtime; the
+  stub now marks them `@runtime_checkable` too, so `isinstance` against them
+  type-checks. They list the required methods only; the optional `find` /
+  `find_durable` are not members.
 - `SamlStoreError`, `NameIdValueTaken` and `NameIdDurableExists` exceptions.
   `NameIdValueTaken` and `NameIdDurableExists` are `SamlIdentError`s;
   `SamlStoreError` is a direct child of `SamlError` on purpose, so an existing

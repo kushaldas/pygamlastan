@@ -1,6 +1,6 @@
 from datetime import datetime
 from collections.abc import Callable, Iterable
-from typing import Literal, Protocol
+from typing import Literal, Protocol, runtime_checkable
 
 from .core import Assertion, Attribute, NameId, NameIdPolicy, RequestedAuthnContext
 from .attribute_map import AttributeConverterSet
@@ -25,6 +25,7 @@ SUBJECT_ID_ATTR: str
 PAIRWISE_ID_ATTR: str
 SUBJECT_ID_REQ_ATTR: str
 
+@runtime_checkable
 class IdentityStore(Protocol):
     """Record-shaped NameID backend: one record per (user, NameID).
 
@@ -68,6 +69,7 @@ class IdentityStore(Protocol):
     def remove(self, value: str) -> None: ...
     def remove_all(self, user_id: str) -> None: ...
 
+@runtime_checkable
 class KeyValueStore(Protocol):
     """Cache for ``Eptid``: issued values are remembered so a later change of
     secret or digest cannot change what an SP already knows. The keys are
@@ -388,6 +390,7 @@ class ResponseOutcome:
     @property
     def xml(self) -> str: ...
 
+@runtime_checkable
 class AssertionStore(Protocol):
     """Where the response engine records issued assertions, so back-channel
     queries and logout can find them. Assertions cross as ``core.Assertion``.
