@@ -55,8 +55,10 @@ class IdentityStore(Protocol):
     ``find(user_id, format, sp_name_qualifier, name_qualifier, sp_provided_id)
     -> Iterable[NameId]`` to push down ``IdentDb.find_nameid`` (``None`` means
     unconstrained; a field that is set must equal the record's exactly, so a
-    record without it does not match). Each record ``find`` returns must satisfy
-    the filter and belong to ``user_id``, or ``SamlStoreError`` is raised.
+    record without it does not match, except that a record with no ``format``
+    counts as ``unspecified``: ``find(..., format="urn:...:unspecified", ...)``
+    must return it). Each record ``find`` returns must satisfy the filter and
+    belong to ``user_id``, or ``SamlStoreError`` is raised.
     """
     def for_user(self, user_id: str) -> Iterable[NameId]: ...
     def user_for(self, value: str) -> str | None: ...

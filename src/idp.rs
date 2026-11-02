@@ -345,7 +345,8 @@ impl InMemoryAssertionStore {
 /// `find(user_id, format, sp_name_qualifier, name_qualifier, sp_provided_id)`
 /// and `find_durable` are optional and default to filtering `for_user`. In
 /// `find`, `None` means unconstrained and a field that is set must equal the
-/// record's exactly (a record that lacks the field does not match).
+/// record's exactly (a record that lacks the field does not match), except that a
+/// record with no `format` counts as `unspecified`.
 ///
 /// Atomicity comes from two unique constraints the backend must enforce (see
 /// `IdentityStore`). A backend signals a conflict by raising `NameIdValueTaken`
@@ -695,7 +696,8 @@ impl IdentDb {
     /// The NameIDs stored for a local user that match every filter that is set
     /// (pysaml2 `find_nameid`). An unset filter matches anything; a set one must
     /// equal the record's value exactly, so a record without that field does not
-    /// match. Order is unspecified.
+    /// match, except that a record with no ``format`` counts as ``unspecified``.
+    /// Order is unspecified.
     #[pyo3(signature = (user_id, format=None, sp_name_qualifier=None, name_qualifier=None, sp_provided_id=None))]
     fn find_nameid(
         &self,

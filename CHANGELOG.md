@@ -57,7 +57,8 @@ stack), which is not yet released; `Cargo.toml` carries a git
 - `IdentDb.find_nameid(user_id, format=None, sp_name_qualifier=None,
   name_qualifier=None, sp_provided_id=None)` (pysaml2 `find_nameid`), and an
   optional `find(...)` on the Python store protocol to push the filter into a
-  query.
+  query. A pushed-down `find` must treat a record with no `format` as `unspecified`,
+  as the fallback over `for_user` does.
 - `IdentDb(verify_store=True)` and `Eptid(verify_store=True)`: opt-outs for the
   checks described under Security, for a store you fully trust. The built-in
   in-memory stores are never checked.

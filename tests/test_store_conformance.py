@@ -12,7 +12,7 @@ import time
 import pytest
 
 import pygamlastan
-from pygamlastan import idp
+from pygamlastan import core, idp
 
 TRANSIENT = "urn:oasis:names:tc:SAML:2.0:nameid-format:transient"
 UNSPECIFIED = "urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified"
@@ -233,7 +233,13 @@ class GoodStoreWithFind(GoodStore):
                 n
                 for u, n in self.records
                 if u == user_id
-                and all(w is None or getattr(n, k) == w for k, w in want.items())
+                # A record with no Format counts as `unspecified`.
+                and (format is None or (n.format or UNSPECIFIED) == format)
+                and all(
+                    w is None or getattr(n, k) == w
+                    for k, w in want.items()
+                    if k != "format"
+                )
             ]
 
 
@@ -247,6 +253,26 @@ def test_a_pushed_down_find_is_used_and_passes_the_suite():
     assert store.find_calls == [("alice", None, SP_A, None, None)]
     # The suite checks the backend's own `find` against the filter semantics.
     idp.check_store_conformance(GoodStoreWithFind)
+
+
+@pytest.mark.parametrize("store_class", [GoodStore, GoodStoreWithFind])
+def test_a_record_with_no_format_counts_as_unspecified_in_find_nameid(store_class):
+    # The filter has the same meaning whether the backend filters for_user itself
+    # (GoodStore defines no `find`) or pushes it down: an absent Format is
+    # `unspecified`, so it is found by that format and by no other.
+    db = idp.IdentDb(IDP, store=store_class())
+    db.store("alice", core.NameId("no-format", sp_name_qualifier=SP_A, name_qualifier=IDP))
+    persistent = db.persistent_nameid("alice", SP_A)
+
+    def values(**filter_):
+        return sorted(n.value for n in db.find_nameid("alice", **filter_))
+
+    assert values(format=UNSPECIFIED) == ["no-format"]
+    assert values(format=core.NAMEID_PERSISTENT) == [persistent.value]
+    assert values() == sorted(["no-format", persistent.value])
+    # It combines with the other fields like any other.
+    assert values(format=UNSPECIFIED, sp_name_qualifier=SP_A) == ["no-format"]
+    assert values(format=UNSPECIFIED, sp_name_qualifier=SP_B) == []
 
 
 class FindIgnoresFilter(GoodStoreWithFind):

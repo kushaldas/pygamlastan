@@ -174,7 +174,9 @@ Identity database
       ``find_nameid``). An unset filter matches anything. A set one must equal
       the record's value exactly, so a record that lacks the field does not match
       (unlike :meth:`match_local_id`, where ``None`` means "the record has no
-      such qualifier"). Order is unspecified.
+      such qualifier"). The one exception is ``format``: a record with no
+      ``Format`` counts as ``unspecified``, so ``format`` set to the
+      ``unspecified`` URI matches it. Order is unspecified.
 
    .. py:method:: name_ids_for(user_id: str) -> list[pygamlastan.core.NameId]
    .. py:method:: match_local_id(user_id: str, sp_name_qualifier: str | None = None, name_qualifier: str | None = None) -> pygamlastan.core.NameId | None
