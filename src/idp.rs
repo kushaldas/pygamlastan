@@ -131,7 +131,9 @@ impl Eptid {
     /// must be private to this IdP and this secret and must not evict. Pass
     /// ``verify_store=False`` for values issued under an earlier IdP entity ID, or
     /// a cache you fully trust (this emits a ``UserWarning``). A failing store
-    /// raises `SamlStoreError`, never a recompute.
+    /// raises `SamlStoreError`, never a recompute. The cache key deliberately
+    /// excludes the secret, so rotation does not miss; see the security guide,
+    /// "Decisions and limits of the IdP engine and its backends".
     #[new]
     #[pyo3(signature = (secret, digest="sha256", allow_legacy_md5=false, store=None, verify_store=true))]
     fn new(

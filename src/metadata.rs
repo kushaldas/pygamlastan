@@ -177,7 +177,9 @@ impl EntityDescriptor {
     /// The SP roles that declare `protocol` in `protocolSupportEnumeration`, or every
     /// SP role when `protocol` is `None`. An entity can carry a legacy role beside a
     /// SAML 2.0 one; a key or endpoint from the legacy role must not be offered for
-    /// a SAML 2.0 message.
+    /// a SAML 2.0 message. This selects roles, not endpoints (a role declaring
+    /// several protocols is read whole); see the security guide, "Decisions and
+    /// limits of the IdP engine and its backends".
     fn sp_roles<'a>(
         &'a self,
         protocol: Option<&'a str>,

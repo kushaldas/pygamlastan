@@ -144,7 +144,9 @@ impl AuthnMethodRef {
     /// your login flow actually did (a constant, or the upstream IdP's reported
     /// context in a proxy), never from the ``AuthnRequest``. A registered
     /// ``AuthnMethodRef.broker`` is held to the broker's registration, but is
-    /// still your claim about which method ran.
+    /// still your claim about which method ran. This is a decision, not an
+    /// oversight: see the security guide, "Decisions and limits of the IdP engine
+    /// and its backends".
     ///
     /// ``authn_authority``, if given, goes into the signed assertion's
     /// ``AuthenticatingAuthority``: it must be an absolute URI (a scheme, no
