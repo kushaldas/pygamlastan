@@ -10,85 +10,10 @@ surfacing it correctly to Python.
 
 ## [Unreleased]
 
-Tracks gamlastan `main` (the IdP orchestrator from PR #43 and the 0.10.0
-dependency stack), which is not yet released; `Cargo.toml` carries a git
+Tracks gamlastan 0.10.0 (the IdP orchestrator, the store verification and
+conformance suites, and the bergshamra 0.11 / uppsala 0.12 / kryptering 0.7
+stack), which is not yet released; `Cargo.toml` carries a git
 `[patch.crates-io]` until 0.10.0 is on crates.io.
-
-### Added
-
-- `idp.check_kv_conformance` / `check_kv_conformance_one` /
-  `KV_CONFORMANCE_CHECKS` and `idp.check_assertion_store_conformance` /
-  `check_assertion_store_conformance_one` /
-  `ASSERTION_STORE_CONFORMANCE_CHECKS`: gamlastan's conformance suites for the
-  `Eptid` cache and for an assertion store, with the same shape as
-  `check_store_conformance` (fresh store per call, `StoreConformanceError` with
-  `.check` and `.message`, GIL released). The cache suite includes the no-eviction
-  check: an evicted EPTID is re-derived, and the new value can differ.
-
-### Changed
-
-- `IdentDb` now relies on gamlastan's own verification of what a store returns
-  (gamlastan#73) instead of a copy in the binding, so `find_local_id` is checked
-  too and the checks apply on every path through `IdentDb`. New
-  `IdentDb(verify_store=True)` turns it off for a store you fully trust; the
-  built-in in-memory store is never checked. Messages are unchanged apart from
-  the store's name.
-- Bumped `gamlastan` to 0.10.0 (bergshamra 0.11, uppsala 0.12) and `kryptering`
-  to 0.7.0, which gamlastan 0.10.0 requires. The kryptering feature list gains
-  `rustcrypto`, mirroring gamlastan. No source changes were needed for the
-  kryptering 0.7 API.
-- **Breaking:** the Python `IdentityStore` protocol passed as
-  `IdentDb(store=...)` is now record-shaped (one record per user/NameID):
-  `for_user`, `user_for`, `get_or_insert_durable`, `insert`, `replace`,
-  `remove`, `remove_all`, and an optional `find_durable`. The old
-  `get`/`set`/`remove` key-value protocol no longer applies to `IdentDb`. The
-  backend must enforce the two unique constraints documented on the protocol.
-- **Breaking:** store-backed calls now raise instead of falling back to "not
-  found". `IdentDb` methods, `Eptid` methods and `InMemoryAssertionStore`
-  methods raise `SamlStoreError` on a backend failure. A Python store reports a
-  conflict by raising `NameIdValueTaken` or `NameIdDurableExists`.
-- Email and unspecified NameIDs are now stable per (user, SP, format), like
-  persistent ones. Transient NameIDs are no longer stored.
-
-### Security
-
-- The ownership check on records from a Python `IdentityStore` no longer depends
-  on the optional methods. Without `find` / `find_durable` the binding filters
-  `for_user` itself, and that path returned its result unchecked, so the
-  simplest backend (the one most likely to have a lookup that forgot the user)
-  had the least protection. Now the record(s) it selects are verified with
-  `user_for`, and `IdentDb.name_ids_for` checks every record it returns. This
-  adds one `user_for` call per record selected.
-- A value read from the `Eptid` cache must have the shape
-  `<idp>!<sp>!<opaque>` (no `!` in the opaque part, since an entity ID may
-  contain one), otherwise `SamlStoreError`. gamlastan does the check now
-  (gamlastan#73) instead of a copy in the binding, and `Eptid(verify_store=False)`
-  turns it off for values issued under an earlier IdP entity ID or a cache you
-  fully trust: a cache shared with another
-  IdP or tenant, a wrong key or a flushed cache could otherwise issue a
-  permanently wrong identifier. A forged value of the right shape is still not
-  detected, so the cache must be private to this IdP and must not evict.
-- `Eptid(digest="pysaml2-md5", allow_legacy_md5=True)` now emits a
-  `UserWarning` that MD5 is in use; before, the opt-in was silent.
-- `PolicyEntry(lifetime_seconds=..., session_lifetime_seconds=...)` raise
-  `SamlPolicyError` for a value outside the range of a duration (above about
-  9.2e15 seconds) instead of panicking.
-- Documented that `AuthnMethodRef.inline` is never verified by the engine (for
-  an `exact` request it satisfies the request by matching the request, so it
-  must not be built from request data), and that the engine's policy, identity
-  database, broker and signer must not be mutated from inside a store callback.
-
-- `SamlStoreError` is no longer a `SamlIdentError`. Code written before store
-  errors existed wraps identity calls in `except SamlIdentError` to mean "no such
-  principal"; with the old hierarchy that handler would have turned a database
-  outage back into a missing record.
-- A record a Python `IdentityStore` returns from `find_durable` or
-  `get_or_insert_durable` is now checked before it is used: it must be the
-  durable slot that was asked for, and `user_for(value)` must name the same user,
-  otherwise `SamlStoreError`. A backend with a wrong filter, index or cache could
-  otherwise hand one user another user's persistent NameID. This adds one
-  `user_for` call per lookup, and requires `user_for` to see the backend's own
-  writes (not a lagging replica).
 
 ### Added
 
@@ -99,19 +24,17 @@ dependency stack), which is not yet released; `Cargo.toml` carries a git
   `ResponseOutcome`, `IssuedResponse` and `DeniedResponse`. `release="policy"`
   filters through the `ReleasePolicy`; `release="pass_through"` is for a proxy
   whose attributes were filtered upstream. A store failure is `SamlStoreError`
-  and any other fault `SamlProfileError`; neither is ever a signed denial.
-- `IdentDb.find_nameid(user_id, format=None, sp_name_qualifier=None,
-  name_qualifier=None, sp_provided_id=None)` (pysaml2 `find_nameid`), and an
-  optional `find(...)` on the Python store protocol to push the filter into a
-  query. The records a pushed-down `find` returns are checked like the durable
-  lookups: each must satisfy the filter and belong to the user, otherwise
-  `SamlStoreError`. The conformance suite now exercises the backend's own `find`.
-- `idp.check_store_conformance(new_store, threads=16)`, `check_store_conformance_one`
-  and `STORE_CONFORMANCE_CHECKS`: gamlastan's `IdentityStore` conformance suite,
-  runnable from Python against a real backend (a missing unique index compiles
-  fine and only misbehaves under load). It releases the GIL while it runs, since
-  the concurrent checks call the store from several threads. A failure raises
-  the new `StoreConformanceError` with `.check` and `.message`.
+  and any other fault `SamlProfileError`; neither is ever a signed denial. The
+  engine takes `AuthnMethodRef.inline` on trust (for an `exact` request it
+  satisfies the request by matching the request, so never build it from request
+  data), and its policy, identity database, broker and signer must not be
+  mutated from inside a store callback.
+- `ResponseEngine(assertions=...)` accepts any object implementing the new
+  `AssertionStore` protocol (`store_assertion`, `get_assertion`,
+  `assertions_for_subject`, `remove_assertion`), so issued assertions can be
+  persisted, not only held in the built-in in-memory store. A store that cannot
+  record an assertion makes `create_authn_response` raise `SamlStoreError`
+  instead of issuing.
 - `PolicyEntry` settings `session_lifetime_seconds`, `supported_nameid_formats`,
   `signing_preference` and `deny_unconfigured_release`, with the matching
   `ReleasePolicy` readers, and the module constants `ISSUABLE_NAMEID_FORMATS` and
@@ -123,9 +46,32 @@ dependency stack), which is not yet released; `Cargo.toml` carries a git
   `SigningAlgorithms`: per-SP signature and digest algorithm selection (SHA-2
   RSA and ECDSA only; the SP's metadata can only choose among your entries).
 - `AuthnBroker(allow_exact_level_matching=...)` and `AuthnBroker.is_empty()`.
+- `ResponseOptions(authenticating_authorities=...)`.
 - `IdentDb(persist_transient=True)`, to store transient NameIDs so
   `find_local_id` can resolve one (a back-channel logout needs it). Without it,
   which is the default, they are not stored.
+- `IdentDb.find_nameid(user_id, format=None, sp_name_qualifier=None,
+  name_qualifier=None, sp_provided_id=None)` (pysaml2 `find_nameid`), and an
+  optional `find(...)` on the Python store protocol to push the filter into a
+  query.
+- `IdentDb(verify_store=True)` and `Eptid(verify_store=True)`: opt-outs for the
+  checks described under Security, for a store you fully trust. The built-in
+  in-memory stores are never checked.
+- Conformance suites for the pluggable backends, runnable from Python against a
+  real instance (a missing unique index compiles fine and only misbehaves under
+  load). Each takes a factory returning a fresh, empty store, releases the GIL
+  while it runs because the concurrent checks call the store from several
+  threads, and raises the new `StoreConformanceError` with `.check` and
+  `.message` on the first violation:
+  - `idp.check_store_conformance(new_store, threads=16)`,
+    `check_store_conformance_one` and `STORE_CONFORMANCE_CHECKS` for an
+    `IdentityStore`.
+  - `idp.check_kv_conformance` / `check_kv_conformance_one` /
+    `KV_CONFORMANCE_CHECKS` for the `Eptid` cache, including a no-eviction
+    check: an evicted EPTID is re-derived, and the new value can differ.
+  - `idp.check_assertion_store_conformance` /
+    `check_assertion_store_conformance_one` /
+    `ASSERTION_STORE_CONFORMANCE_CHECKS` for an assertion store.
 - `AuthnRequest.requested_subject_name_id()` and `has_requested_subject()`, and
   `ProcessedAuthnRequest.requested_sp_name_qualifier`, `has_name_id_policy` and
   `requested_authn_context_decl_refs`.
@@ -134,10 +80,15 @@ dependency stack), which is not yet released; `Cargo.toml` carries a git
   `SamlStoreError` is a direct child of `SamlError` on purpose, so an existing
   `except SamlIdentError` (which meant "no such principal") cannot swallow a
   database outage.
-- `ResponseOptions(authenticating_authorities=...)`.
+- `Eptid(store=...)`: a Python object with `get(key)`, `set(key, value)` and
+  `remove(key)` to persist the cache of issued values, so a later change of
+  secret or digest cannot change what an SP already knows. A failing store is
+  `SamlStoreError`, never a recompute. Keys are `eptid:<idp>__<sp>__<user>`;
+  pysaml2 keys its cache `<sp>__<user>`, so an adapter over an existing pysaml2
+  collection must translate them.
 - `Eptid(secret, digest="pysaml2-md5", allow_legacy_md5=True)` reproduces stock
-  pysaml2 MD5 EPTID values for migrations; the default stays SHA-256 and is not
-  byte-compatible with pysaml2.
+  pysaml2 MD5 EPTID values for migrations, with a `UserWarning` that MD5 is in
+  use; the default stays SHA-256 and is not byte-compatible with pysaml2.
 - `AttributeConverter.from_directions(name_format, fro, to)`,
   `add_wire_to_local` and `add_local_to_wire`, for loading a pysaml2 attribute
   map, whose inbound and outbound directions differ (eduID's deployed
@@ -146,18 +97,55 @@ dependency stack), which is not yet released; `Cargo.toml` carries a git
   allow_unknown_attributes=False)` builds a set from your own converters, and
   `ReleasePolicy(converters=...)` makes the release policy resolve names through
   it instead of the shipped maps.
-- `ResponseEngine(assertions=...)` accepts any object implementing the new
-  `AssertionStore` protocol (`store_assertion`, `get_assertion`,
-  `assertions_for_subject`, `remove_assertion`), so issued assertions can be
-  persisted, not only held in the built-in in-memory store. A store that cannot
-  record an assertion makes `create_authn_response` raise `SamlStoreError`
-  instead of issuing.
-- `Eptid(store=...)`: a Python object with `get(key)`, `set(key, value)` and
-  `remove(key)` to persist the cache of issued values, so a later change of
-  secret or digest cannot change what an SP already knows. A failing store is
-  `SamlStoreError`, never a recompute. Keys are `eptid:<idp>__<sp>__<user>`;
-  pysaml2 keys its cache `<sp>__<user>`, so an adapter over an existing pysaml2
-  collection must translate them.
+
+### Changed
+
+- Bumped `gamlastan` to 0.10.0 (bergshamra 0.11, uppsala 0.12) and `kryptering`
+  to 0.7.0, which gamlastan 0.10.0 requires. The kryptering feature list gains
+  `rustcrypto`, mirroring gamlastan.
+- **Breaking:** the Python `IdentityStore` protocol passed as
+  `IdentDb(store=...)` is now record-shaped (one record per user/NameID):
+  `for_user`, `user_for`, `get_or_insert_durable`, `insert`, `replace`,
+  `remove`, `remove_all`, and optional `find_durable` and `find`. The old
+  `get`/`set`/`remove` key-value protocol no longer applies to `IdentDb`. The
+  backend must enforce the two unique constraints documented on the protocol,
+  and `user_for` must see the backend's own writes (read from the primary, not a
+  lagging replica).
+- **Breaking:** store-backed calls now raise instead of falling back to "not
+  found". `IdentDb` methods, `Eptid` methods and `InMemoryAssertionStore`
+  methods raise `SamlStoreError` on a backend failure. A Python store reports a
+  conflict by raising `NameIdValueTaken` or `NameIdDurableExists`.
+- Email and unspecified NameIDs are now stable per (user, SP, format), like
+  persistent ones. Transient NameIDs are no longer stored unless
+  `IdentDb(persist_transient=True)`.
+
+### Security
+
+- A Python `IdentityStore` is checked, not trusted. Every record a lookup
+  returns for a user must be one the store's `user_for` attributes to that user,
+  a durable lookup (`find_durable`, `get_or_insert_durable`) must return the
+  `(SPNameQualifier, NameQualifier, format)` slot that was asked for, and a
+  pushed-down `find` must return only records that satisfy the filter;
+  otherwise `SamlStoreError`. `find_local_id` is confirmed the same way: the
+  owner `user_for` names must hold that value in its own `for_user` listing.
+  The checks apply whether or not the backend defines `find` / `find_durable`
+  (without them `for_user` is filtered and the selected records are checked),
+  and to `IdentDb.name_ids_for`. A lookup that forgot the user in its filter, a
+  wrong index or a stale cache could otherwise hand one user another user's
+  persistent NameID, which is account takeover at every SP that has seen it. It
+  costs one `user_for` call per record returned. `IdentDb(verify_store=False)`
+  turns it off.
+- A value read from the `Eptid` cache must have the shape
+  `<idp>!<sp>!<opaque>` (no `!` in the opaque part, since an entity ID may
+  contain one), otherwise `SamlStoreError`: a cache shared with another IdP or
+  tenant, a wrong key or a flushed cache could otherwise issue a permanently
+  wrong identifier. A forged value of the right shape is not detected, so the
+  cache must be private to this IdP and must not evict. `Eptid(verify_store=False)`
+  turns it off, for values issued under an earlier IdP entity ID or a cache you
+  fully trust.
+- `PolicyEntry(lifetime_seconds=..., session_lifetime_seconds=...)` raise
+  `SamlPolicyError` for a value outside the range of a duration (above about
+  9.2e15 seconds) instead of panicking.
 
 ## [0.6.0] - 2026-09-14
 
