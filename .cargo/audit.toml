@@ -1,0 +1,20 @@
+# cargo-audit configuration.
+# Read by `cargo audit` and by the rustsec/audit-check CI action.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — Marvin Attack: potential key recovery through timing
+    # side-channels in the `rsa` crate. No fixed upstream version exists (the
+    # RustCrypto `rsa` crate has no constant-time PKCS#1 v1.5 decryption yet).
+    #
+    # Reaches us transitively through gamlastan's bergshamra key stack;
+    # pygamlastan has no direct `rsa` dependency. gamlastan's SamlDecryptor
+    # (wrapped as `pygamlastan.crypto.SamlDecryptor`) rejects the vulnerable
+    # rsa-1_5 XML Encryption key-transport algorithm before entering
+    # bergshamra/rsa; supported RSA-OAEP decryption and RSA signature operations
+    # do not use PKCS#1 v1.5 decryption padding. This is the same reasoning as
+    # gamlastan's own .cargo/audit.toml.
+    #
+    # Re-evaluate whenever a fixed `rsa` release lands.
+    "RUSTSEC-2023-0071",
+]
