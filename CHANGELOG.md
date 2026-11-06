@@ -8,7 +8,7 @@ security handling. `pygamlastan` is a thin PyO3 binding; most entries below
 reflect adopting a change made in `gamlastan` / `uppsala` / `bergshamra` and
 surfacing it correctly to Python.
 
-## [Unreleased]
+## [0.7.0] - 2026-11-06
 
 Requires gamlastan 0.10.0 (the IdP orchestrator, the store verification and
 conformance suites, and the bergshamra 0.11 / uppsala 0.12 / kryptering 0.7
@@ -58,9 +58,6 @@ stack).
   optional `find(...)` on the Python store protocol to push the filter into a
   query. A pushed-down `find` must treat a record with no `format` as `unspecified`,
   as the fallback over `for_user` does; `check_store_conformance` checks it.
-- `IdentDb(verify_store=True)` and `Eptid(verify_store=True)`: opt-outs for the
-  checks described under Security, for a store you fully trust. The built-in
-  in-memory stores are never checked.
 - Conformance suites for the pluggable backends, runnable from Python against a
   real instance (a missing unique index compiles fine and only misbehaves under
   load). Each takes a factory returning a fresh, empty store, releases the GIL
@@ -80,11 +77,9 @@ stack).
   `ProcessedAuthnRequest.requested_sp_name_qualifier`, `has_name_id_policy` and
   `requested_authn_context_decl_refs`.
 - `idp.IdentityStore`, `idp.KeyValueStore` and `idp.AssertionStore`, runtime-checkable
-  `typing.Protocol`s for the three pluggable backends, so backend authors can import
-  them for annotations, `isinstance` checks and explicit inheritance. The stub
-  declared them, so they type-checked while raising `ImportError` at runtime; the
-  stub now marks them `@runtime_checkable` too, so `isinstance` against them
-  type-checks. They list the required methods only; the optional `find` /
+  `typing.Protocol`s (also declared `@runtime_checkable` in the stub) for the three
+  pluggable backends, importable for annotations, `isinstance` checks and explicit
+  inheritance. They list the required methods only; the optional `find` /
   `find_durable` are not members.
 - `SamlStoreError`, `NameIdValueTaken` and `NameIdDurableExists` exceptions.
   `NameIdValueTaken` and `NameIdDurableExists` are `SamlIdentError`s;
@@ -148,7 +143,8 @@ stack).
   wrong index or a stale cache could otherwise hand one user another user's
   persistent NameID, which is account takeover at every SP that has seen it. It
   costs one `user_for` call per record returned. `IdentDb(verify_store=False)`
-  turns it off, with a `UserWarning`.
+  turns it off for a store you fully trust, with a `UserWarning`; the built-in
+  in-memory store is never checked.
 - A value read from the `Eptid` cache must have the shape
   `<idp>!<sp>!<opaque>` (no `!` in the opaque part, since an entity ID may
   contain one), otherwise `SamlStoreError`. This rejects another IdP's or SP's
@@ -158,7 +154,8 @@ stack).
   a flush is a miss, after which a changed secret or digest issues a different
   value. The cache must be private to this IdP and this secret and must not
   evict. `Eptid(verify_store=False)` turns the check off (with a `UserWarning`), for
-  values issued under an earlier IdP entity ID or a cache you fully trust.
+  values issued under an earlier IdP entity ID or a cache you fully trust; the
+  built-in in-memory cache is never checked.
 - `EntityDescriptor`'s role accessors read only the roles that declare SAML 2.0.
   An entity can carry a legacy (for example SAML 1.1) role beside a SAML 2.0 one, and
   `signing_certificates`, `encryption_certificates`, `assertion_consumer_services`,
@@ -183,12 +180,22 @@ stack).
   `SamlProfileError`.
 - `PolicyEntry(lifetime_seconds=..., session_lifetime_seconds=...)` raise
   `SamlPolicyError` for a value outside the range of a duration (above about
-  9.2e15 seconds) instead of panicking. A lifetime that is a valid duration but
-  cannot be added to a date a response can carry (years 0001-9999, so from about
-  3e11 seconds) makes `create_authn_response` raise `SamlProfileError` before
-  anything is stored, where the engine used to panic; so does an `authn_instant`
-  that close to the end of time. `ReleasePolicy.not_on_or_after` saturates at
-  9999-12-31T23:59:59Z in the same case.
+  9.2e15 seconds) instead of panicking. The engine computes expiry dates with
+  checked arithmetic: a lifetime that is a valid duration but cannot be added to a
+  date a response can carry (years 0001-9999, so from about 3e11 seconds) makes
+  `create_authn_response` raise `SamlProfileError` before anything is stored, and so
+  does an `authn_instant` that close to the end of time.
+  `ReleasePolicy.not_on_or_after` saturates at 9999-12-31T23:59:59Z in the same
+  case, where it used to panic.
+- Wheels embed the dependency versions locked in `Cargo.lock`, so the lockfile is
+  audited: `cargo audit` runs daily and on every change to `Cargo.toml` or
+  `Cargo.lock`, and a release is blocked, before any wheel is built, while the
+  lockfile has a known vulnerability. The release build uses `--locked`, so the
+  dependencies shipped are the ones audited. `crypto-bigint` and `ctutils` are
+  updated for RUSTSEC-2026-0387 and RUSTSEC-2026-0385. RUSTSEC-2023-0071 (`rsa`,
+  no patched release exists) is accepted, with the reasoning, in
+  `.cargo/audit.toml`: it reaches pygamlastan only through gamlastan's key stack,
+  and `SamlDecryptor` rejects RSA 1.5 key transport before it reaches `rsa`.
 
 ## [0.6.0] - 2026-09-14
 
