@@ -22,8 +22,10 @@ uv pip install --upgrade "maturin==1.14.1"
 cd /io/
 # pygamlastan builds an abi3 (py310+) wheel, so the single artifact produced
 # here covers every supported CPython; the cp314 interpreter above is only the
-# build driver.
-maturin build --release --strip --manylinux --sdist
+# build driver. --locked makes the build fail if Cargo.lock is out of date with the
+# manifests, so the dependencies in the wheel are exactly the ones the release
+# audit checked.
+maturin build --release --strip --manylinux --sdist --locked
 mkdir -p dist/
 cp target/wheels/pygamlastan*.whl ./dist/
 cp target/wheels/pygamlastan*.tar.gz ./dist/
