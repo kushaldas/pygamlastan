@@ -1,0 +1,42 @@
+name: Security audit
+
+# Audits Cargo.lock against the RustSec advisory database. pygamlastan ships
+# compiled wheels, which embed exactly the versions locked here, so a vulnerable
+# locked dependency reaches users. Accepted advisories, with the reason for each,
+# are in .cargo/audit.toml.
+on:
+  schedule:
+    # Daily at 06:42 UTC. Offset from :00 to avoid the GitHub cron rush, and from
+    # gamlastan's 06:17 run.
+    - cron: "42 6 * * *"
+  push:
+    # Branches only. A release tag points at a commit the branch audit has already
+    # covered, and a red run on a tag only repeats advisories the daily run tracks
+    # as issues. Defining only `branches` leaves tags out, whereas defining only
+    # `tags-ignore` would also stop every branch push from triggering the audit.
+    branches:
+      - "**"
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/audit.toml"
+      - ".github/workflows/security.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  checks: write
+
+jobs:
+  cargo-audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run cargo audit
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

@@ -224,3 +224,7 @@ __marimo__/
 
 # Serena MCP
 .serena/
+
+# Local cargo overrides (for example a path override for co-development against a
+# gamlastan checkout); .cargo/audit.toml is tracked.
+/.cargo/config.toml

@@ -10,7 +10,28 @@ env:
   UV_VERSION: "0.11.23"
 jobs:
 
+  # Release gate: no wheel is built, and nothing reaches PyPI, while Cargo.lock has
+  # a known vulnerability. A wheel embeds exactly the versions locked here, so
+  # users would get them. Accepted advisories, with reasons, are in
+  # .cargo/audit.toml. A failure blocks the release; fix the lockfile (usually
+  # `cargo update -p <crate>`) and release again.
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      checks: write
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Run cargo audit
+      uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+
   manylinux_x86_64:
+    needs: [audit]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -220,7 +241,7 @@ jobs:
 
   publish:
     runs-on: ubuntu-latest
-    needs: [manylinux_x86_64]
+    needs: [audit, manylinux_x86_64]
     environment: pypi
     permissions:
       id-token: write
