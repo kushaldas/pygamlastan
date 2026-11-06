@@ -36,21 +36,32 @@ raise :class:`pygamlastan.SamlMetadataError` (or
       :type: bool
    .. py:method:: is_idp() -> bool
    .. py:method:: is_sp() -> bool
-   .. py:method:: single_sign_on_services() -> list[EndpointInfo]
+
+   An entity can carry several roles of one kind, each declaring the protocols it
+   speaks in ``protocolSupportEnumeration``: a legacy (for example SAML 1.1) role
+   beside a SAML 2.0 one. The accessors below that read role data take a
+   ``protocol`` argument, **default** ``"urn:oasis:names:tc:SAML:2.0:protocol"``,
+   and read only the roles that declare it, so a key or endpoint published only for
+   a legacy role is never offered for a SAML 2.0 message. ``protocol=None`` reads
+   every role, for inspection tools; do not use it for a trust decision. (This
+   selects roles, not endpoints: a role that declares several protocols is read as
+   a whole, so still choose endpoints by binding.)
+
+   .. py:method:: single_sign_on_services(protocol: str | None = SAML2) -> list[EndpointInfo]
 
       IdP SingleSignOnService endpoints.
 
-   .. py:method:: assertion_consumer_services() -> list[EndpointInfo]
+   .. py:method:: assertion_consumer_services(protocol: str | None = SAML2) -> list[EndpointInfo]
 
       SP AssertionConsumerService endpoints (indexed).
 
-   .. py:method:: single_logout_services(role: str = "idp") -> list[EndpointInfo]
-   .. py:method:: name_id_formats(role: str = "idp") -> list[str]
-   .. py:method:: signing_certificates(role: str = "idp") -> list[bytes]
+   .. py:method:: single_logout_services(role: str = "idp", protocol: str | None = SAML2) -> list[EndpointInfo]
+   .. py:method:: name_id_formats(role: str = "idp", protocol: str | None = SAML2) -> list[str]
+   .. py:method:: signing_certificates(role: str = "idp", protocol: str | None = SAML2) -> list[bytes]
 
       DER X.509 signing certificates for the role.
 
-   .. py:method:: encryption_certificates(role: str = "sp") -> list[bytes]
+   .. py:method:: encryption_certificates(role: str = "sp", protocol: str | None = SAML2) -> list[bytes]
 
    .. py:attribute:: registration_authority
       :type: str | None
@@ -91,7 +102,7 @@ raise :class:`pygamlastan.SamlMetadataError` (or
          scheme-checked and may be ``javascript:`` or hostile ``data:`` URIs. See
          :doc:`the security guide <../guides/security>`.
 
-   .. py:method:: requested_attributes(acs_index: int | None = None) -> tuple[list[pygamlastan.core.Attribute], list[pygamlastan.core.Attribute]]
+   .. py:method:: requested_attributes(acs_index: int | None = None, protocol: str | None = SAML2) -> tuple[list[pygamlastan.core.Attribute], list[pygamlastan.core.Attribute]]
 
       The SP's ``(required, optional)`` requested attributes from its
       ``AttributeConsumingService`` (the one at ``acs_index``, else the default).

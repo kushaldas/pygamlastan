@@ -774,7 +774,13 @@ fn process_response_verified(
     frozen
 )]
 pub struct ProcessedAuthnRequest {
-    inner: gidp::ProcessedAuthnRequest,
+    pub(crate) inner: gidp::ProcessedAuthnRequest,
+}
+
+impl ProcessedAuthnRequest {
+    pub(crate) fn wrap(inner: gidp::ProcessedAuthnRequest) -> Self {
+        ProcessedAuthnRequest { inner }
+    }
 }
 
 #[pymethods]
@@ -825,6 +831,24 @@ impl ProcessedAuthnRequest {
     fn attribute_consuming_service_index(&self) -> Option<u16> {
         self.inner.attribute_consuming_service_index
     }
+    /// `NameIDPolicy/@SPNameQualifier`, if the request carried one.
+    #[getter]
+    fn requested_sp_name_qualifier(&self) -> Option<String> {
+        self.inner.requested_sp_name_qualifier.clone()
+    }
+    /// Whether the request carried a `NameIDPolicy` element at all (a policy
+    /// with no `Format` and no policy are otherwise indistinguishable).
+    #[getter]
+    fn has_name_id_policy(&self) -> bool {
+        self.inner.has_name_id_policy
+    }
+    /// `AuthnContextDeclRef`s of the `RequestedAuthnContext`. gamlastan cannot
+    /// show a declaration is met, so a request naming only declarations is
+    /// denied by the orchestrator (`Denial.NO_AUTHN_CONTEXT`).
+    #[getter]
+    fn requested_authn_context_decl_refs(&self) -> Vec<String> {
+        self.inner.requested_authn_context_decl_refs.clone()
+    }
 }
 
 /// Process an incoming AuthnRequest (IdP side).
@@ -870,10 +894,14 @@ fn process_authn_request(
             issuer.value, sp_metadata.inner.entity_id
         )));
     }
-    let sp_descs = sp_metadata.inner.sp_sso_descriptors();
-    let sp_desc = sp_descs
-        .first()
-        .ok_or_else(|| profile_err("SP metadata does not contain an SPSSODescriptor"))?;
+    // The SAML 2.0 role, chosen by `protocolSupportEnumeration`, not the first one
+    // listed: a legacy role can come first, and its signing requirement and
+    // AssertionConsumerServices are not the ones this request is held to. This is
+    // the role `idp.ResponseParams` uses too, so the two cannot disagree.
+    let sp_desc = sp_metadata
+        .inner
+        .saml2_sp_sso_descriptor()
+        .ok_or_else(|| profile_err("SP metadata does not contain a SAML 2.0 SPSSODescriptor"))?;
     let processed =
         gidp::process_authn_request(&request.inner, sp_desc, request_signature_verified)
             .map_err(profile_err)?;
@@ -896,6 +924,7 @@ impl ResponseOptions {
         idp_entity_id, sp_entity_id, acs_url, assertion_lifetime_seconds=300,
         in_response_to=None, session_index=None, session_not_on_or_after=None,
         authn_context_class_ref=None, client_address=None, attributes=None,
+        authenticating_authorities=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -909,6 +938,7 @@ impl ResponseOptions {
         authn_context_class_ref: Option<String>,
         client_address: Option<String>,
         attributes: Option<Vec<Attribute>>,
+        authenticating_authorities: Option<Vec<String>>,
     ) -> Self {
         let attributes = attributes
             .unwrap_or_default()
@@ -927,6 +957,7 @@ impl ResponseOptions {
                 authn_context_class_ref,
                 client_address,
                 attributes,
+                authenticating_authorities: authenticating_authorities.unwrap_or_default(),
             },
         }
     }

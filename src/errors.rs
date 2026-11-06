@@ -62,6 +62,39 @@ create_exception!(
     SamlError,
     "Identity store error."
 );
+// A direct child of `SamlError`, deliberately NOT of `SamlIdentError`: code
+// written before store errors existed already wraps ident calls in
+// `except SamlIdentError` to mean "no such principal / no such NameID", and an
+// outage must not be caught by that handler and read as a missing record.
+create_exception!(
+    pygamlastan,
+    SamlStoreError,
+    SamlError,
+    "A storage backend failed (an outage, not a missing record). Not a \
+     SamlIdentError, so an existing `except SamlIdentError` cannot swallow it."
+);
+create_exception!(
+    pygamlastan,
+    StoreConformanceError,
+    SamlError,
+    "An IdentityStore backend failed a conformance check. The failing check and \
+     what it found are the `check` and `message` attributes."
+);
+create_exception!(
+    pygamlastan,
+    NameIdValueTaken,
+    SamlIdentError,
+    "A NameID value is already used by another record. Raised by Python \
+     IdentityStore implementations from insert/replace/get_or_insert_durable."
+);
+create_exception!(
+    pygamlastan,
+    NameIdDurableExists,
+    SamlIdentError,
+    "The user already has a durable NameID of this format for the same \
+     (SPNameQualifier, NameQualifier). Raised by Python IdentityStore \
+     implementations from insert/replace."
+);
 
 // --- Error-mapping helpers (gamlastan/kryptering error enums -> PyErr) ---
 // The orphan rule prevents `impl From<ForeignError> for PyErr`, so we use small
@@ -103,6 +136,11 @@ pub fn ident_err<E: Display>(e: E) -> PyErr {
     SamlIdentError::new_err(e.to_string())
 }
 
+/// A storage-backend failure (`StoreError`): an outage, never "no record".
+pub fn store_err<E: Display>(e: E) -> PyErr {
+    SamlStoreError::new_err(e.to_string())
+}
+
 /// Register exception types on the top-level module.
 pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("SamlError", py.get_type::<SamlError>())?;
@@ -115,5 +153,12 @@ pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("SamlProfileError", py.get_type::<SamlProfileError>())?;
     m.add("SamlPolicyError", py.get_type::<SamlPolicyError>())?;
     m.add("SamlIdentError", py.get_type::<SamlIdentError>())?;
+    m.add("SamlStoreError", py.get_type::<SamlStoreError>())?;
+    m.add(
+        "StoreConformanceError",
+        py.get_type::<StoreConformanceError>(),
+    )?;
+    m.add("NameIdValueTaken", py.get_type::<NameIdValueTaken>())?;
+    m.add("NameIdDurableExists", py.get_type::<NameIdDurableExists>())?;
     Ok(())
 }

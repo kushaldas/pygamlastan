@@ -551,6 +551,17 @@ impl Status {
 
 #[pymethods]
 impl Assertion {
+    /// Serialize this assertion to a standalone ``<saml:Assertion>`` document, the
+    /// inverse of ``xml.parse_assertion``. A persistent assertion store writes this
+    /// and reads it back with ``xml.parse_assertion``.
+    ///
+    /// It serializes the assertion *model*, which carries no signature
+    /// (``has_signature`` only records that one was requested). The signed
+    /// document the SP received is ``IssuedResponse.xml``.
+    fn to_xml(&self) -> PyResult<String> {
+        use gamlastan::xml::serialize::SamlSerialize;
+        self.inner.to_xml_string().map_err(crate::errors::xml_err)
+    }
     #[getter]
     fn id(&self) -> &str {
         &self.inner.id
@@ -670,6 +681,22 @@ impl AuthnRequest {
     #[getter]
     fn scoping(&self) -> Option<Scoping> {
         self.inner.scoping.clone().map(Scoping::wrap)
+    }
+    /// The principal the request names in `Subject` as a plaintext NameID
+    /// (pysaml2 `Request.subject_id()`). `None` when the request names no
+    /// principal or names one in an `EncryptedID`; use `has_requested_subject`
+    /// to tell those apart. The orchestrator does not compare it with the
+    /// authenticated user: an application that supports a requested subject
+    /// must do that itself, and one that cannot should refuse the request.
+    fn requested_subject_name_id(&self) -> Option<NameId> {
+        self.inner
+            .requested_subject_name_id()
+            .cloned()
+            .map(NameId::wrap)
+    }
+    /// Whether the request names a principal in `Subject` (plaintext or encrypted).
+    fn has_requested_subject(&self) -> bool {
+        self.inner.requested_subject().is_some()
     }
     #[getter]
     fn force_authn(&self) -> Option<bool> {

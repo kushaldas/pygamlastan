@@ -1364,52 +1364,129 @@ def test_identdb_manage_name_id():
         db.manage_name_id_terminate(stranger)
 
 
-def test_identdb_python_backed_store():
-    """A Python object implementing get/set/remove can back the NameID database
-    (so a deployment can persist to Redis/SQL/Mongo)."""
-    class DictStore:
-        def __init__(self):
-            self.d = {}
-        def get(self, key):
-            return self.d.get(key)
-        def set(self, key, value):
-            self.d[key] = value
-        def remove(self, key):
-            self.d.pop(key, None)
+class RecordStore:
+    """Minimal in-process record-shaped IdentityStore (one record per NameID).
 
-    backing = DictStore()
+    Enforces the two unique constraints a real backend must: the value is
+    unique, and durable (non-transient) records are unique per
+    (user, sp_name_qualifier, name_qualifier, format)."""
+
+    TRANSIENT = "urn:oasis:names:tc:SAML:2.0:nameid-format:transient"
+    UNSPECIFIED = "urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified"
+
+    def __init__(self):
+        self.records = []  # (user_id, NameId)
+
+    def _slot(self, n):
+        fmt = n.format or self.UNSPECIFIED
+        if fmt == self.TRANSIENT:
+            return None
+        return (n.sp_name_qualifier, n.name_qualifier, fmt)
+
+    def _durable(self, user_id, n):
+        slot = self._slot(n)
+        if slot is None:
+            return None
+        for u, e in self.records:
+            if u == user_id and e.value != n.value and self._slot(e) == slot:
+                return e
+        return None
+
+    def for_user(self, user_id):
+        return [n for u, n in self.records if u == user_id]
+
+    def user_for(self, value):
+        return next((u for u, n in self.records if n.value == value), None)
+
+    def get_or_insert_durable(self, user_id, candidate):
+        slot = self._slot(candidate)
+        if slot is not None:
+            for u, e in self.records:
+                if u == user_id and self._slot(e) == slot:
+                    return e
+        self.insert(user_id, candidate)
+        return candidate
+
+    def insert(self, user_id, name_id):
+        if self.user_for(name_id.value) is not None:
+            raise pygamlastan.NameIdValueTaken()
+        if self._durable(user_id, name_id) is not None:
+            raise pygamlastan.NameIdDurableExists()
+        self.records.append((user_id, name_id))
+
+    def replace(self, user_id, name_id):
+        owner = self.user_for(name_id.value)
+        if owner is not None and owner != user_id:
+            raise pygamlastan.NameIdValueTaken()
+        if self._durable(user_id, name_id) is not None:
+            raise pygamlastan.NameIdDurableExists()
+        self.records = [(u, n) for u, n in self.records if n.value != name_id.value]
+        self.records.append((user_id, name_id))
+
+    def remove(self, value):
+        self.records = [(u, n) for u, n in self.records if n.value != value]
+
+    def remove_all(self, user_id):
+        self.records = [(u, n) for u, n in self.records if u != user_id]
+
+
+def test_eptid_pysaml2_md5_legacy_requires_explicit_allow():
+    """The pysaml2 MD5 profile reproduces stock values and needs an explicit
+    opt-in; the default stays SHA-256 and differs."""
+    with pytest.raises(pygamlastan.SamlIdentError):
+        idp.Eptid("s3cr3t", digest="pysaml2-md5")
+    with pytest.raises(pygamlastan.SamlIdentError):
+        idp.Eptid("s3cr3t", digest="nope")
+    legacy = idp.Eptid("s3cr3t", digest="pysaml2-md5", allow_legacy_md5=True)
+    assert legacy.get("https://idp.example.com", "https://sp.example.com", "alice") == (
+        "https://idp.example.com!https://sp.example.com!f6ecff9c9e19881f47d0078989d14d59"
+    )
+    default = idp.Eptid("s3cr3t").get(
+        "https://idp.example.com", "https://sp.example.com", "alice"
+    )
+    assert default != legacy.get("https://idp.example.com", "https://sp.example.com", "alice")
+
+
+def test_identdb_python_backed_store():
+    """A Python object implementing the record-shaped IdentityStore protocol can
+    back the NameID database (so a deployment can persist to Mongo/SQL)."""
+    backing = RecordStore()
     db = idp.IdentDb(IDP, store=backing)
     nid = db.persistent_nameid("bob", SP)
     assert db.find_local_id(nid) == "bob"
-    assert backing.d, "data was written through to the Python store"
-    # A fresh IdentDb over the same backing store sees the persisted mapping.
+    assert backing.records, "data was written through to the Python store"
+    # Durable NameIDs are stable per (user, SP), also across a fresh IdentDb.
     db2 = idp.IdentDb(IDP, store=backing)
     assert db2.find_local_id(nid) == "bob"
+    assert db2.persistent_nameid("bob", SP).value == nid.value
+    assert [n.value for n in db2.name_ids_for("bob")] == [nid.value]
+    db2.remove_local("bob")
+    assert db.find_local_id(nid) is None
 
 
-def test_identdb_broken_store_fails_closed(recwarn):
-    """A backend failure must not masquerade as a missing key. The store trait
-    is infallible, so the error is surfaced via sys.unraisablehook and the
-    lookup falls back to "not found" rather than silently minting a new ID."""
+def test_identdb_store_conflicts_map_to_exceptions():
+    """A value held by another user is NameIdValueTaken, not a silent move."""
+    db = idp.IdentDb(IDP, store=RecordStore())
+    nid = db.persistent_nameid("bob", SP)
+    with pytest.raises(pygamlastan.NameIdValueTaken):
+        db.store("mallory", nid)
+
+
+def test_identdb_broken_store_raises():
+    """A backend failure must raise SamlStoreError, never read as "no record"
+    (which would mint a second durable NameID for a user who already has one)."""
     class BrokenStore:
-        def get(self, key):
-            raise RuntimeError("backend down")
-        def set(self, key, value):
-            raise RuntimeError("backend down")
-        def remove(self, key):
-            raise RuntimeError("backend down")
+        def __getattr__(self, name):
+            def fail(*a, **k):
+                raise RuntimeError("backend down")
+            return fail
 
-    seen = []
-    old = sys.unraisablehook
-    sys.unraisablehook = lambda arg: seen.append(arg.exc_value)
-    try:
-        db = idp.IdentDb(IDP, store=BrokenStore())
-        nid = idp.IdentDb(IDP).persistent_nameid("bob", SP)
-        assert db.find_local_id(nid) is None
-    finally:
-        sys.unraisablehook = old
-    assert any(isinstance(e, RuntimeError) for e in seen), \
-        "the backend error was surfaced, not swallowed"
+    db = idp.IdentDb(IDP, store=BrokenStore())
+    nid = idp.IdentDb(IDP).persistent_nameid("bob", SP)
+    with pytest.raises(pygamlastan.SamlStoreError, match="backend down"):
+        db.find_local_id(nid)
+    with pytest.raises(pygamlastan.SamlStoreError):
+        db.persistent_nameid("bob", SP)
 
 
 def test_policy_entry_rejects_negative_lifetime():

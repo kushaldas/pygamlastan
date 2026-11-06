@@ -8,6 +8,188 @@ security handling. `pygamlastan` is a thin PyO3 binding; most entries below
 reflect adopting a change made in `gamlastan` / `uppsala` / `bergshamra` and
 surfacing it correctly to Python.
 
+## [Unreleased]
+
+Requires gamlastan 0.10.0 (the IdP orchestrator, the store verification and
+conformance suites, and the bergshamra 0.11 / uppsala 0.12 / kryptering 0.7
+stack).
+
+### Added
+
+- The IdP response engine, `pygamlastan.idp.ResponseEngine`, with
+  `check_request`, `create_authn_response` and `create_denial_response`, and the
+  types they use: `ResponseParams`, `AuthenticatedSubject`, `AuthnMethodRef`
+  (`inline` / `broker`), `EstablishedSession`, `Disposition`, `Denial`,
+  `ResponseOutcome`, `IssuedResponse` and `DeniedResponse`. `release="policy"`
+  filters through the `ReleasePolicy`; `release="pass_through"` is for a proxy
+  whose attributes were filtered upstream. A store failure is `SamlStoreError`
+  and any other fault `SamlProfileError`; neither is ever a signed denial. The
+  engine takes `AuthnMethodRef.inline` on trust (for an `exact` request it
+  satisfies the request by matching the request, so never build it from request
+  data), and its policy, identity database, broker and signer must not be
+  mutated from inside a store callback.
+- `ResponseEngine(assertions=...)` accepts any object implementing the new
+  `AssertionStore` protocol (`store_assertion`, `get_assertion`,
+  `assertions_for_subject`, `remove_assertion`), so issued assertions can be
+  persisted, not only held in the built-in in-memory store. A store that cannot
+  record an assertion makes `create_authn_response` raise `SamlStoreError`
+  instead of issuing.
+- `core.Assertion.to_xml()`, the inverse of `xml.parse_assertion`, so a persistent
+  assertion store can write an assertion out and read it back. It serializes the
+  assertion model, which carries no signature; the signed document the SP received
+  is `IssuedResponse.xml`.
+- `PolicyEntry` settings `session_lifetime_seconds`, `supported_nameid_formats`,
+  `signing_preference` and `deny_unconfigured_release`, with the matching
+  `ReleasePolicy` readers, and the module constants `ISSUABLE_NAMEID_FORMATS` and
+  `MAX_NAMEID_FORMAT_LEN`. `supported_nameid_formats` and
+  `deny_unconfigured_release` are opt-ins: by default any requested NameID
+  format is accepted and every attribute the application supplies is released
+  to an SP no rule covers, as in pysaml2.
+- `pygamlastan.crypto.SignatureMethod`, `DigestMethod`, `SigningPreference` and
+  `SigningAlgorithms`: per-SP signature and digest algorithm selection (SHA-2
+  RSA and ECDSA only; the SP's metadata can only choose among your entries).
+- `AuthnBroker(allow_exact_level_matching=...)` and `AuthnBroker.is_empty()`.
+- `ResponseOptions(authenticating_authorities=...)`.
+- `IdentDb(persist_transient=True)`, to store transient NameIDs so
+  `find_local_id` can resolve one (a back-channel logout needs it). Without it,
+  which is the default, they are not stored.
+- `IdentDb.find_nameid(user_id, format=None, sp_name_qualifier=None,
+  name_qualifier=None, sp_provided_id=None)` (pysaml2 `find_nameid`), and an
+  optional `find(...)` on the Python store protocol to push the filter into a
+  query. A pushed-down `find` must treat a record with no `format` as `unspecified`,
+  as the fallback over `for_user` does; `check_store_conformance` checks it.
+- `IdentDb(verify_store=True)` and `Eptid(verify_store=True)`: opt-outs for the
+  checks described under Security, for a store you fully trust. The built-in
+  in-memory stores are never checked.
+- Conformance suites for the pluggable backends, runnable from Python against a
+  real instance (a missing unique index compiles fine and only misbehaves under
+  load). Each takes a factory returning a fresh, empty store, releases the GIL
+  while it runs because the concurrent checks call the store from several
+  threads, and raises the new `StoreConformanceError` with `.check` and
+  `.message` on the first violation:
+  - `idp.check_store_conformance(new_store, threads=16)`,
+    `check_store_conformance_one` and `STORE_CONFORMANCE_CHECKS` for an
+    `IdentityStore`.
+  - `idp.check_kv_conformance` / `check_kv_conformance_one` /
+    `KV_CONFORMANCE_CHECKS` for the `Eptid` cache, including a no-eviction
+    check: an evicted EPTID is re-derived, and the new value can differ.
+  - `idp.check_assertion_store_conformance` /
+    `check_assertion_store_conformance_one` /
+    `ASSERTION_STORE_CONFORMANCE_CHECKS` for an assertion store.
+- `AuthnRequest.requested_subject_name_id()` and `has_requested_subject()`, and
+  `ProcessedAuthnRequest.requested_sp_name_qualifier`, `has_name_id_policy` and
+  `requested_authn_context_decl_refs`.
+- `idp.IdentityStore`, `idp.KeyValueStore` and `idp.AssertionStore`, runtime-checkable
+  `typing.Protocol`s for the three pluggable backends, so backend authors can import
+  them for annotations, `isinstance` checks and explicit inheritance. The stub
+  declared them, so they type-checked while raising `ImportError` at runtime; the
+  stub now marks them `@runtime_checkable` too, so `isinstance` against them
+  type-checks. They list the required methods only; the optional `find` /
+  `find_durable` are not members.
+- `SamlStoreError`, `NameIdValueTaken` and `NameIdDurableExists` exceptions.
+  `NameIdValueTaken` and `NameIdDurableExists` are `SamlIdentError`s;
+  `SamlStoreError` is a direct child of `SamlError` on purpose, so an existing
+  `except SamlIdentError` (which meant "no such principal") cannot swallow a
+  database outage.
+- `Eptid(store=...)`: a Python object with `get(key)`, `set(key, value)` and
+  `remove(key)` to persist the cache of issued values, so a later change of
+  secret or digest cannot change what an SP already knows. A failing store is
+  `SamlStoreError`, never a recompute. Keys are `eptid:<idp>__<sp>__<user>`;
+  pysaml2 keys its cache `<sp>__<user>`, so an adapter over an existing pysaml2
+  collection must translate them.
+- `Eptid(secret, digest="pysaml2-md5", allow_legacy_md5=True)` reproduces stock
+  pysaml2 MD5 EPTID values for migrations, with a `UserWarning` that MD5 is in
+  use; the default stays SHA-256 and is not byte-compatible with pysaml2.
+- `AttributeConverter.from_directions(name_format, fro, to)`,
+  `add_wire_to_local` and `add_local_to_wire`, for loading a pysaml2 attribute
+  map, whose inbound and outbound directions differ (one production `saml_uri`
+  map has 83 inbound and 99 outbound entries); `add_mapping` mirrors both
+  directions and cannot. `AttributeConverterSet(converters,
+  allow_unknown_attributes=False)` builds a set from your own converters, and
+  `ReleasePolicy(converters=...)` makes the release policy resolve names through
+  it instead of the shipped maps.
+
+### Changed
+
+- Bumped `gamlastan` to 0.10.0 (bergshamra 0.11, uppsala 0.12) and `kryptering`
+  to 0.7.0, which gamlastan 0.10.0 requires. The kryptering feature list gains
+  `rustcrypto`, mirroring gamlastan.
+- **Breaking:** the Python `IdentityStore` protocol passed as
+  `IdentDb(store=...)` is now record-shaped (one record per user/NameID):
+  `for_user`, `user_for`, `get_or_insert_durable`, `insert`, `replace`,
+  `remove`, `remove_all`, and optional `find_durable` and `find`. The old
+  `get`/`set`/`remove` key-value protocol no longer applies to `IdentDb`. The
+  backend must enforce the two unique constraints documented on the protocol,
+  and `user_for` must see the backend's own writes (read from the primary, not a
+  lagging replica).
+- **Breaking:** store-backed calls now raise instead of falling back to "not
+  found". `IdentDb` methods, `Eptid` methods and `InMemoryAssertionStore`
+  methods raise `SamlStoreError` on a backend failure. A Python store reports a
+  conflict by raising `NameIdValueTaken` or `NameIdDurableExists`.
+- **Breaking:** `EntityDescriptor`'s role accessors take `protocol` and, by default,
+  read only SAML 2.0 roles (see Security). Metadata whose SAML 2.0 role is not marked
+  as such now yields no keys or endpoints, where it used to be read regardless.
+- Email and unspecified NameIDs are now stable per (user, SP, format), like
+  persistent ones. Transient NameIDs are no longer stored unless
+  `IdentDb(persist_transient=True)`.
+
+### Security
+
+- A Python `IdentityStore` is checked, not trusted. Every record a lookup
+  returns for a user must be one the store's `user_for` attributes to that user,
+  a durable lookup (`find_durable`, `get_or_insert_durable`) must return the
+  `(SPNameQualifier, NameQualifier, format)` slot that was asked for, and a
+  pushed-down `find` must return only records that satisfy the filter;
+  otherwise `SamlStoreError`. `find_local_id` is confirmed the same way: the
+  owner `user_for` names must hold that value in its own `for_user` listing.
+  The checks apply whether or not the backend defines `find` / `find_durable`
+  (without them `for_user` is filtered and the selected records are checked),
+  and to `IdentDb.name_ids_for`. A lookup that forgot the user in its filter, a
+  wrong index or a stale cache could otherwise hand one user another user's
+  persistent NameID, which is account takeover at every SP that has seen it. It
+  costs one `user_for` call per record returned. `IdentDb(verify_store=False)`
+  turns it off, with a `UserWarning`.
+- A value read from the `Eptid` cache must have the shape
+  `<idp>!<sp>!<opaque>` (no `!` in the opaque part, since an entity ID may
+  contain one), otherwise `SamlStoreError`. This rejects another IdP's or SP's
+  value and a key written by the wrong code. It cannot tell two right-shaped
+  values apart: a cache shared with another deployment that uses the same IdP
+  entity ID, a backup restored from one, and a forged value are not detected, and
+  a flush is a miss, after which a changed secret or digest issues a different
+  value. The cache must be private to this IdP and this secret and must not
+  evict. `Eptid(verify_store=False)` turns the check off (with a `UserWarning`), for
+  values issued under an earlier IdP entity ID or a cache you fully trust.
+- `EntityDescriptor`'s role accessors read only the roles that declare SAML 2.0.
+  An entity can carry a legacy (for example SAML 1.1) role beside a SAML 2.0 one, and
+  `signing_certificates`, `encryption_certificates`, `assertion_consumer_services`,
+  `single_sign_on_services`, `single_logout_services`, `name_id_formats` and
+  `requested_attributes` used to read every role, so a key published only for the
+  legacy role was trusted to verify SAML 2.0 messages (`compat`'s
+  `idp_signing_certs` and the Django IdP example verify signatures with them), and
+  the legacy role's endpoints and requested attributes were mixed in. They now take
+  `protocol` (default `"urn:oasis:names:tc:SAML:2.0:protocol"`); `protocol=None`
+  reads every role, for inspection tools, and must not be used for a trust
+  decision. A role that declares several protocols is still read as a whole, so
+  choose endpoints by binding. A key listed in both roles is returned once, not
+  twice. `idp_signing_certs` says so when the only signing key is in a role that
+  does not declare SAML 2.0.
+- `profiles.process_authn_request` holds a request to the entity's SAML 2.0
+  `SPSSODescriptor`, chosen by `protocolSupportEnumeration`, not to whichever role
+  is listed first. With a legacy (for example SAML 1.1) role listed before the
+  SAML 2.0 one, an unsigned request used to be checked against the legacy role's
+  signing requirement and `AssertionConsumerService`s, then answered under the
+  SAML 2.0 role (`idp.ResponseParams` already selects that role), bypassing a
+  required signature. Metadata with no SAML 2.0 SP role now raises
+  `SamlProfileError`.
+- `PolicyEntry(lifetime_seconds=..., session_lifetime_seconds=...)` raise
+  `SamlPolicyError` for a value outside the range of a duration (above about
+  9.2e15 seconds) instead of panicking. A lifetime that is a valid duration but
+  cannot be added to a date a response can carry (years 0001-9999, so from about
+  3e11 seconds) makes `create_authn_response` raise `SamlProfileError` before
+  anything is stored, where the engine used to panic; so does an `authn_instant`
+  that close to the end of time. `ReleasePolicy.not_on_or_after` saturates at
+  9999-12-31T23:59:59Z in the same case.
+
 ## [0.6.0] - 2026-09-14
 
 ### Added

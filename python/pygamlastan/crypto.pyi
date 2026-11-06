@@ -26,6 +26,52 @@ class KeysManager:
     def __len__(self) -> int: ...
     def is_empty(self) -> bool: ...
 
+class SignatureMethod:
+    """An XML-DSig signature algorithm gamlastan will emit (SHA-2 RSA and ECDSA).
+    SHA-1, MD5 and the like are not representable."""
+    RSA_SHA256: SignatureMethod
+    RSA_SHA384: SignatureMethod
+    RSA_SHA512: SignatureMethod
+    ECDSA_SHA256: SignatureMethod
+    ECDSA_SHA384: SignatureMethod
+    ECDSA_SHA512: SignatureMethod
+    @property
+    def uri(self) -> str: ...
+    @staticmethod
+    def from_uri(uri: str) -> SignatureMethod | None: ...
+
+class DigestMethod:
+    """An XML-DSig digest algorithm gamlastan will emit (SHA-2)."""
+    SHA256: DigestMethod
+    SHA384: DigestMethod
+    SHA512: DigestMethod
+    @property
+    def uri(self) -> str: ...
+    @staticmethod
+    def from_uri(uri: str) -> DigestMethod | None: ...
+
+class SigningAlgorithms:
+    """The algorithms chosen for one response; ``None`` leaves the signer's default."""
+    @property
+    def signature(self) -> SignatureMethod | None: ...
+    @property
+    def digest(self) -> DigestMethod | None: ...
+
+class SigningPreference:
+    """An IdP's ordered preference, resolved per response against what the SP
+    advertises (``alg:SigningMethod`` / ``alg:DigestMethod``). With an HSM list
+    only the token's own signature method."""
+    def __init__(
+        self,
+        signature_methods: list[SignatureMethod] | None = ...,
+        digest_methods: list[DigestMethod] | None = ...,
+    ) -> None: ...
+    def resolve(
+        self,
+        sp_signature_methods: list[str] | None = ...,
+        sp_digest_methods: list[str] | None = ...,
+    ) -> SigningAlgorithms: ...
+
 class SamlSigner:
     def __init__(self, keys: KeysManager) -> None: ...
     @staticmethod

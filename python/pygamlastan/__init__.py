@@ -18,6 +18,10 @@ from ._native import (  # noqa: F401
     SamlProfileError,
     SamlPolicyError,
     SamlIdentError,
+    SamlStoreError,
+    StoreConformanceError,
+    NameIdValueTaken,
+    NameIdDurableExists,
     attribute_map,
     bindings,
     core,
@@ -29,6 +33,14 @@ from ._native import (  # noqa: F401
     security,
     xml,
 )
+
+# The store protocols are declared in `idp.pyi`; give them a runtime definition too,
+# so `from pygamlastan.idp import KeyValueStore` works (see `_store_protocols`).
+from . import _store_protocols as _protocols  # noqa: E402
+
+for _name in ("IdentityStore", "KeyValueStore", "AssertionStore"):
+    setattr(idp, _name, getattr(_protocols, _name))
+del _name
 
 __all__ = [
     "__version__",
@@ -42,6 +54,10 @@ __all__ = [
     "SamlProfileError",
     "SamlPolicyError",
     "SamlIdentError",
+    "SamlStoreError",
+    "StoreConformanceError",
+    "NameIdValueTaken",
+    "NameIdDurableExists",
     "core",
     "xml",
     "crypto",

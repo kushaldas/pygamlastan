@@ -4,6 +4,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyModule};
 
+use gamlastan::core::constants::PROTOCOL_SAML2;
 use gamlastan::idp::policy::sp_attribute_requirements;
 use gamlastan::metadata::types as gmt;
 use gamlastan::metadata::types::{
@@ -172,6 +173,35 @@ impl EntityDescriptor {
     }
 }
 
+impl EntityDescriptor {
+    /// The SP roles that declare `protocol` in `protocolSupportEnumeration`, or every
+    /// SP role when `protocol` is `None`. An entity can carry a legacy role beside a
+    /// SAML 2.0 one; a key or endpoint from the legacy role must not be offered for
+    /// a SAML 2.0 message. This selects roles, not endpoints (a role declaring
+    /// several protocols is read whole); see the security guide, "Decisions and
+    /// limits of the IdP engine and its backends".
+    fn sp_roles<'a>(
+        &'a self,
+        protocol: Option<&'a str>,
+    ) -> impl Iterator<Item = &'a gmt::SpSsoDescriptor> + 'a {
+        self.inner
+            .sp_sso_descriptors()
+            .iter()
+            .filter(move |d| protocol.is_none_or(|p| d.sso_base.base.supports_protocol(p)))
+    }
+
+    /// As [`Self::sp_roles`], for the IdP roles.
+    fn idp_roles<'a>(
+        &'a self,
+        protocol: Option<&'a str>,
+    ) -> impl Iterator<Item = &'a gmt::IdpSsoDescriptor> + 'a {
+        self.inner
+            .idp_sso_descriptors()
+            .iter()
+            .filter(move |d| protocol.is_none_or(|p| d.sso_base.base.supports_protocol(p)))
+    }
+}
+
 #[pymethods]
 impl EntityDescriptor {
     #[getter]
@@ -194,33 +224,44 @@ impl EntityDescriptor {
     }
 
     /// IdP SingleSignOnService endpoints.
-    fn single_sign_on_services(&self) -> Vec<EndpointInfo> {
+    ///
+    /// Only roles that declare `protocol` (default SAML 2.0) are read; pass
+    /// ``protocol=None`` for every role.
+    #[pyo3(signature = (protocol=Some(PROTOCOL_SAML2)))]
+    fn single_sign_on_services(&self, protocol: Option<&str>) -> Vec<EndpointInfo> {
         let mut out = Vec::new();
-        for idp in self.inner.idp_sso_descriptors() {
+        for idp in self.idp_roles(protocol) {
             out.extend(idp.single_sign_on_services.iter().map(ep));
         }
         out
     }
 
     /// SP AssertionConsumerService endpoints (indexed).
-    fn assertion_consumer_services(&self) -> Vec<EndpointInfo> {
+    ///
+    /// Only roles that declare `protocol` (default SAML 2.0) are read; pass
+    /// ``protocol=None`` for every role.
+    #[pyo3(signature = (protocol=Some(PROTOCOL_SAML2)))]
+    fn assertion_consumer_services(&self, protocol: Option<&str>) -> Vec<EndpointInfo> {
         let mut out = Vec::new();
-        for sp in self.inner.sp_sso_descriptors() {
+        for sp in self.sp_roles(protocol) {
             out.extend(sp.assertion_consumer_services.iter().map(indexed_ep));
         }
         out
     }
 
     /// SingleLogoutService endpoints for the given role ("idp" or "sp").
-    #[pyo3(signature = (role="idp"))]
-    fn single_logout_services(&self, role: &str) -> Vec<EndpointInfo> {
+    ///
+    /// Only roles that declare `protocol` (default SAML 2.0) are read; pass
+    /// ``protocol=None`` for every role.
+    #[pyo3(signature = (role="idp", protocol=Some(PROTOCOL_SAML2)))]
+    fn single_logout_services(&self, role: &str, protocol: Option<&str>) -> Vec<EndpointInfo> {
         let mut out = Vec::new();
         if role.eq_ignore_ascii_case("idp") {
-            for idp in self.inner.idp_sso_descriptors() {
+            for idp in self.idp_roles(protocol) {
                 out.extend(idp.sso_base.single_logout_services.iter().map(ep));
             }
         } else {
-            for sp in self.inner.sp_sso_descriptors() {
+            for sp in self.sp_roles(protocol) {
                 out.extend(sp.sso_base.single_logout_services.iter().map(ep));
             }
         }
@@ -228,15 +269,18 @@ impl EntityDescriptor {
     }
 
     /// NameIDFormat URIs advertised by the given role ("idp" or "sp").
-    #[pyo3(signature = (role="idp"))]
-    fn name_id_formats(&self, role: &str) -> Vec<String> {
+    ///
+    /// Only roles that declare `protocol` (default SAML 2.0) are read; pass
+    /// ``protocol=None`` for every role.
+    #[pyo3(signature = (role="idp", protocol=Some(PROTOCOL_SAML2)))]
+    fn name_id_formats(&self, role: &str, protocol: Option<&str>) -> Vec<String> {
         let mut out = Vec::new();
         if role.eq_ignore_ascii_case("idp") {
-            for idp in self.inner.idp_sso_descriptors() {
+            for idp in self.idp_roles(protocol) {
                 out.extend(idp.sso_base.name_id_formats.iter().cloned());
             }
         } else {
-            for sp in self.inner.sp_sso_descriptors() {
+            for sp in self.sp_roles(protocol) {
                 out.extend(sp.sso_base.name_id_formats.iter().cloned());
             }
         }
@@ -244,40 +288,46 @@ impl EntityDescriptor {
     }
 
     /// DER X.509 signing certificates for the given role ("idp" or "sp").
-    #[pyo3(signature = (role="idp"))]
-    fn signing_certificates<'py>(&self, py: Python<'py>, role: &str) -> Vec<Bound<'py, PyBytes>> {
+    ///
+    /// Only roles that declare `protocol` (default SAML 2.0) are read, so a key
+    /// published only for a legacy-protocol role is not offered for verifying a
+    /// SAML 2.0 message. ``protocol=None`` returns every role; do not use that for
+    /// a trust decision.
+    #[pyo3(signature = (role="idp", protocol=Some(PROTOCOL_SAML2)))]
+    fn signing_certificates<'py>(
+        &self,
+        py: Python<'py>,
+        role: &str,
+        protocol: Option<&str>,
+    ) -> Vec<Bound<'py, PyBytes>> {
         if role.eq_ignore_ascii_case("idp") {
-            self.inner
-                .idp_sso_descriptors()
-                .iter()
+            self.idp_roles(protocol)
                 .flat_map(|d| certs_der(py, &d.sso_base.base.key_descriptors, true))
                 .collect()
         } else {
-            self.inner
-                .sp_sso_descriptors()
-                .iter()
+            self.sp_roles(protocol)
                 .flat_map(|d| certs_der(py, &d.sso_base.base.key_descriptors, true))
                 .collect()
         }
     }
 
     /// DER X.509 encryption certificates for the given role ("idp" or "sp").
-    #[pyo3(signature = (role="sp"))]
+    ///
+    /// Only roles that declare `protocol` (default SAML 2.0) are read; pass
+    /// ``protocol=None`` for every role.
+    #[pyo3(signature = (role="sp", protocol=Some(PROTOCOL_SAML2)))]
     fn encryption_certificates<'py>(
         &self,
         py: Python<'py>,
         role: &str,
+        protocol: Option<&str>,
     ) -> Vec<Bound<'py, PyBytes>> {
         if role.eq_ignore_ascii_case("idp") {
-            self.inner
-                .idp_sso_descriptors()
-                .iter()
+            self.idp_roles(protocol)
                 .flat_map(|d| certs_der(py, &d.sso_base.base.key_descriptors, false))
                 .collect()
         } else {
-            self.inner
-                .sp_sso_descriptors()
-                .iter()
+            self.sp_roles(protocol)
                 .flat_map(|d| certs_der(py, &d.sso_base.base.key_descriptors, false))
                 .collect()
         }
@@ -329,11 +379,18 @@ impl EntityDescriptor {
     /// `AttributeConsumingService` (the one at `acs_index`, else the default).
     /// Each is a list of `core.Attribute` (a requested value list narrows the
     /// released values). Feed these into `idp.ReleasePolicy.filter`.
-    #[pyo3(signature = (acs_index=None))]
-    fn requested_attributes(&self, acs_index: Option<u16>) -> (Vec<Attribute>, Vec<Attribute>) {
+    ///
+    /// Only roles that declare `protocol` (default SAML 2.0) are read; pass
+    /// ``protocol=None`` for every role.
+    #[pyo3(signature = (acs_index=None, protocol=Some(PROTOCOL_SAML2)))]
+    fn requested_attributes(
+        &self,
+        acs_index: Option<u16>,
+        protocol: Option<&str>,
+    ) -> (Vec<Attribute>, Vec<Attribute>) {
         let mut required = Vec::new();
         let mut optional = Vec::new();
-        for sp in self.inner.sp_sso_descriptors() {
+        for sp in self.sp_roles(protocol) {
             let (req, opt) = sp_attribute_requirements(sp, acs_index);
             required.extend(req.into_iter().map(|r| Attribute::wrap(r.attribute)));
             optional.extend(opt.into_iter().map(|r| Attribute::wrap(r.attribute)));

@@ -1061,6 +1061,7 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Pkcs11Provider>()?;
     m.add_class::<Pkcs11Session>()?;
     m.add_class::<Pkcs11Signer>()?;
+    crate::signing::register(&m)?;
     m.add_function(wrap_pyfunction!(canonicalize, &m)?)?;
     m.add_function(wrap_pyfunction!(exc_c14n, &m)?)?;
     Ok(())

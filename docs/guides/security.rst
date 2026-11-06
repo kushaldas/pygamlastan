@@ -342,6 +342,72 @@ local file - an unsigned metadata feed lets an attacker set all of it.
    the release policy is your privacy boundary - see :doc:`idp_integration`.
 
 
+Decisions and limits of the IdP engine and its backends
+-------------------------------------------------------
+
+These are choices, not oversights. Each is stated with its reason so a reviewer
+(or a later change) can see what is decided, what is the application's job, and
+what would be needed to change it.
+
+``AuthnMethodRef.inline`` is the application's own claim
+   The engine verifies nothing about it. For ``Comparison="exact"`` an inline
+   class ref satisfies the request by *matching the request*, so an application
+   that builds it from the ``AuthnRequest`` signs an assertion claiming an
+   authentication context that was never established. Only the login flow knows
+   which method ran, so the engine cannot check it. Build it from a constant or
+   from the upstream IdP's reported context, never from request data.
+   ``AuthnMethodRef.broker`` is held to the broker's registration but is still
+   your claim about which method ran. A ``ResponseEngine`` flag that rejects
+   inline refs outright is possible, and is not implemented.
+
+The EPTID cache must be private to one IdP and one secret
+   ``Eptid(store=...)`` remembers issued values so that rotating the secret (or
+   the digest) cannot change what an SP already knows. Its shape check rejects
+   another IdP's or SP's value and a wrong key. It **cannot** tell two
+   right-shaped values apart: a cache shared with another deployment that uses
+   the same IdP entity ID, a backup restored from one, and a forged value are
+   accepted, and a flush is a miss, after which a changed secret or digest issues
+   a different identifier. The cache key deliberately does **not** include the
+   secret: a key that changed with the secret would turn every rotation into a
+   miss, which is the failure the cache exists to prevent. So keep the namespace
+   private (one cache per IdP and secret: blue/green, staging and merged tenants
+   must not share one), never let it evict or expire, and run
+   :func:`~pygamlastan.idp.check_kv_conformance` against it.
+
+Metadata accessors read roles, not endpoints
+   An entity can carry a legacy role beside a SAML 2.0 one. The
+   :class:`~pygamlastan.metadata.EntityDescriptor` accessors read only roles that
+   declare SAML 2.0 by default, so a key published only for a legacy role is never
+   offered for a SAML 2.0 message. A role that declares several protocols is read
+   as a whole, so still choose endpoints by binding. Metadata that fails to mark
+   its SAML 2.0 role as such yields nothing (it fails closed). ``protocol=None``
+   reads every role, for inspection tools, and must not feed a trust decision.
+   Document-level checks (``SPConfig`` loading a shared aggregate) read every
+   role, so one legacy-only IdP does not discard the others; such an IdP fails
+   where it is used, with a message that names the cause.
+
+Backends are checked, not trusted, and that has requirements
+   Every record a store returns is verified against ``user_for``, the durable
+   slot and the filter, so a backend that forgot its ``WHERE user_id`` raises
+   instead of handing over another user's NameID. That needs ``user_for`` to see
+   the store's own writes (read from the primary, not a lagging replica) and
+   backend-enforced unique constraints. ``verify_store=False`` turns the checks
+   off, warns, and is for a store you fully trust. Run
+   :func:`~pygamlastan.idp.check_store_conformance`,
+   :func:`~pygamlastan.idp.check_kv_conformance` and
+   :func:`~pygamlastan.idp.check_assertion_store_conformance` against a **real**
+   instance with its real indexes: a store that serialises every call can pass the
+   concurrent checks without holding the constraint, and a race between separate
+   processes is not detected.
+
+Query responders are not bound
+   gamlastan's ``get_authn_statements`` and ``create_assertion_id_request_response``
+   check that an assertion belongs to the subject or ID asked about, but they are
+   not exposed to Python. An author building an AuthnQuery or AssertionIDRequest
+   responder on an ``AssertionStore`` must make the same checks, and must decide
+   whether the *requester* may ask: the subject check binds the answer to the
+   NameID value, not to who is asking.
+
 Footguns the API leaves reachable (and why)
 -------------------------------------------
 
@@ -402,6 +468,11 @@ Checklist for a production IdP
 #. Apply attribute-release and NameID policy appropriate to your privacy
    requirements (see :doc:`idp_integration`).
 #. Fetch SP metadata over **signature-verified** MDQ or from a vetted local file.
+#. Build ``AuthnMethodRef.inline`` from what your login flow did, never from the
+   request; keep the EPTID cache private to one IdP and secret and never evicting;
+   read store lookups from the primary; and run the three conformance suites
+   against the real backends (see `Decisions and limits of the IdP engine and its
+   backends`_).
 #. When showing an SP's ``mdui:UIInfo`` on a consent screen, HTML-escape its
    display names/descriptions and allowlist logo/URL schemes to ``https:`` - the
    values are attacker-controlled (see `Untrusted metadata: display fields and
