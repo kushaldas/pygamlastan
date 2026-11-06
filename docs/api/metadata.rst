@@ -36,6 +36,7 @@ raise :class:`pygamlastan.SamlMetadataError` (or
       :type: bool
    .. py:method:: is_idp() -> bool
    .. py:method:: is_sp() -> bool
+
    An entity can carry several roles of one kind, each declaring the protocols it
    speaks in ``protocolSupportEnumeration``: a legacy (for example SAML 1.1) role
    beside a SAML 2.0 one. The accessors below that read role data take a
