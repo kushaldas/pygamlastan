@@ -10,9 +10,11 @@ on:
     # gamlastan's 06:17 run.
     - cron: "42 6 * * *"
   push:
-    # A release tag points at a commit the branch audit has already covered, and
-    # a red run on a tag only repeats advisories the daily run tracks as issues.
-    tags-ignore:
+    # Branches only. A release tag points at a commit the branch audit has already
+    # covered, and a red run on a tag only repeats advisories the daily run tracks
+    # as issues. Defining only `branches` leaves tags out, whereas defining only
+    # `tags-ignore` would also stop every branch push from triggering the audit.
+    branches:
       - "**"
     paths:
       - "**/Cargo.toml"
