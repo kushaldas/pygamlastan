@@ -10,10 +10,9 @@ surfacing it correctly to Python.
 
 ## [Unreleased]
 
-Tracks gamlastan 0.10.0 (the IdP orchestrator, the store verification and
+Requires gamlastan 0.10.0 (the IdP orchestrator, the store verification and
 conformance suites, and the bergshamra 0.11 / uppsala 0.12 / kryptering 0.7
-stack), which is not yet released; `Cargo.toml` carries a git
-`[patch.crates-io]` until 0.10.0 is on crates.io.
+stack).
 
 ### Added
 
