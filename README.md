@@ -1,6 +1,6 @@
 # pygamlastan
 
-Python bindings for [gamlastan](https://github.com/kushaldas/gamlastan) **0.9.x**, a
+Python bindings for [gamlastan](https://github.com/kushaldas/gamlastan) **0.10.x**, a
 pure-Rust SAML 2.0 library - types, XML, crypto, metadata, bindings, security, and
 profiles. Built with [PyO3](https://pyo3.rs) 0.29 + [maturin](https://www.maturin.rs)
 (abi3, Python ≥ 3.10).
@@ -41,16 +41,20 @@ print(result.name_id, result.attributes_dict())
 > is an authentication bypass. See the
 > [security guide](https://pygamlastan.readthedocs.io/en/latest/guides/security.html).
 
-## Gamlastan 0.9 APIs
+## IdP response engine
 
-The 0.5 release exposes gamlastan 0.9's algorithm allowlists, replay-aware
-LogoutRequest validation, participant-bound IdP session/logout helpers,
-recipient-bound artifact-store contract, and explicit unsolicited-SSO policy.
-Worked examples are in the [signing](https://pygamlastan.readthedocs.io/en/latest/guides/signing.html),
-[IdP integration](https://pygamlastan.readthedocs.io/en/latest/guides/idp_integration.html),
+`pygamlastan.idp` exposes gamlastan 0.10's IdP orchestrator. `ResponseEngine`
+checks an incoming AuthnRequest, then issues a signed response for an
+authenticated user, or a signed denial, applying the release policy, NameID
+formats and session handling. Issued assertions can be kept in your own store by
+implementing the `AssertionStore` protocol, and a store failure is raised as
+`SamlStoreError` rather than turned into a response.
+Worked examples are in the [IdP integration](https://pygamlastan.readthedocs.io/en/latest/guides/idp_integration.html),
 [SP integration](https://pygamlastan.readthedocs.io/en/latest/guides/sp_integration.html),
+[signing](https://pygamlastan.readthedocs.io/en/latest/guides/signing.html)
 and [bindings](https://pygamlastan.readthedocs.io/en/latest/guides/bindings.html)
-guides.
+guides, and each release's changes are in the
+[changelog](https://github.com/kushaldas/pygamlastan/blob/main/CHANGELOG.md).
 
 ## HSM / PKCS#11 signing
 
@@ -86,10 +90,11 @@ installed; when present it provisions a throwaway token and signs for real.
 
 ## Documentation
 
-You can read the [latest](https://pygamlastan.readthedocs.io/en/latest/) or the documentation (Sphinx 9.1) lives in `docs/`: installation, a quickstart, task
-guides (SP/IdP integration, signing & HSM, bindings, metadata, attributes,
-validation), and a per-module API reference. Build it with the project venv so the
-package is importable:
+Read the [latest documentation](https://pygamlastan.readthedocs.io/en/latest/) online,
+or build it from `docs/` (Sphinx 9.1): installation, a quickstart, task guides
+(SP/IdP integration, signing & HSM, bindings, metadata, attributes, validation),
+and a per-module API reference. Build it with the project venv so the package is
+importable:
 
 ```console
 uv pip install --python .venv/bin/python --group docs
