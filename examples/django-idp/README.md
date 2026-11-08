@@ -134,6 +134,9 @@ including its SAML logout associations. Other IdP browser sessions are invalidat
 when they next authenticate a request. Existing SP sessions are managed separately
 through Single Logout. Only the current user's password can be changed here;
 operators can still replace another account's password using the commands below.
+If logout invalidates the session, or the session expires while the new password
+is being hashed, the change is rejected with HTTP 409. Sign in again before
+retrying; the password is not changed and the ended login is not restored.
 
 ## Account commands
 
@@ -282,6 +285,9 @@ as partial logout. If the browser gets stuck at an unreachable SP, return to
 always records partial logout. After flow expiry, that page reports incomplete
 logout. A provider that never responds may retain its own session. SOAP, Artifact
 logout and encrypted NameIDs are not implemented.
+Recovery POSTs check the flow and its expiry under the write lock. A stale,
+expired, or already-completed request returns HTTP 400, including when a valid
+LogoutResponse or another recovery request completes the flow concurrently.
 
 Recovery uses a separate, signed HttpOnly cookie limited to `/idp/logout/`, with
 a five-minute lifetime and SameSite=Lax. It is Secure when the configured public

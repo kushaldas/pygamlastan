@@ -1,5 +1,5 @@
 from datetime import timedelta
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from threading import Barrier, Event
 import re
 from unittest.mock import patch
@@ -405,6 +405,37 @@ class SingleLogoutTests(LogoutTestMixin, TestCase):
         self.browser.cookies[slo.RECOVERY_COOKIE] = "forged-recovery-token"
         self.assertContains(self.browser.get("/idp/logout/status/"), "Some Service Providers could not confirm logout")
 
+    def test_recovery_post_for_completed_flow_returns_client_error(self):
+        self.browser.post("/idp/logout/")
+        flow = LogoutFlow.objects.get()
+        identifier = flow.queue[0]["id"]
+        flow.delete()
+        response = self.browser.post("/idp/logout/status/", {"request_id": identifier})
+        self.assertEqual(response.status_code, 400)
+
+    def test_recovery_post_cannot_advance_expired_flow(self):
+        self.browser.post("/idp/logout/")
+        flow = LogoutFlow.objects.get()
+        original = flow.queue.copy()
+        LogoutFlow.objects.update(expires_at=timezone.now() - timedelta(seconds=1))
+        response = self.browser.post("/idp/logout/status/", {"request_id": original[0]["id"]})
+        self.assertEqual(response.status_code, 400)
+        flow.refresh_from_db()
+        self.assertEqual(flow.queue, original)
+
+    def test_recovery_completion_deleted_after_locked_update_returns_client_error(self):
+        self.browser.post("/idp/logout/")
+        flow = LogoutFlow.objects.get()
+        drive = slo.drive
+
+        def completed_elsewhere(request, current, cfg):
+            LogoutFlow.objects.filter(pk=current.pk).delete()
+            return drive(request, current, cfg)
+
+        with patch("idp.slo.drive", side_effect=completed_elsewhere):
+            response = self.browser.post("/idp/logout/status/", {"request_id": flow.queue[0]["id"]})
+        self.assertEqual(response.status_code, 400)
+
 
 class LogoutPreparationRaceTests(LogoutTestMixin, TransactionTestCase):
     def race(self, initiator, mutation):
@@ -483,6 +514,99 @@ class LogoutPreparationRaceTests(LogoutTestMixin, TransactionTestCase):
 
     def test_sp_logout_includes_concurrent_sso_participant(self):
         self.race("sp", "sso")
+
+    def test_logout_during_password_hashing_cannot_restore_login(self):
+        from django.contrib.auth.forms import PasswordChangeForm
+        from django.conf import settings
+        if connections["default"].settings_dict["NAME"].startswith("file:memory"):
+            self.skipTest("Use config.test_settings for SQLite writer-concurrency tests.")
+        hashed, release = Event(), Event()
+        save = PasswordChangeForm.save
+        browser = Client()
+        browser.cookies = self.browser.cookies.copy()
+
+        def pause_hashing(form, commit=True):
+            user = save(form, commit=commit)
+            self.assertFalse(connections["default"].in_atomic_block)
+            hashed.set()
+            if not release.wait(timeout=15):
+                raise AssertionError("Concurrent logout did not finish.")
+            return user
+
+        def change_password():
+            close_old_connections()
+            try:
+                return browser.post("/idp/profile/", {
+                    "old_password": self.password, "new_password1": "a racing teaching password",
+                    "new_password2": "a racing teaching password",
+                })
+            finally:
+                connections.close_all()
+
+        with patch.object(PasswordChangeForm, "save", pause_hashing), ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(change_password)
+            try:
+                self.assertTrue(hashed.wait(timeout=15))
+                self.assertEqual(self.browser.post("/idp/logout/").status_code, 302)
+            finally:
+                release.set()
+            response = future.result(timeout=20)
+        self.assertEqual(response.status_code, 409)
+        self.assertNotIn(settings.SESSION_COOKIE_NAME, response.cookies)
+        self.assertFalse(Session.objects.exists())
+        self.assertFalse(SamlParticipant.objects.exists())
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password(self.password))
+
+    def test_recovery_post_and_logout_response_serialize_completion(self):
+        from django.db.models.query import QuerySet
+        if connections["default"].settings_dict["NAME"].startswith("file:memory"):
+            self.skipTest("Use config.test_settings for SQLite writer-concurrency tests.")
+        self.browser.post("/idp/logout/")
+        flow = LogoutFlow.objects.get()
+        identifier = flow.queue[0]["id"]
+        message = saml_logout.create_logout_response_success(self.sp.entity_id, identifier, self.cfg.slo_url)
+        loaded, release, callback_started = Event(), Event(), Event()
+        first = QuerySet.first
+        browser = Client()
+        browser.cookies = self.browser.cookies.copy()
+
+        def pause_read(query):
+            current = first(query)
+            if query.model is LogoutFlow and current is not None and not loaded.is_set():
+                loaded.set()
+                if not release.wait(timeout=15):
+                    raise AssertionError("Recovery read was not released.")
+            return current
+
+        def recover():
+            close_old_connections()
+            try:
+                return browser.post("/idp/logout/status/", {"request_id": identifier})
+            finally:
+                connections.close_all()
+
+        def respond():
+            close_old_connections()
+            try:
+                callback_started.set()
+                return deliver(Client(), message, self.sp, relay=flow.token)
+            finally:
+                connections.close_all()
+
+        with patch.object(QuerySet, "first", pause_read), ThreadPoolExecutor(max_workers=2) as executor:
+            recovery = executor.submit(recover)
+            try:
+                self.assertTrue(loaded.wait(timeout=15))
+                callback = executor.submit(respond)
+                self.assertTrue(callback_started.wait(timeout=15))
+                with self.assertRaises(FutureTimeout):
+                    callback.result(timeout=.25)
+            finally:
+                release.set()
+            self.assertEqual(recovery.result(timeout=20).status_code, 200)
+            self.assertEqual(callback.result(timeout=20).status_code, 400)
+        self.assertFalse(LogoutFlow.objects.exists())
 
 
 class LogoutReplayConcurrencyTests(TransactionTestCase):

@@ -8,6 +8,7 @@ from django.http import HttpResponse
 from django.shortcuts import redirect, render
 from django.urls import reverse, reverse_lazy
 from django.utils.decorators import method_decorator
+from django.utils import timezone
 from django.views.decorators.cache import never_cache
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
@@ -180,6 +181,11 @@ class ProfileView(PasswordChangeView):
         # its SAML associations atomically so concurrent cleanup cannot lose them.
         user = form.save(commit=False)
         with transaction.atomic():
+            if not Session.objects.filter(pk=old_key, expire_date__gt=timezone.now()).exists():
+                # logout may have invalidated the cached session while hashing.
+                # cycle_key() would otherwise create a fresh authenticated one.
+                user.password = old_hash
+                return HttpResponse("Your session has ended. Sign in again before changing your password.", status=409)
             if not User.objects.filter(pk=user.pk, password=old_hash, is_active=True).exists():
                 user.password = old_hash
                 form.add_error("old_password", "Your account changed. Please try again.")

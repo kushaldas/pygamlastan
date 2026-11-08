@@ -178,12 +178,16 @@ def completed(request, partial=False):
 def local_logout(request):
     cleanup()
     cfg = get_sp_config()
-    login = SamlLogin.objects.filter(session_key=request.session.session_key, ended=False).first()
-    had_identity = bool(request.session.get("saml_identity"))
-    request.session.flush()
+    with transaction.atomic():
+        # Keep the selected association and browser deletion consistent with a
+        # concurrent ACS replacing the login. Resolve metadata after committing.
+        login = SamlLogin.objects.filter(session_key=request.session.session_key, ended=False).first()
+        had_identity = bool(request.session.get("saml_identity"))
+        request.session.flush()
+        if login:
+            end_logins([login.session_key])
     if not login:
         return completed(request, partial=had_identity)
-    end_logins([login.session_key])
     try:
         entity = idp_resolver.resolve(login.issuer)
         binding, url = endpoint(entity)

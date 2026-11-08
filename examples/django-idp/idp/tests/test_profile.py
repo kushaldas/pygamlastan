@@ -98,3 +98,21 @@ class ProfileTests(TestCase):
         self.assertContains(response, "Your account changed. Please try again.")
         self.user.refresh_from_db()
         self.assertTrue(self.user.check_password("a newer administrative password"))
+
+    def test_session_expiring_while_hashing_rejects_password_change(self):
+        from django.contrib.auth.forms import PasswordChangeForm
+        old_key = self.browser.session.session_key
+        save = PasswordChangeForm.save
+
+        def expire(form, commit=True):
+            user = save(form, commit=commit)
+            Session.objects.filter(pk=old_key).update(expire_date=timezone.now() - timedelta(seconds=1))
+            return user
+
+        with patch.object(PasswordChangeForm, "save", expire):
+            response = self.browser.post("/idp/profile/", self.payload())
+        self.assertEqual(response.status_code, 409)
+        self.assertContains(response, "Your session has ended.", status_code=409)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password(self.password))
+        self.assertEqual(list(Session.objects.values_list("session_key", flat=True)), [old_key])

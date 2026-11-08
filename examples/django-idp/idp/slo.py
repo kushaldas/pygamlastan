@@ -188,7 +188,7 @@ def drive(request, flow, cfg):
     # Completion is consumed once. Keep failure status visible to local users.
     with transaction.atomic():
         if not LogoutFlow.objects.filter(pk=flow.pk).delete()[0]:
-            raise ValueError("Logout flow has already completed.")
+            return HttpResponseBadRequest("The logout flow has already advanced.")
     if flow.origin:
         origin = flow.origin
         message = (saml_logout.create_logout_response_partial if flow.partial else
@@ -330,12 +330,11 @@ def status(request):
     token = request.get_signed_cookie(
         RECOVERY_COOKIE, default=None, salt=RECOVERY_SALT, max_age=int(LIFETIME.total_seconds()),
     )
-    flow = LogoutFlow.objects.filter(pk=token).first()
-    if flow is None or flow.expires_at <= timezone.now():
-        return render(request, "idp/logged_out.html", {"partial": True})
     if request.method == "POST":
         with transaction.atomic():
-            current = LogoutFlow.objects.get(pk=flow.pk)
+            current = LogoutFlow.objects.filter(pk=token).first()
+            if current is None or current.expires_at <= timezone.now():
+                return HttpResponseBadRequest("The logout flow has already advanced or expired.")
             # A stale tab must not skip a different participant.
             if current.queue and current.queue[0]["id"] == request.POST.get("request_id"):
                 current.queue = current.queue[1:]
@@ -344,4 +343,7 @@ def status(request):
             else:
                 return HttpResponseBadRequest("The logout flow has already advanced.")
         return drive(request, current, get_idp_config())
+    flow = LogoutFlow.objects.filter(pk=token).first()
+    if flow is None or flow.expires_at <= timezone.now():
+        return render(request, "idp/logged_out.html", {"partial": True})
     return render(request, "idp/logout_status.html", {"target": flow.queue[0] if flow.queue else None})

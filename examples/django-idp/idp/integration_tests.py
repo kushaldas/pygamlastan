@@ -1,8 +1,13 @@
 """Exercise the actual IdP and sibling SP views using real signed messages."""
 from urllib.parse import urlsplit
 from unittest.mock import patch
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from threading import Event
 
-from django.test import Client, TestCase
+from django.contrib.sessions.backends.db import SessionStore
+from django.contrib.sessions.models import Session
+from django.db import close_old_connections, connections
+from django.test import Client, TestCase, TransactionTestCase
 from pygamlastan import bindings, core, logout as saml_logout, metadata, profiles
 
 from idp.accounts import create_user
@@ -13,7 +18,7 @@ from sp import saml_logic as sp_logic
 from sp.models import LogoutTransaction, SamlLogin
 
 
-class BrowserLogoutIntegrationTests(TestCase):
+class BrowserLogoutTestMixin:
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -72,6 +77,8 @@ class BrowserLogoutIntegrationTests(TestCase):
         self.assertFalse(SamlParticipant.objects.exists())
         self.assertFalse(SamlLogin.objects.filter(ended=False).exists())
 
+
+class BrowserLogoutIntegrationTests(BrowserLogoutTestMixin, TestCase):
     def test_sp_initiated_redirect_roundtrip(self):
         request = self.sp_browser.post("/sp/logout/")
         self.assertTrue(LogoutTransaction.objects.exists())
@@ -287,3 +294,116 @@ class BrowserLogoutIntegrationTests(TestCase):
         SamlLogin.objects.update(expires_at=timezone.now() - timedelta(seconds=1))
         sp_slo.cleanup()
         self.assertFalse(SamlLogin.objects.exists())
+
+
+class ConcurrentSpLogoutTests(BrowserLogoutTestMixin, TransactionTestCase):
+    def pending_replacement(self):
+        if connections["default"].settings_dict["NAME"].startswith("file:memory"):
+            self.skipTest("Use integration_test_settings for SQLite writer-concurrency tests.")
+        _, password = create_user(username="bob", email="bob@example.org")
+        bob = Client()
+        bob.login(username="bob", password=password)
+        response = self.forward(self.sp_browser.get("/sp/login/"), bob)
+        self.assertEqual(response.status_code, 200)
+        return response
+
+    def test_logout_blocks_acs_between_association_read_and_session_flush(self):
+        from sp import slo as sp_slo
+        pending = self.pending_replacement()
+        original = SamlLogin.objects.get(ended=False)
+        selected, release, acs_started = Event(), Event(), Event()
+        flush = SessionStore.flush
+        record = sp_slo.record_login
+        browser = Client()
+        browser.cookies = self.sp_browser.cookies.copy()
+        replacement_browser = Client()
+        replacement_browser.cookies = self.sp_browser.cookies.copy()
+
+        def pause_flush(session):
+            if session.session_key == original.session_key and not selected.is_set():
+                selected.set()
+                if not release.wait(timeout=15):
+                    raise AssertionError("Logout was not released.")
+            return flush(session)
+
+        def record_replacement(request, result):
+            acs_started.set()
+            return record(request, result)
+
+        def logout():
+            close_old_connections()
+            try:
+                return browser.post("/sp/logout/")
+            finally:
+                connections.close_all()
+
+        def replace():
+            close_old_connections()
+            try:
+                return self.forward(pending, replacement_browser)
+            finally:
+                connections.close_all()
+
+        def resolve(entity):
+            self.assertFalse(connections["default"].in_atomic_block, "Metadata work must be outside the logout transaction.")
+            return metadata.parse_entity(self.idp_xml) if entity == self.idp.entity_id else None
+
+        with patch.object(SessionStore, "flush", pause_flush), patch("sp.slo.record_login", side_effect=record_replacement), \
+             patch("sp.idp_resolver.resolve", side_effect=resolve), ThreadPoolExecutor(max_workers=2) as executor:
+            outgoing = executor.submit(logout)
+            try:
+                self.assertTrue(selected.wait(timeout=15))
+                replacement = executor.submit(replace)
+                self.assertTrue(acs_started.wait(timeout=15))
+                with self.assertRaises(FutureTimeout):
+                    replacement.result(timeout=.25)
+            finally:
+                release.set()
+            response = outgoing.result(timeout=20)
+            rejected = replacement.result(timeout=20)
+        self.assertEqual(response.status_code, 302)
+        _, request = decoded_response(response)
+        self.assertEqual(request.name_id.value, original.name_id["value"])
+        self.assertEqual(request.session_indexes, [original.session_index])
+        self.assertEqual(rejected.status_code, 400)
+        self.assertContains(rejected, "Your session ended during sign-in", status_code=400)
+        self.assertNotIn("sessionid", rejected.cookies)
+        self.assertFalse(Session.objects.filter(pk=original.session_key).exists())
+        self.assertFalse(SamlLogin.objects.filter(ended=False).exists())
+
+    def test_acs_committing_first_is_the_association_used_for_logout(self):
+        from sp import slo as sp_slo
+        pending = self.pending_replacement()
+        ready, release = Event(), Event()
+        cfg = sp_slo.get_sp_config
+        browser = Client()
+        browser.cookies = self.sp_browser.cookies.copy()
+
+        def pause_config():
+            config = cfg()
+            ready.set()
+            if not release.wait(timeout=15):
+                raise AssertionError("Logout was not released.")
+            return config
+
+        def logout():
+            close_old_connections()
+            try:
+                return browser.post("/sp/logout/")
+            finally:
+                connections.close_all()
+
+        with patch("sp.slo.get_sp_config", side_effect=pause_config), ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(logout)
+            try:
+                self.assertTrue(ready.wait(timeout=15))
+                self.assertEqual(self.forward(pending, self.sp_browser).status_code, 302)
+                replacement = SamlLogin.objects.get(ended=False)
+            finally:
+                release.set()
+            response = future.result(timeout=20)
+        _, request = decoded_response(response)
+        self.assertEqual(request.name_id.value, replacement.name_id["value"])
+        self.assertEqual(request.session_indexes, [replacement.session_index])
+        self.assertFalse(SamlLogin.objects.filter(ended=False).exists())
+        self.assertFalse(Session.objects.filter(pk=replacement.session_key).exists())

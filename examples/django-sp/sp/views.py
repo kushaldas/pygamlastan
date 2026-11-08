@@ -3,6 +3,7 @@ SSO), ACS (consume the Response), logout."""
 import logging
 
 from django.conf import settings
+from django.contrib.sessions.backends.base import UpdateError
 from django.http import HttpResponse
 from django.shortcuts import redirect, render
 from django.views.decorators.csrf import csrf_exempt
@@ -131,5 +132,11 @@ def acs(request):
         "authn_context": result.authn_context_class_ref,
         "attributes": sl.attributes_for_display(result),
     }
-    slo.record_login(request, result)
+    try:
+        slo.record_login(request, result)
+    except UpdateError:
+        # Logout won the race with this in-flight ACS. Do not let the response
+        # middleware try to save the same invalidated session again.
+        request.session.modified = False
+        return _error(request, "Your session ended during sign-in. Please start again.", status=400)
     return redirect("sp:index")

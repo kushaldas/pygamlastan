@@ -25,6 +25,12 @@ and pending transactions are persisted across workers and restarts, with bounded
 five-minute exchanges and a 60-second timestamp allowance.
 
 Local logout ends the SP session immediately, before the remote exchange.
+Reading the current association, removing the browser session, and marking its
+associations ended happen in one SQLite transaction. An ACS replacement that
+commits first becomes the logout target. If logout removes the session before
+an in-flight ACS can save its replacement, that ACS returns HTTP 400 and requires
+a new login. Metadata resolution and protocol sending remain outside the write
+transaction.
 Missing endpoints, errors, and partial responses are shown as incomplete logout;
 other sessions can remain active if a provider cannot complete the exchange.
 SOAP/Artifact logout and encrypted NameIDs are not supported.
