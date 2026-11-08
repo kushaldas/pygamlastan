@@ -2,6 +2,9 @@
 # Build context is this directory (examples/django-idp).
 FROM debian:trixie-slim
 
+LABEL org.opencontainers.image.title="Django SAML IdP" \
+      org.opencontainers.image.version="0.2.0"
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -17,12 +20,12 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
 
-# `just up` builds and stages the repository's local pygamlastan wheel before
+# `just build` builds and stages the repository's local pygamlastan wheel before
 # this image is built, so no unpublished release artifact is assumed.
 COPY wheels/ /app/wheels/
+COPY pyproject.toml /app/pyproject.toml
 RUN uv venv /app/.venv \
- && uv pip install --find-links /app/wheels \
-        "django==6.0.7" "pygamlastan>=0.4.0" "cryptography>=50" "gunicorn>=26" "whitenoise>=6.12"
+ && uv pip install /app/wheels/pygamlastan-*.whl -r /app/pyproject.toml
 
 COPY . /app
 RUN chmod +x /app/entrypoint.sh

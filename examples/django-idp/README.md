@@ -1,251 +1,363 @@
 # Django SAML IdP (pygamlastan example)
 
-A small, **self-contained SAML 2.0 Identity Provider** built with
-[Django 6.0](https://www.djangoproject.com/) and
-[`pygamlastan`](../../). It demonstrates the IdP side of the Web Browser SSO
-profile: it parses an SP's metadata, processes incoming `AuthnRequest`s,
-authenticates the user against Django's auth, and returns a **signed** SAML
-assertion over the HTTP-POST binding.
+A teaching SAML 2.0 Identity Provider using Django **6.1.3**, SQLite, and the
+locally built [`pygamlastan`](../../) library. It accepts Redirect and POST
+AuthnRequests and returns assertion-signed responses over HTTP POST.
 
-It has **no local SP database**: Service Providers are resolved at request time
-from local metadata files or an MDQ service (see
-[Service Provider metadata](#service-provider-metadata)).
+Implementation of [the account-management plan](IMPLEMENTATION_PLAN.md) is in
+progress. The account model, CLI bootstrap, JSON importer, password policy, and
+case-insensitive username/email login are implemented. Built-in Django admin is
+disabled. The custom `/idp-admin/` UI, password recovery and SMTP,
+throttling, persistent NameID registry, and database SP registry are still pending.
+Signed SAML Single Logout is implemented with the sibling Django SP.
+Until those steps land, use the CLI for account management and treat this as a
+local teaching example.
 
-> Built for learning and integration testing. The defaults (demo accounts, a
-> self-signed key, a dev secret key) are **not** production-ready - see
-> [Security notes](#security-notes).
+## Project commands and container build
 
-## What it does
+Run `just` in this directory to list commands. The local `justfile` includes
+dependency setup, Django management, accounts/imports, checks/tests, and image
+build/run commands. `just up`, `down`, `logs`, `restart`, `tls`, `swamid-cert`,
+and `link` delegate to the shared federation stack in `examples/`.
 
-- Publishes IdP metadata at `/idp/metadata` (entityID, both SSO bindings, signing
-  cert, and a registered `errorURL` per SWAMID Tech 5.1.13 - the `/idp/error` page).
-- Accepts `AuthnRequest`s at `/idp/sso/` over **HTTP-Redirect** (GET) and **HTTP-POST**.
-- Looks the SP up by issuer, validates the request against the SP's metadata
-  (`process_authn_request`), and resolves the AssertionConsumerService.
-- Authenticates the user (Django login), then builds an assertion with a small
-  attribute set (`displayName`, `uid`, `givenName`, `sn`, `mail`, and the scoped
-  `eduPersonPrincipalName` / `eduPersonScopedAffiliation`) and the requested NameID format
-  (transient / persistent / email).
-- **Signs the assertion** (enveloped XML-DSig, `WantAssertionsSigned`-friendly)
-  and POSTs it back to the SP's ACS via a self-submitting form.
-
-All SAML work lives in [`idp/saml_logic.py`](idp/saml_logic.py); the Django views
-([`idp/views.py`](idp/views.py)) stay thin.
-
-## Quick start (Docker Compose + Caddy)
-
-> **Orchestration moved up a level.** The Docker Compose file, Caddy config,
-> `.env`, and `justfile` now live in [`examples/`](../) and run this IdP together
-> with the [`django-sp`](../django-sp/) example behind a **single** Caddy. Run
-> the stack from there - see [`examples/README.md`](../README.md):
->
-> ```console
-> cd ..            # the examples/ directory
-> cp .env-example .env
-> just up          # local wheel, certs, build, and start
-> just link        # exchange IdP <-> SP metadata
-> ```
->
-> The recipe names below (`just add-sp`, `just swamid-cert`, ...) and the
-> `./data/caddy` TLS path describe the previous standalone layout; the equivalents
-> now live in the top-level `justfile` (`just link`, `just swamid-cert`, certs in
-> `examples/certs/`). The rest of this document still describes the IdP itself.
-
-Prerequisites: Docker (with Compose), [`just`](https://github.com/casey/just),
-[`mkcert`](https://github.com/FiloSottile/mkcert) (for locally-trusted TLS),
-Rust, and `maturin`.
+To build **`kushaldas/django-idp:0.2.0`**, install Docker, `just`, `uv`, and a
+Rust toolchain with a C linker, then run:
 
 ```console
-# 0. configure: copy the template and set IDP_DOMAIN (.env is gitignored).
-#    The template uses the SWAMID QA MDQ and a placeholder domain.
+just build
+```
+
+This builds the repository's local pygamlastan wheel with maturin, stages it in
+`wheels/`, and builds the image from **`debian:trixie-slim`**. It needs no local
+Python virtual environment. The Dockerfile installs the staged wheel directly
+and reads the application dependencies from `pyproject.toml`. Application data,
+virtual environments, and `.env` secrets are excluded from the image.
+
+Bootstrap an administrator and run the standalone image over local HTTP:
+
+```console
+just container-manage idp_user create admin --email admin@example.org --admin
+just container-run
+```
+
+Open `http://localhost:8000/idp/`. The standalone container runs in the foreground;
+Ctrl-C stops it, or use `just container-stop` in another terminal. Signing keys,
+SQLite accounts, and sessions persist in the host's `./data` directory. One-off
+commands run migrations through the entrypoint before executing their command.
+
+```console
+just container-manage idp_user set-password admin
+just container-manage idp_user set-admin alice --enable
+just container-manage check
+```
+
+For a container JSON import, place the file in `data/users.json`, then run
+`just container-manage idp_import_users /data/users.json`. Generated passwords
+are printed once, so keep the terminal output private.
+
+If present, a project-local `.env` supplies standalone container settings via
+Docker's `--env-file`. Set `SAML_IDP_BASE_URL` to the public URL when using a
+different port or a reverse proxy; `just container-run 8080` exposes loopback
+port 8080. Override `IDP_ENV_FILE` to select another environment file and
+`IDP_IMAGE` to select another image tag. Shared Compose settings remain in
+`examples/.env` and `examples/docker-compose.yml`.
+
+For local Python development:
+
+```console
+just setup
+just migrate
+just keygen
+just create-user admin admin@example.org --admin
+just collectstatic
+just run
+```
+
+Frequently used local commands:
+
+| Command | Purpose |
+| --- | --- |
+| `just create-user USERNAME EMAIL [--admin]` | Create an account and print a generated password |
+| `just set-password USERNAME` | Generate and print a replacement password |
+| `just set-password USERNAME --password-stdin` | Read an explicit password from stdin |
+| `just set-admin USERNAME enable` / `disable` | Grant or revoke administration |
+| `just import-users FILE` | Atomically import legacy JSON profiles |
+| `just seed-demo` | Explicitly create lesson accounts |
+| `just verify` | System checks, migration drift check, and tests |
+| `just test-integration` | Real signed SSO/SLO exchanges with the sibling SP through Django test clients |
+| `just manage COMMAND ...` | Run any other Django management command |
+| `just shell` | Open the local Django shell |
+| `just add-sp FILE` | Copy trusted SP metadata; restart the IdP to reload |
+| `just metadata [BASE_URL]` | Fetch metadata from a running IdP |
+
+## Run the shared stack
+
+Compose, Caddy, `.env-example`, and the active `justfile` live in
+[`examples/`](../). Follow [the shared setup](../README.md) for hostnames, mkcert,
+TLS, building the local wheel, and exchanging IdP/SP metadata.
+
+There are **no default accounts or shared passwords**. The IdP uses a fresh
+SQLite database at `data/db.sqlite3`. It never deletes an existing database.
+
+From `examples/`, build the images and create an administrator before starting
+the HTTP services:
+
+```console
 cp .env-example .env
-
-# 1. build/stage the local wheel, generate keys and certificates, then bring up
+just wheel tls swamid-cert build
+docker compose run --rm idp python manage.py idp_user create admin --email admin@example.org --admin
 just up
-
-# 2. open the IdP at https://${IDP_DOMAIN}/  and  /idp/metadata
+just link
 ```
 
-`just up` builds and stages the repository's local `pygamlastan` wheel, generates
-`./data/idp_key.pem` + `idp_cert.pem`, fetches the SWAMID signing cert, creates
-**mkcert** TLS certs for `IDP_DOMAIN` in `./data/caddy`, builds the image, and
-starts the containers. The SQLite DB (users and sessions only - no SP data) and
-keys persist in `./data`.
+The one-off container runs key generation, migrations, and static collection
+through its entrypoint, then runs the requested command. Direct account commands
+need a migrated database but do not read SAML signing keys or certificates.
+Users and sessions persist in the `django-idp/data` bind mount across restarts.
+The session lifetime defaults to one hour.
 
-Caddy serves HTTPS using the mkcert cert/key (no Let's Encrypt), so it works for
-any local domain. For a custom `IDP_DOMAIN` like `idp.gamlastan.sverige`, point
-it at your host so the browser can reach it:
+## Profile and password changes
+
+Sign in at `/idp/login/` to open **Your profile** at `/idp/profile/`. SAML login
+still continues to the requesting SP. You can also open your profile through
+your username in the header or the **Your profile and password** link on the
+IdP home page.
+
+The profile shows your username, name, and email as read-only details. To change
+your password, enter your current password and the new password twice. The same
+15–128 character and common-password rules used by the CLI apply; the browser
+form has no weak-password override. The form requires login and CSRF protection,
+and its responses are not cached.
+
+A successful change rotates and preserves the current browser's IdP session,
+including its SAML logout associations. Other IdP browser sessions are invalidated
+when they next authenticate a request. Existing SP sessions are managed separately
+through Single Logout. Only the current user's password can be changed here;
+operators can still replace another account's password using the commands below.
+If logout invalidates the session, or the session expires while the new password
+is being hashed, the change is rejected with HTTP 409. Sign in again before
+retrying; the password is not changed and the ended login is not restored.
+
+## Account commands
+
+Run these inside `django-idp/` for local development, or prefix them with
+`docker compose run --rm idp` from `examples/`:
 
 ```console
-echo "127.0.0.1 idp.gamlastan.sverige" | sudo tee -a /etc/hosts
+python manage.py migrate
+python manage.py idp_user create alice --email alice@example.org
+python manage.py idp_user create operator --email operator@example.org --admin
+python manage.py idp_user set-password alice
+python manage.py idp_user set-admin alice --enable
+python manage.py idp_user set-admin alice --disable
 ```
 
-#### Demo credentials
+Creation and password replacement generate independent random 24-character
+passwords and print them once, after a successful commit. Only Django password
+hashes are stored. Keep command output private. Creation does not force a
+password change on first login. Password replacement invalidates existing browser
+sessions when they next authenticate a request.
 
-Created on first boot:
+To supply a password, use `--password-stdin` on `create` or `set-password`.
+The command reads one line, removes its line terminator, and preserves spaces.
+Use an interactive hidden prompt rather than putting credentials in shell history:
 
-| Who   | Username | Password    | Where           |
-|-------|----------|-------------|-----------------|
-| Users | `angela`, `pamela`, `sandra`, `monica`, `erica`, `rita`, `tina`, `jessica` | `gamlastan` | `/idp/login/` |
-| Admin | `admin`  | `admin`     | `/admin/`       |
+```bash
+read -rs -p 'Password: ' idp_password
+printf '\n'
+printf '%s\n' "$idp_password" | python manage.py idp_user set-password alice --password-stdin
+unset idp_password
+```
 
-### TLS certificates
+The default policy accepts 15–128 characters, including spaces, and rejects
+Django's common-password list. There are no character-class rules. An explicit
+`--allow-weak-password` together with `--password-stdin` permits short passwords
+for lessons; empty passwords and values longer than 128 characters are rejected.
+Explicit passwords are never echoed by these commands.
 
-`just tls` (run as part of `just up`) uses **mkcert** to create a locally-trusted
-cert/key for `IDP_DOMAIN` in `./data/caddy`, and Caddy serves them via an explicit
-`tls` directive (no ACME). Delete `./data/caddy` and re-run `just tls` to
-regenerate, e.g. after changing `IDP_DOMAIN`.
+Username and email are NFKC-normalized, trimmed, and case-folded. Each must be
+unique, including across accounts' username/email fields so login cannot be
+ambiguous. Email is required. Every account has an immutable random UUID.
+`is_staff` controls IdP administration separately from SAML groups. The last
+active administrator cannot be demoted, disabled, or deleted through the account
+mutation API; SQLite IMMEDIATE transactions serialize competing changes.
 
-For a public deployment with a real CA instead, drop the `tls` line from the
-[`Caddyfile`](Caddyfile) (Caddy then does automatic Let's Encrypt for a public
-`IDP_DOMAIN` that resolves to the host with ports 80/443 open).
+## Import legacy JSON accounts
 
-## Service Provider metadata
+Import is explicit; startup does not read JSON. The importer accepts the Go
+example's array format or an object containing a `users` array:
 
-There is **no local SP database**. When an SP sends an `AuthnRequest`, the IdP
-resolves its metadata from two sources, tried in order:
-
-1. **Local files** - signed/self-contained SP metadata XML placed in the metadata
-   dir (`./data/metadata`, mounted `/data/metadata`). The SP's own keys are
-   embedded in the file, so these are **trusted as provided** (you put them on
-   disk) and indexed by entityID in memory at startup. Add one with:
-
-   ```console
-   just add-sp /path/to/sp-metadata.xml     # copies into ./data/metadata, reloads
-   just reload-metadata                      # after editing files there
-   ```
-
-2. **MDQ** - if `SAML_IDP_MDQ_URL` is set, an unknown entityID is fetched on
-   demand from a Metadata Query server and **mandatorily signature-verified**
-   against `SAML_IDP_METADATA_CERT` before it is trusted.
-
-The bundled `.env` points MDQ at SWAMID and uses its signing certificate; fetch
-the cert (done automatically by `just up`) with:
+```json
+[
+  {
+    "name": "alice",
+    "email": "alice@example.org",
+    "given_name": "Alice",
+    "surname": "Andersson",
+    "common_name": "Alice Example",
+    "groups": ["Students"],
+    "scoped_affiliation": "student@example.org"
+  }
+]
+```
 
 ```console
-just swamid-cert     # -> ./data/swamid-signing.pem (SAML_IDP_METADATA_CERT)
+python manage.py idp_import_users /path/to/users.json
 ```
 
-To use **only** local files, leave `SAML_IDP_MDQ_URL` empty in `.env` and add SPs
-with `just add-sp`. The SP must, in turn, trust this IdP - hand it
-`https://<host>/idp/metadata`.
+For Compose, mount the JSON read-only into a one-off container:
 
-> **Why the split?** Local files are self-contained (the SP keys are in them) and
-> trusted because you placed them; MDQ is remote, so its responses are signature-
-> verified against the federation's metadata signing certificate. The cert is
-> mandatory whenever MDQ is enabled.
-
-## Common tasks (`just`)
-
-```
-just              # list recipes
-just up           # keygen + swamid-cert + tls + build + start (idp + caddy)
-just tls          # mkcert TLS cert/key for $IDP_DOMAIN -> ./data/caddy
-just down         # stop
-just logs         # follow logs
-just swamid-cert  # fetch the SWAMID metadata signing cert (for MDQ)
-just add-sp FILE  # add a local SP from its metadata XML (no DB, no MDQ)
-just reload-metadata   # restart to reload ./data/metadata
-just metadata     # print IdP metadata through Caddy
-just shell        # Django shell in the container
-just keygen       # (re)generate IdP key/cert in ./data if missing
-just wheel        # build+stage a pygamlastan wheel in ./wheels
+```console
+docker compose run --rm -v /absolute/path/users.json:/import/users.json:ro idp python manage.py idp_import_users /import/users.json
 ```
 
-## Configuration
+Supported aliases are `username`/`name`, `email`/`mail`,
+`display_name`/`common_name`/`displayName`/`cn`,
+`given_name`/`givenName`/`first_name`, `surname`/`family_name`/`last_name`/`sn`,
+and `scoped_affiliation`/`eduPersonScopedAffiliation`. Conflicting aliases are
+rejected. Groups must be an array of nonempty names.
 
-Set via `.env` (copy [`.env-example`](.env-example); read automatically by docker
-compose) and [`docker-compose.yml`](docker-compose.yml).
+Old password/hash fields and admin flags are ignored. All imported accounts
+receive fresh random passwords, printed once after the entire import commits.
+A group named `Administrators` grants no administration rights; promote a chosen
+account explicitly with `idp_user set-admin USERNAME --enable`.
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `IDP_DOMAIN` | set in `.env` (e.g. `idp.gamlastan.sverige`) | Public hostname; drives Caddy TLS and the IdP base URL |
-| `SAML_IDP_BASE_URL` | `https://${IDP_DOMAIN}` | Base for entityID and endpoints |
-| `SAML_IDP_ENTITY_ID` | `${BASE_URL}/idp/metadata` | IdP entityID |
-| `SAML_IDP_KEY` / `SAML_IDP_CERT` | `/data/idp_{key,cert}.pem` | Signing key / cert |
-| `SAML_IDP_NAMEID_SECRET` | demo value | Secret for opaque persistent NameIDs |
-| `SAML_IDP_SUPPORT_EMAIL` | _(unset)_ | Contact shown on the `/idp/error` page (errorURL target) |
-| `SAML_IDP_METADATA_DIR` | `/data/metadata` | Local SP metadata files, loaded at startup (trusted) |
-| `SAML_IDP_MDQ_URL` | SWAMID (in `.env`) | MDQ base URL for on-demand SP resolution |
-| `SAML_IDP_METADATA_CERT` | SWAMID cert (in `.env`) | PEM cert to verify MDQ metadata (required with MDQ) |
-| `DJANGO_SECRET_KEY` | dev value | Django secret key |
-| `DJANGO_ALLOWED_HOSTS` | `${IDP_DOMAIN},localhost,idp` | Allowed hosts |
-| `DJANGO_DEBUG` | `0` | Debug mode |
-| `DEMO_PASSWORD` | `gamlastan` | Shared password for the seeded demo users |
-| `DJANGO_ADMIN_USERNAME` / `DJANGO_ADMIN_PASSWORD` | `admin` / `admin` | Seeded admin |
+All records are validated before writing. Any invalid record, duplicate,
+ambiguous identifier, or existing-account conflict rejects the whole import,
+without partial accounts or groups. Re-importing existing users is an error,
+not an update. Setup-link email delivery will be added with the recovery flow.
 
-> For purely local testing set `IDP_DOMAIN=localhost` in `.env` so Caddy serves
-> HTTPS with its local CA (a public domain triggers a real Let's Encrypt attempt
-> that needs the name to resolve to your host).
+`python manage.py seed_demo` remains an optional lesson command. It creates eight
+sample users with individual random passwords, prints new credentials once,
+and skips existing usernames. It creates no administrator. To deliberately use
+a shared teaching password, pass `--password-stdin --allow-weak-password`.
 
-## Local development (without Docker)
+## SAML Single Logout
+
+The IdP publishes **`/idp/slo/`** in metadata for HTTP-Redirect and HTTP-POST
+requests and responses. It supports SP-initiated and IdP-initiated browser logout,
+including propagation to the other SPs participating in the affected IdP session.
+The sibling SP publishes `/sp/slo/` with the same bindings.
+
+Use **Log out of connected services** on either application's page. Local actions
+at `/idp/logout/` and `/sp/logout/` now require a CSRF-protected **POST**. Existing
+GET logout links must be changed to forms. Local sessions end before the browser
+continues through the remote providers, even if a provider later fails.
+
+Each successful SSO records the exact issued NameID (value, format and all
+qualifiers), SessionIndex, browser session key, and expiry in SQLite. Cleanup
+uses the persisted browser session's expiry, so a later SSO renewal retains
+earlier SP associations. An incoming
+SP request can invalidate only its own matching subject/session associations.
+With SessionIndex, logout targets those sessions; without indexes, it targets
+all sessions matching that SP and full NameID. IdP-initiated logout targets the
+current browser's IdP session and its participating SP sessions. Other independent
+browser sessions are retained unless a matching index-free SP request covers them.
+Every supplied SessionIndex must match that SP and full NameID. Mixing known and
+unknown indexes rejects the whole request without ending the matching sessions.
+Propagation skips only the associations covered by the initiating LogoutRequest;
+other associations at that same SP are also contacted. The sibling SP remembers
+superseded associations as already ended, so repeated SSO with new transient
+NameIDs can still complete logout successfully without affecting a newer subject.
+
+Logout requests and responses must be signed with a key in the issuer's trusted
+metadata. Redirect signatures cover the exact encoded query; POST messages carry
+an enveloped XML signature covering the protocol element. Rollover signing keys
+are supported. Destinations, issuer, timestamps, full subject/session association,
+and response correlation are checked before the corresponding action is accepted.
+Replay reservations and pending flows are database-backed and shared by workers.
+Response correlation requires both the signed `InResponseTo` and an opaque random
+RelayState, and does not depend on a browser cookie being sent on cross-site POST.
+
+Metadata resolution happens outside database write transactions. Before ending
+sessions, logout rechecks the complete participant set and its current browser
+keys inside the invalidation transaction. If a concurrent password change rotates
+a key or SSO adds an association, preparation retries with the refreshed state.
+SSO also records its session renewal and new association in one transaction.
+Preparation makes at most three attempts; continuous changes return an error to the
+initiating SP, or HTTP 409 with a retry message for local logout, rather than
+claiming successful logout from an outdated snapshot.
+
+Flows expire after five minutes, with a 60-second clock allowance for incoming
+message timestamps. Missing endpoints and negative/partial responses are reported
+as partial logout. If the browser gets stuck at an unreachable SP, return to
+**`/idp/logout/status/`** in the same browser to skip it and continue; skipping
+always records partial logout. After flow expiry, that page reports incomplete
+logout. A provider that never responds may retain its own session. SOAP, Artifact
+logout and encrypted NameIDs are not implemented.
+Recovery POSTs check the flow and its expiry under the write lock. A stale,
+expired, or already-completed request returns HTTP 400, including when a valid
+LogoutResponse or another recovery request completes the flow concurrently.
+
+Recovery uses a separate, signed HttpOnly cookie limited to `/idp/logout/`, with
+a five-minute lifetime and SameSite=Lax. It is Secure when the configured public
+IdP URL uses HTTPS. Cookie-less SAML POSTs do not create an anonymous authentication
+session or overwrite the browser's existing IdP authentication cookie.
+
+After upgrading both applications:
+
+```console
+# From examples/: entrypoints migrate both databases without deleting data.
+just up
+just link
+```
+
+`just link` refreshes both metadata files and restarts the services to reload
+their caches. For other SPs, redistribute the IdP metadata and import their
+updated metadata containing SingleLogoutService and signing certificates.
+Sign in again to establish tracked sessions; sessions issued before this feature
+have no SAML logout associations. For local Python execution, run `just migrate`
+here and `python manage.py migrate` in `django-sp/`.
+
+The protocol follows the browser Single Logout profile described by
+[OASIS](https://docs.oasis-open.org/security/saml/Post2.0/sstc-saml-tech-overview-2.0.html).
+
+## Current SAML behavior
+
+- `/idp/metadata` publishes the signing certificate, both SSO bindings, and an
+  error URL. `/idp/sso/` validates requests against registered metadata and
+  signs assertions before returning the SAML response.
+- SP resolution currently uses local XML files in `SAML_IDP_METADATA_DIR`, then
+  signature-verified MDQ through `SAML_IDP_MDQ_URL` and
+  `SAML_IDP_METADATA_CERT`. Local metadata is trusted as supplied. Restart to
+  reload local files. Database imports will replace this in a later step.
+- Released attributes include `displayName`, `uid`, `givenName`, `sn`, `mail`,
+  multivalued `memberOf`, and configured scoped affiliation. Setting
+  `SAML_IDP_SCOPE` also enables principal-name and affiliation fallbacks.
+  Display name falls back to full name then username; scoped affiliation falls
+  back to `member@<scope>`. Admin status is never released as a group.
+- NameIDs currently retain the previous transient/persistent/email behavior;
+  the planned UUID-based persistent mapping and email-format rejection are pending.
+
+## Local development and checks
+
+Python 3.12 or later is required. Build a wheel from the repository root with
+`maturin build` and install it alongside this example's dependencies:
 
 ```console
 uv venv
-uv pip install --find-links wheels django==6.0.7 "pygamlastan>=0.4.0" cryptography gunicorn whitenoise
+uv pip install --find-links ../../target/wheels -r pyproject.toml
 export DJANGO_DEBUG=1 SAML_IDP_BASE_URL=http://localhost:8000
-python manage.py idp_keys
-python manage.py migrate
-python manage.py seed_demo
-python manage.py runserver
+.venv/bin/python manage.py migrate
+.venv/bin/python manage.py idp_user create admin --email admin@example.org --admin
+.venv/bin/python manage.py idp_keys
+.venv/bin/python manage.py collectstatic --noinput
+.venv/bin/python manage.py runserver
 ```
 
-(`--find-links wheels` lets a locally-built `pygamlastan` wheel satisfy the
-dependency; once it is on PyPI you can drop that flag.)
-
-## How the SAML flow works
-
-```
-SP ──AuthnRequest (Redirect/POST)──▶ /idp/sso/
-                                       │  decode + parse + process_authn_request(SP metadata)
-                                       │  stash request in session
-                                       ▼
-                              not logged in? ──▶ /idp/login/ ──▶ authenticate
-                                       │
-                                       ▼  build assertion → sign (enveloped XML-DSig)
-SP ◀──auto-POST SAMLResponse────── self-submitting form (HTTP-POST binding)
+```console
+.venv/bin/python manage.py check
+.venv/bin/python manage.py makemigrations --check --dry-run
+.venv/bin/python manage.py test idp.tests --settings=config.test_settings --noinput
 ```
 
-The assertion is signed with the IdP key so the SP can verify it against the
-certificate in the IdP metadata. NameID format follows the SP's `NameIDPolicy`
-(transient by default; persistent uses an opaque per-SP eduPersonTargetedID).
+Test settings use a temporary file-backed SQLite database so separate writer
+connections exercise the IMMEDIATE transaction safeguard, and a fast test-only
+password hasher. Production settings use Django's default password hashers.
+With no SP metadata source, system checks emit a configuration warning; this
+does not prevent account bootstrap.
 
-### Authentication freshness (`authn_instant`)
-
-When an AuthnRequest arrives for a user who is **already logged in**, the IdP
-reuses the existing browser session instead of re-prompting. The principal
-authenticated *earlier* than this response is generated, so `_issue()` passes
-`authn_instant=request.user.last_login` into `build_signed_response`, and the
-binding records that real time in `AuthnStatement/@AuthnInstant` rather than
-collapsing it to "now". Conflating the two would over-report freshness to an SP
-that enforces it via `ForceAuthn`, `RequestedAuthnContext`, or a max-age policy.
-A genuinely fresh login (the user just submitted credentials) has
-`last_login == now`, so the value is correct in both paths.
-
-## Security notes
-
-This example optimises for a working demo. Before any real use:
-
-- Inbound XML (AuthnRequests, resolved SP metadata) is parsed through the
-  hardened `parse_secure` path: documents carrying a DTD/`<!DOCTYPE>` are
-  rejected outright (no XXE / entity smuggling) and uppsala's resource limits
-  bound billion-laughs / deep-nesting amplification. This is automatic - the
-  binding never exposes the raw parser to this example.
-- Authentication freshness is reported truthfully via `authn_instant` (see
-  above); keep that wiring if you fork this example.
-- Replace the demo accounts and set a strong `DJANGO_SECRET_KEY`.
-- Replace the self-signed IdP key with your real signing key/cert, kept off the
-  image (mount it, or use the PKCS#11/HSM path - see the main project's
-  [signing guide](../../docs/guides/signing.rst)).
-- This IdP does **not** require signed `AuthnRequest`s
-  (`WantAuthnRequestsSigned="false"`); enable and verify request signatures if
-  your threat model needs them (the SP signing certs are in the resolved metadata).
-- Review attribute release and NameID policy for your privacy requirements.
-- MDQ responses are signature-verified against `SAML_IDP_METADATA_CERT` (this is
-  enforced - the IdP refuses an SP whose signature fails). The MDQ verifier is
-  explicitly set to trusted keys only, strict XSW checks, a 160-bit minimum HMAC
-  output length, required reference digests, certificate time checks, and no raw
-  inline `KeyInfo` trust when a trust anchor exists. Local metadata files are
-  trusted as provided, so only place files you obtained from a trusted source.
-- Put it behind your real TLS hostname (`IDP_DOMAIN`) so Caddy issues a trusted
-  certificate.
+Runtime configuration remains in `config/settings.py` and the shared Compose
+file. Known development secrets, pending login/recovery throttles, and the
+remaining session/SAML hardening in the plan must be addressed before using
+this example with real accounts outside a local teaching environment.

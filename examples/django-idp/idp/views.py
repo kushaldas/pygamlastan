@@ -1,8 +1,15 @@
 """IdP HTTP endpoints: home, metadata, SSO (Redirect + POST), login, logout, error."""
-from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth import authenticate, login, update_session_auth_hash
+from django.contrib.auth.views import PasswordChangeView
+from django.contrib import messages
+from django.contrib.sessions.models import Session
+from django.db import transaction
 from django.http import HttpResponse
 from django.shortcuts import redirect, render
-from django.urls import reverse
+from django.urls import reverse, reverse_lazy
+from django.utils.decorators import method_decorator
+from django.utils import timezone
+from django.views.decorators.cache import never_cache
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
@@ -10,7 +17,9 @@ from django.conf import settings
 
 from . import saml_logic as sl
 from . import sp_resolver
+from . import slo
 from .idp_config import get_idp_config
+from .models import SamlParticipant, User
 
 # Session key holding the in-flight AuthnRequest while the user logs in.
 PENDING = "saml_pending"
@@ -132,6 +141,7 @@ def _issue(request):
         authn_instant=request.user.last_login,
     )
     html = sl.encode_post_response(signed, pending["acs_url"], pending["relay_state"])
+    slo.record_issued(request, signed, pending["sp_entity_id"])
     return HttpResponse(html)
 
 
@@ -148,7 +158,7 @@ def login_view(request):
             login(request, user)
             if PENDING in request.session:
                 return _issue(request)
-            return redirect("idp:index")
+            return redirect("idp:profile")
         return render(
             request,
             "idp/login.html",
@@ -158,6 +168,33 @@ def login_view(request):
     return render(request, "idp/login.html", {"pending": pending})
 
 
-def logout_view(request):
-    logout(request)
-    return redirect("idp:index")
+@method_decorator(never_cache, name="dispatch")
+class ProfileView(PasswordChangeView):
+    """Read-only account details and Django's current-password-verified change form."""
+    template_name = "idp/profile.html"
+    success_url = reverse_lazy("idp:profile")
+
+    def form_valid(self, form):
+        old_key = self.request.session.session_key
+        old_hash = form.user.password
+        # Hash outside the write transaction, then rotate the session and move
+        # its SAML associations atomically so concurrent cleanup cannot lose them.
+        user = form.save(commit=False)
+        with transaction.atomic():
+            if not Session.objects.filter(pk=old_key, expire_date__gt=timezone.now()).exists():
+                # logout may have invalidated the cached session while hashing.
+                # cycle_key() would otherwise create a fresh authenticated one.
+                user.password = old_hash
+                return HttpResponse("Your session has ended. Sign in again before changing your password.", status=409)
+            if not User.objects.filter(pk=user.pk, password=old_hash, is_active=True).exists():
+                user.password = old_hash
+                form.add_error("old_password", "Your account changed. Please try again.")
+                return self.form_invalid(form)
+            user.save(update_fields=["password"])
+            update_session_auth_hash(self.request, user)
+            self.request.session.save()
+            key = self.request.session.session_key
+            expiry = Session.objects.values_list("expire_date", flat=True).get(pk=key)
+            SamlParticipant.objects.filter(session_key=old_key).update(session_key=key, expires_at=expiry)
+        messages.success(self.request, "Your password has been changed.")
+        return redirect(self.get_success_url())

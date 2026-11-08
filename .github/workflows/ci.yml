@@ -5,6 +5,7 @@ on:
       - 'src/**'
       - 'python/**'
       - 'tests/**'
+      - 'examples/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
       - 'pyproject.toml'
@@ -44,6 +45,18 @@ jobs:
         ~/.local/bin/uv pip install pytest
         ~/.local/bin/uv pip install ./dist/pygamlastan-*.whl
         .venv/bin/python -m pytest tests/ -vvv
+
+    - name: Check and test the Django IdP example
+      working-directory: examples/django-idp
+      run: |
+        ~/.local/bin/uv pip install --python "$GITHUB_WORKSPACE/.venv/bin/python" -r pyproject.toml
+        "$GITHUB_WORKSPACE/.venv/bin/python" manage.py check
+        "$GITHUB_WORKSPACE/.venv/bin/python" manage.py makemigrations --check --dry-run
+        "$GITHUB_WORKSPACE/.venv/bin/python" manage.py test idp.tests --settings=config.test_settings --noinput
+        "$GITHUB_WORKSPACE/.venv/bin/python" manage.py test idp.integration_tests --settings=config.integration_test_settings --noinput
+        cd ../django-sp
+        "$GITHUB_WORKSPACE/.venv/bin/python" manage.py check
+        "$GITHUB_WORKSPACE/.venv/bin/python" manage.py makemigrations --check --dry-run
 
     - name: Store wheels
       uses: actions/upload-artifact@v4

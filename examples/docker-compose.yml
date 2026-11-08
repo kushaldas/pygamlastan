@@ -9,6 +9,7 @@
 # (see the justfile `tls` recipe); they are read from ./certs/{idp,sp}.
 services:
   idp:
+    image: kushaldas/django-idp:0.2.0
     build: ./django-idp
     environment:
       SAML_IDP_BASE_URL: "https://${IDP_DOMAIN:-idp.localhost}"
@@ -23,9 +24,6 @@ services:
       SAML_IDP_METADATA_CERT: "${SAML_IDP_METADATA_CERT:-}"
       SAML_IDP_SUPPORT_EMAIL: "${SAML_IDP_SUPPORT_EMAIL:-}"
       SAML_IDP_SCOPE: "${SAML_IDP_SCOPE:-}"
-      DJANGO_ADMIN_USERNAME: "${DJANGO_ADMIN_USERNAME:-admin}"
-      DJANGO_ADMIN_PASSWORD: "${DJANGO_ADMIN_PASSWORD:-admin}"
-      DEMO_PASSWORD: "${DEMO_PASSWORD:-gamlastan}"
     volumes:
       - ./django-idp/data:/data
     expose:

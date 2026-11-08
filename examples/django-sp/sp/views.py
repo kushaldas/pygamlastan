@@ -3,12 +3,14 @@ SSO), ACS (consume the Response), logout."""
 import logging
 
 from django.conf import settings
+from django.contrib.sessions.backends.base import UpdateError
 from django.http import HttpResponse
 from django.shortcuts import redirect, render
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from . import idp_resolver
+from . import slo
 from . import saml_logic as sl
 from .sp_config import get_sp_config
 
@@ -130,10 +132,11 @@ def acs(request):
         "authn_context": result.authn_context_class_ref,
         "attributes": sl.attributes_for_display(result),
     }
-    return redirect("sp:index")
-
-
-def logout_view(request):
-    """Local logout: drop the SP session (no SAML Single Logout in this demo)."""
-    request.session.flush()
+    try:
+        slo.record_login(request, result)
+    except UpdateError:
+        # Logout won the race with this in-flight ACS. Do not let the response
+        # middleware try to save the same invalidated session again.
+        request.session.modified = False
+        return _error(request, "Your session ended during sign-in. Please start again.", status=400)
     return redirect("sp:index")

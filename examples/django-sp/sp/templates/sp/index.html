@@ -31,7 +31,7 @@
     <p>The IdP released no attributes.</p>
   {% endif %}
 
-  <p><a href="{% url 'sp:logout' %}">Log out</a></p>
+  <form method="post" action="{% url 'sp:logout' %}">{% csrf_token %}<button type="submit">Log out of connected services</button></form>
 {% else %}
   <div class="card">
     <div><strong>Entity ID:</strong> <code>{{ cfg.entity_id }}</code></div>
