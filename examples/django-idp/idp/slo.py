@@ -26,6 +26,15 @@ LIFETIME = timedelta(minutes=5)
 SKEW = 60
 RECOVERY_COOKIE = "saml_logout_flow"
 RECOVERY_SALT = "idp.saml-logout-recovery"
+MAX_PREPARATION_ATTEMPTS = 3
+
+
+class NoMatchingLogout(ValueError):
+    pass
+
+
+class LogoutStateChanged(ValueError):
+    pass
 
 
 def name_id_data(name_id):
@@ -36,16 +45,19 @@ def name_id_data(name_id):
 
 def record_issued(request, response_xml, entity_id):
     assertion = xml.parse_response(response_xml).assertions[0]
-    request.session.save()
-    expiry = Session.objects.values_list("expire_date", flat=True).get(pk=request.session.session_key)
-    SamlParticipant.objects.filter(session_key=request.session.session_key).update(expires_at=expiry)
-    cleanup_participants()
-    SamlParticipant.objects.create(
-        session_key=request.session.session_key, entity_id=entity_id,
-        name_id=name_id_data(assertion.subject.name_id),
-        session_index=assertion.authn_statements[0].session_index,
-        expires_at=expiry,
-    )
+    with transaction.atomic():
+        # Publish the session renewal and new participant together. Once logout
+        # deletes the session, an in-flight SSO must not add an unqueued SP.
+        request.session.save()
+        expiry = Session.objects.values_list("expire_date", flat=True).get(pk=request.session.session_key)
+        SamlParticipant.objects.filter(session_key=request.session.session_key).update(expires_at=expiry)
+        cleanup_participants()
+        SamlParticipant.objects.create(
+            session_key=request.session.session_key, entity_id=entity_id,
+            name_id=name_id_data(assertion.subject.name_id),
+            session_index=assertion.authn_statements[0].session_index,
+            expires_at=expiry,
+        )
 
 
 class ReplayCache:
@@ -192,17 +204,75 @@ def invalidate(request, session_keys):
         logout(request)
 
 
+def snapshot_state(snapshot):
+    keys, participants, excluded = snapshot
+    # Expiry can be renewed without changing logout targets. Compare the actual
+    # association identity, membership and browser key used for invalidation.
+    members = tuple((p.pk, p.session_key, p.entity_id, p.session_index,
+                     json.dumps(p.name_id, sort_keys=True)) for p in participants)
+    return keys, members, excluded
+
+
+def start_flow(request, cfg, select_snapshot, origin=None):
+    for _ in range(MAX_PREPARATION_ATTEMPTS):
+        with transaction.atomic():
+            snapshot = select_snapshot()
+        keys, participants, excluded = snapshot
+        # MDQ/network work must never hold SQLite's write lock.
+        flow = prepare_flow(participants, cfg, origin, excluded_ids=excluded)
+        with transaction.atomic():
+            current = select_snapshot()
+            if snapshot_state(current) != snapshot_state(snapshot):
+                continue
+            # IMMEDIATE mode excludes password rotation and new SSO writes from
+            # this final check through session/participant deletion.
+            flow.save()
+            invalidate(request, keys)
+        return flow
+    raise LogoutStateChanged("Logout state kept changing during preparation.")
+
+
+def local_snapshot(key):
+    anchors = set()
+
+    def select():
+        # Participant IDs survive password changes, letting this logout follow
+        # the same browser to its rotated key without touching other browsers.
+        keys = {key} if key else set()
+        keys.update(SamlParticipant.objects.filter(pk__in=anchors).values_list("session_key", flat=True))
+        participants = list(SamlParticipant.objects.filter(session_key__in=keys).order_by("pk"))
+        if key and not participants and not Session.objects.filter(pk=key).exists():
+            raise LogoutStateChanged("The browser session changed. Please retry logout.")
+        anchors.update(p.pk for p in participants)
+        return frozenset(keys), participants, frozenset()
+
+    return select
+
+
+def remote_snapshot(issuer, parsed):
+    def select():
+        matches = [p for p in SamlParticipant.objects.filter(entity_id=issuer)
+                   if p.name_id == name_id_data(parsed.name_id)
+                   and (not parsed.session_indexes or p.session_index in parsed.session_indexes)]
+        if not matches or not set(parsed.session_indexes) <= {p.session_index for p in matches}:
+            raise NoMatchingLogout("No matching SAML session for every requested index.")
+        keys = frozenset(p.session_key for p in matches)
+        participants = list(SamlParticipant.objects.filter(session_key__in=keys).order_by("pk"))
+        return keys, participants, frozenset(p.pk for p in matches)
+
+    return select
+
+
 @never_cache
 @require_POST
 def local_logout(request):
     cleanup()
     cfg = get_idp_config()
     key = request.session.session_key
-    participants = list(SamlParticipant.objects.filter(session_key=key)) if key else []
-    flow = prepare_flow(participants, cfg)
-    with transaction.atomic():
-        flow.save()
-        invalidate(request, [key] if key else [])
+    try:
+        flow = start_flow(request, cfg, local_snapshot(key))
+    except LogoutStateChanged:
+        return HttpResponse("Logout state changed. Please retry logout.", status=409)
     if not key:
         logout(request)
     return drive(request, flow, cfg)
@@ -239,22 +309,14 @@ def service(request):
         )
         incoming_binding = core.BINDING_HTTP_POST if request.method == "POST" else core.BINDING_HTTP_REDIRECT
         binding, url = endpoint(entity, incoming_binding, response=True)
-        matches = [p for p in SamlParticipant.objects.filter(entity_id=issuer)
-                   if p.name_id == name_id_data(parsed.name_id)]
-        if parsed.session_indexes:
-            matches = [p for p in matches if p.session_index in parsed.session_indexes]
-        if not matches:
+        origin = {"entity_id": issuer, "id": parsed.id, "binding": binding, "url": url, "relay": decoded.relay_state}
+        try:
+            flow = start_flow(request, cfg, remote_snapshot(issuer, parsed), origin)
+        except (NoMatchingLogout, LogoutStateChanged) as exc:
             message = saml_logout.create_logout_response_error(
-                cfg.entity_id, parsed.id, core.STATUS_REQUESTER, "No matching SAML session.", url,
+                cfg.entity_id, parsed.id, core.STATUS_REQUESTER, str(exc), url,
             )
             return send(message.to_xml(), message.id, False, binding, url, decoded.relay_state, cfg)
-        session_keys = {p.session_key for p in matches}
-        participants = list(SamlParticipant.objects.filter(session_key__in=session_keys))
-        origin = {"entity_id": issuer, "id": parsed.id, "binding": binding, "url": url, "relay": decoded.relay_state}
-        flow = prepare_flow(participants, cfg, origin, excluded_ids={p.pk for p in matches})
-        with transaction.atomic():
-            flow.save()
-            invalidate(request, session_keys)
         return drive(request, flow, cfg)
     except Exception:
         # No redirects or session destruction are permitted on invalid messages.

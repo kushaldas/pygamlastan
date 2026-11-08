@@ -1,6 +1,6 @@
 from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from threading import Barrier, Event
 import re
 from unittest.mock import patch
 
@@ -16,7 +16,7 @@ from idp.models import LogoutFlow, LogoutReplay, SamlParticipant
 from .saml_helpers import decoded_response, deliver, make_config, sp_metadata
 
 
-class SingleLogoutTests(TestCase):
+class LogoutTestMixin:
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -57,6 +57,8 @@ class SingleLogoutTests(TestCase):
     def assert_browser_authenticated(self, expected=True):
         self.assertEqual(self.browser.get("/idp/login/").wsgi_request.user.is_authenticated, expected)
 
+
+class SingleLogoutTests(LogoutTestMixin, TestCase):
     def test_metadata_advertises_both_slo_bindings(self):
         entity = metadata.parse_entity(saml_logic.idp_metadata_xml(self.cfg))
         self.assertEqual({(e.binding, e.location) for e in entity.single_logout_services("idp")},
@@ -115,6 +117,70 @@ class SingleLogoutTests(TestCase):
         response = deliver(Client(), self.request(indexes=["_wrong-index"]), self.sp)
         self.assertFalse(decoded_response(response)[1].is_success())
         self.assert_browser_authenticated()
+
+    def test_mixed_known_and_unknown_indexes_reject_entire_request(self):
+        for binding in (core.BINDING_HTTP_REDIRECT, core.BINDING_HTTP_POST):
+            with self.subTest(binding=binding):
+                response = deliver(Client(), self.request(indexes=[self.participant.session_index, "_unknown"]), self.sp, binding)
+                self.assertFalse(decoded_response(response)[1].is_success())
+                self.assertTrue(SamlParticipant.objects.filter(pk=self.participant.pk).exists())
+                self.assertFalse(LogoutFlow.objects.exists())
+                self.assert_browser_authenticated()
+
+    def test_index_for_another_subject_does_not_count_as_a_match(self):
+        other = self.register(self.browser, self.sp, core.NameId("different-subject"))
+        response = deliver(Client(), self.request(indexes=[self.participant.session_index, other.session_index]), self.sp)
+        self.assertFalse(decoded_response(response)[1].is_success())
+        self.assertEqual(SamlParticipant.objects.count(), 2)
+        self.assert_browser_authenticated()
+
+    def test_repeated_changes_abort_local_logout_without_invalidating_sessions(self):
+        prepare = slo.prepare_flow
+
+        def keep_changing(*args, **kwargs):
+            flow = prepare(*args, **kwargs)
+            self.register(self.browser, self.other, core.NameId(core.generate_id()))
+            return flow
+
+        with patch("idp.slo.prepare_flow", side_effect=keep_changing):
+            response = self.browser.post("/idp/logout/")
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(LogoutFlow.objects.exists())
+        self.assert_browser_authenticated()
+
+    def test_repeated_changes_return_signed_error_to_originating_sp(self):
+        prepare = slo.prepare_flow
+
+        def keep_changing(*args, **kwargs):
+            flow = prepare(*args, **kwargs)
+            self.register(self.browser, self.other, core.NameId(core.generate_id()))
+            return flow
+
+        with patch("idp.slo.prepare_flow", side_effect=keep_changing):
+            response = deliver(Client(), self.request(), self.sp, relay="origin")
+        decoded, message = decoded_response(response)
+        self.assertFalse(message.is_success())
+        self.assertEqual(decoded.relay_state, "origin")
+        self.assertFalse(LogoutFlow.objects.exists())
+        self.assert_browser_authenticated()
+
+    def test_in_flight_sso_cannot_add_participant_after_logout_commits(self):
+        from django.contrib.sessions.backends.base import UpdateError
+        from django.contrib.sessions.backends.db import SessionStore
+        from django.test import RequestFactory
+        request = RequestFactory().get("/idp/sso/")
+        request.session = SessionStore(session_key=self.browser.session.session_key)
+        dict(request.session)  # The SSO request loaded its session before logout.
+        signed = saml_logic.build_signed_response(
+            sp_entity_id=self.other.entity_id, acs_url=self.other.acs_url,
+            request_id="_another-authn-request", name_id_format=core.NAMEID_TRANSIENT,
+            user=self.user, cfg=self.cfg,
+        )
+        self.assertEqual(self.browser.post("/idp/logout/").status_code, 302)
+        with self.assertRaises(UpdateError):
+            slo.record_issued(request, signed, self.other.entity_id)
+        self.assertFalse(SamlParticipant.objects.exists())
+        self.assertEqual({target["entity_id"] for target in LogoutFlow.objects.get().queue}, {self.sp.entity_id})
 
     def test_session_index_scopes_logout_to_one_browser(self):
         other_browser = Client()
@@ -338,6 +404,85 @@ class SingleLogoutTests(TestCase):
         self.browser.post("/idp/logout/")
         self.browser.cookies[slo.RECOVERY_COOKIE] = "forged-recovery-token"
         self.assertContains(self.browser.get("/idp/logout/status/"), "Some Service Providers could not confirm logout")
+
+
+class LogoutPreparationRaceTests(LogoutTestMixin, TransactionTestCase):
+    def race(self, initiator, mutation):
+        if connections["default"].settings_dict["NAME"].startswith("file:memory"):
+            self.skipTest("Use config.test_settings for SQLite writer-concurrency tests.")
+        prepared, release = Event(), Event()
+        prepare = slo.prepare_flow
+        original_key = self.browser.session.session_key
+        if mutation == "password" and initiator == "sp":
+            self.register(self.browser, self.other, core.NameId("other-sp-subject"))
+        logout_browser = Client()
+        logout_browser.cookies = self.browser.cookies.copy()
+        logout_request = self.request()
+
+        def pause_preparation(*args, **kwargs):
+            self.assertFalse(connections["default"].in_atomic_block, "Metadata work must not hold a write transaction.")
+            flow = prepare(*args, **kwargs)
+            if not prepared.is_set():
+                prepared.set()
+                if not release.wait(timeout=15):
+                    raise AssertionError("Concurrent mutation did not complete.")
+            return flow
+
+        def start_logout():
+            close_old_connections()
+            try:
+                if initiator == "local":
+                    return logout_browser.post("/idp/logout/")
+                return deliver(Client(), logout_request, self.sp)
+            finally:
+                connections.close_all()
+
+        with patch("idp.slo.prepare_flow", side_effect=pause_preparation), ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(start_logout)
+            try:
+                self.assertTrue(prepared.wait(timeout=15))
+                if mutation == "password":
+                    response = self.browser.post("/idp/profile/", {
+                        "old_password": self.password, "new_password1": "a newer teaching password",
+                        "new_password2": "a newer teaching password",
+                    })
+                    self.assertEqual(response.status_code, 302)
+                    current_key = self.browser.session.session_key
+                    self.assertNotEqual(current_key, original_key)
+                else:
+                    from urllib.parse import urlsplit
+                    authn = profiles.create_authn_request(profiles.AuthnRequestOptions(
+                        self.other.entity_id, acs_url=self.other.acs_url, destination=self.cfg.sso_url,
+                        protocol_binding=core.BINDING_HTTP_POST, name_id_format=core.NAMEID_TRANSIENT,
+                    ))
+                    url = bindings.redirect_encode(authn.to_xml().encode(), True, self.cfg.sso_url)
+                    self.assertEqual(self.browser.get("/idp/sso/?" + urlsplit(url).query).status_code, 200)
+                    current_key = self.browser.session.session_key
+                    self.assertTrue(SamlParticipant.objects.filter(entity_id=self.other.entity_id).exists())
+            finally:
+                release.set()
+            response = future.result(timeout=20)
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(decoded_response(response)[0].is_request)
+        expected = {self.sp.entity_id, self.other.entity_id} if initiator == "local" and mutation == "sso" else {self.other.entity_id}
+        if initiator == "local" and mutation == "password":
+            expected = {self.sp.entity_id}
+        self.assertEqual({target["entity_id"] for target in LogoutFlow.objects.get().queue}, expected)
+        self.assertFalse(Session.objects.filter(pk=current_key).exists())
+        self.assertFalse(SamlParticipant.objects.exists())
+        self.assert_browser_authenticated(False)
+
+    def test_local_logout_follows_concurrent_password_rotation(self):
+        self.race("local", "password")
+
+    def test_sp_logout_follows_concurrent_password_rotation(self):
+        self.race("sp", "password")
+
+    def test_local_logout_includes_concurrent_sso_participant(self):
+        self.race("local", "sso")
+
+    def test_sp_logout_includes_concurrent_sso_participant(self):
+        self.race("sp", "sso")
 
 
 class LogoutReplayConcurrencyTests(TransactionTestCase):

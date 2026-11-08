@@ -250,6 +250,8 @@ With SessionIndex, logout targets those sessions; without indexes, it targets
 all sessions matching that SP and full NameID. IdP-initiated logout targets the
 current browser's IdP session and its participating SP sessions. Other independent
 browser sessions are retained unless a matching index-free SP request covers them.
+Every supplied SessionIndex must match that SP and full NameID. Mixing known and
+unknown indexes rejects the whole request without ending the matching sessions.
 Propagation skips only the associations covered by the initiating LogoutRequest;
 other associations at that same SP are also contacted. The sibling SP remembers
 superseded associations as already ended, so repeated SSO with new transient
@@ -263,6 +265,15 @@ and response correlation are checked before the corresponding action is accepted
 Replay reservations and pending flows are database-backed and shared by workers.
 Response correlation requires both the signed `InResponseTo` and an opaque random
 RelayState, and does not depend on a browser cookie being sent on cross-site POST.
+
+Metadata resolution happens outside database write transactions. Before ending
+sessions, logout rechecks the complete participant set and its current browser
+keys inside the invalidation transaction. If a concurrent password change rotates
+a key or SSO adds an association, preparation retries with the refreshed state.
+SSO also records its session renewal and new association in one transaction.
+Preparation makes at most three attempts; continuous changes return an error to the
+initiating SP, or HTTP 409 with a retry message for local logout, rather than
+claiming successful logout from an outdated snapshot.
 
 Flows expire after five minutes, with a 60-second clock allowance for incoming
 message timestamps. Missing endpoints and negative/partial responses are reported
