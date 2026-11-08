@@ -24,6 +24,8 @@ from .models import LogoutFlow, LogoutReplay, SamlParticipant
 
 LIFETIME = timedelta(minutes=5)
 SKEW = 60
+RECOVERY_COOKIE = "saml_logout_flow"
+RECOVERY_SALT = "idp.saml-logout-recovery"
 
 
 def name_id_data(name_id):
@@ -35,12 +37,14 @@ def name_id_data(name_id):
 def record_issued(request, response_xml, entity_id):
     assertion = xml.parse_response(response_xml).assertions[0]
     request.session.save()
-    SamlParticipant.objects.filter(expires_at__lt=timezone.now()).delete()
+    expiry = Session.objects.values_list("expire_date", flat=True).get(pk=request.session.session_key)
+    SamlParticipant.objects.filter(session_key=request.session.session_key).update(expires_at=expiry)
+    cleanup_participants()
     SamlParticipant.objects.create(
         session_key=request.session.session_key, entity_id=entity_id,
         name_id=name_id_data(assertion.subject.name_id),
         session_index=assertion.authn_statements[0].session_index,
-        expires_at=request.session.get_expiry_date(),
+        expires_at=expiry,
     )
 
 
@@ -117,19 +121,26 @@ def send(text, identifier, is_request, binding, url, relay_state, cfg):
     return HttpResponse(bindings.post_encode(signed.encode(), is_request, url, relay_state=relay_state))
 
 
+def cleanup_participants():
+    # A later SSO (or password change) can extend the browser session. Its
+    # persisted expiry, not an earlier assertion's snapshot, is authoritative.
+    active_keys = Session.objects.filter(expire_date__gt=timezone.now()).values("session_key")
+    SamlParticipant.objects.exclude(session_key__in=active_keys).delete()
+
+
 def cleanup():
     now = timezone.now()
     LogoutFlow.objects.filter(expires_at__lt=now).delete()
-    SamlParticipant.objects.filter(expires_at__lt=now).delete()
+    cleanup_participants()
     LogoutReplay.objects.filter(expires_at__lt=now).delete()
 
 
-def prepare_flow(participants, cfg, origin=None):
+def prepare_flow(participants, cfg, origin=None, excluded_ids=()):
     """Resolve metadata and prepare messages before taking SQLite's write lock."""
     grouped = {}
     partial = False
     for participant in participants:
-        if origin and participant.entity_id == origin["entity_id"]:
+        if participant.pk in excluded_ids:
             continue
         key = (participant.entity_id, json.dumps(participant.name_id, sort_keys=True))
         grouped.setdefault(key, []).append(participant.session_index)
@@ -152,7 +163,16 @@ def prepare_flow(participants, cfg, origin=None):
 def drive(request, flow, cfg):
     if flow.queue:
         target = flow.queue[0]
-        return send(target["xml"], target["id"], True, target["binding"], target["url"], flow.token, cfg)
+        response = send(target["xml"], target["id"], True, target["binding"], target["url"], flow.token, cfg)
+        # Cross-site POST may omit the authentication cookie. Writing recovery
+        # state to request.session would then overwrite an unrelated browser's
+        # authenticated session cookie with a newly-created anonymous session.
+        response.set_signed_cookie(
+            RECOVERY_COOKIE, flow.token, salt=RECOVERY_SALT,
+            max_age=int(LIFETIME.total_seconds()), path="/idp/logout/",
+            secure=urlsplit(cfg.base_url).scheme == "https", httponly=True, samesite="Lax",
+        )
+        return response
     # Completion is consumed once. Keep failure status visible to local users.
     with transaction.atomic():
         if not LogoutFlow.objects.filter(pk=flow.pk).delete()[0]:
@@ -185,8 +205,6 @@ def local_logout(request):
         invalidate(request, [key] if key else [])
     if not key:
         logout(request)
-    if flow.queue:
-        request.session["saml_logout_flow"] = flow.token
     return drive(request, flow, cfg)
 
 
@@ -233,12 +251,10 @@ def service(request):
         session_keys = {p.session_key for p in matches}
         participants = list(SamlParticipant.objects.filter(session_key__in=session_keys))
         origin = {"entity_id": issuer, "id": parsed.id, "binding": binding, "url": url, "relay": decoded.relay_state}
-        flow = prepare_flow(participants, cfg, origin)
+        flow = prepare_flow(participants, cfg, origin, excluded_ids={p.pk for p in matches})
         with transaction.atomic():
             flow.save()
             invalidate(request, session_keys)
-        if flow.queue:
-            request.session["saml_logout_flow"] = flow.token
         return drive(request, flow, cfg)
     except Exception:
         # No redirects or session destruction are permitted on invalid messages.
@@ -249,7 +265,10 @@ def service(request):
 @require_http_methods(["GET", "POST"])
 def status(request):
     """Let a browser skip an unreachable SP without claiming complete logout."""
-    flow = LogoutFlow.objects.filter(pk=request.session.get("saml_logout_flow")).first()
+    token = request.get_signed_cookie(
+        RECOVERY_COOKIE, default=None, salt=RECOVERY_SALT, max_age=int(LIFETIME.total_seconds()),
+    )
+    flow = LogoutFlow.objects.filter(pk=token).first()
     if flow is None or flow.expires_at <= timezone.now():
         return render(request, "idp/logged_out.html", {"partial": True})
     if request.method == "POST":

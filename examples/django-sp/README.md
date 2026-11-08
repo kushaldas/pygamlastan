@@ -8,7 +8,15 @@ HTTP-Redirect and HTTP-POST at **`/sp/slo/`**, advertised in its metadata. Use t
 CSRF-protected POST action; GET requests no longer log a user out.
 
 Successful SSO saves the verified full NameID, issuer, SessionIndex, browser
-session key and expiry in SQLite. Incoming logout is signature-verified against
+session key and expiry in SQLite. When another SSO replaces that association,
+the previous association is retained as ended. A signed logout for a known ended
+association succeeds without ending the newer subject's session. Superseded
+records are retained while the browser session is live. Logout retains ended
+associations for a short grace period (five minutes plus the 60-second clock
+allowance), allowing the remaining requests in that exchange to complete.
+Expired records are cleaned up. Unknown subjects/indexes still receive an error.
+
+Incoming logout is signature-verified against
 the resolved IdP's metadata, including rollover keys, and must target this SP's
 SLO destination and matching subject/session. The matching server-side sessions
 are removed even if the browser does not send its cookie. Pending responses are

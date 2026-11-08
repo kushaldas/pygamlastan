@@ -266,9 +266,78 @@ class SingleLogoutTests(TestCase):
 
     def test_expired_participants_do_not_authorize_logout(self):
         SamlParticipant.objects.update(expires_at=timezone.now() - timedelta(seconds=1))
+        Session.objects.filter(pk=self.browser.session.session_key).update(expire_date=timezone.now() - timedelta(seconds=1))
         response = deliver(Client(), self.request(), self.sp)
         self.assertFalse(decoded_response(response)[1].is_success())
-        self.assert_browser_authenticated()
+        self.assert_browser_authenticated(False)
+
+    def test_staggered_two_sp_login_keeps_earlier_participant_after_renewal(self):
+        start = timezone.now()
+        original_expiry = self.participant.expires_at
+        request = profiles.create_authn_request(profiles.AuthnRequestOptions(
+            self.other.entity_id, acs_url=self.other.acs_url, destination=self.cfg.sso_url,
+            protocol_binding=core.BINDING_HTTP_POST, name_id_format=core.NAMEID_TRANSIENT,
+        ))
+        from urllib.parse import urlsplit
+        url = bindings.redirect_encode(request.to_xml().encode(), True, self.cfg.sso_url)
+        with patch("django.utils.timezone.now", return_value=start + timedelta(minutes=50)):
+            self.assertEqual(self.browser.get("/idp/sso/?" + urlsplit(url).query).status_code, 200)
+        self.participant.refresh_from_db()
+        self.assertGreater(self.participant.expires_at, original_expiry + timedelta(minutes=40))
+        with patch("django.utils.timezone.now", return_value=start + timedelta(minutes=65)):
+            response = self.browser.post("/idp/logout/")
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual({item["entity_id"] for item in LogoutFlow.objects.get().queue},
+                         {self.sp.entity_id, self.other.entity_id})
+
+    def test_cleanup_uses_persisted_session_expiry_even_if_snapshot_is_stale(self):
+        SamlParticipant.objects.update(expires_at=timezone.now() - timedelta(seconds=1))
+        slo.cleanup()
+        self.assertTrue(SamlParticipant.objects.filter(pk=self.participant.pk).exists())
+
+    def test_origin_session_index_does_not_exclude_other_associations_at_same_sp(self):
+        other_subject = core.NameId("another-session", format=core.NAMEID_TRANSIENT)
+        other = self.register(self.browser, self.sp, other_subject)
+        origin = self.request()
+        decoded, propagated = decoded_response(deliver(Client(), origin, self.sp, relay="origin"))
+        self.assertTrue(decoded.is_request)
+        self.assertEqual(propagated.destination, self.sp.slo_url)
+        self.assertEqual(propagated.name_id.value, other_subject.value)
+        self.assertEqual(propagated.session_indexes, [other.session_index])
+        response = saml_logout.create_logout_response_success(self.sp.entity_id, propagated.id, self.cfg.slo_url)
+        final = deliver(Client(), response, self.sp, relay=decoded.relay_state)
+        returned, result = decoded_response(final)
+        self.assertEqual(returned.relay_state, "origin")
+        self.assertEqual(result.in_response_to, origin.id)
+        self.assertTrue(result.is_success())
+        self.assertIsNone(result.status.status_code.sub_status)
+
+    def test_cookie_less_cross_site_post_does_not_replace_unrelated_auth_cookie(self):
+        from django.conf import settings
+        self.register(self.browser, self.other, core.NameId("other-sp-session"))
+        _, password = create_user(username="bob", email="bob@example.org")
+        unrelated = Client()
+        unrelated.login(username="bob", password=password)
+        key = unrelated.session.session_key
+        # Simulate SameSite=Lax: the browser sends no auth cookie on this POST,
+        # then applies the returned Set-Cookie headers to its existing cookie jar.
+        response = deliver(Client(), self.request(), self.sp, binding=core.BINDING_HTTP_POST)
+        self.assertNotIn(settings.SESSION_COOKIE_NAME, response.cookies)
+        self.assertIn(slo.RECOVERY_COOKIE, response.cookies)
+        cookie = response.cookies[slo.RECOVERY_COOKIE]
+        self.assertTrue(cookie["httponly"])
+        self.assertTrue(cookie["secure"])
+        self.assertEqual(cookie["path"], "/idp/logout/")
+        unrelated.cookies.update(response.cookies)
+        self.assertEqual(unrelated.session.session_key, key)
+        self.assertEqual(unrelated.get("/idp/profile/").wsgi_request.user.username, "bob")
+        self.assert_browser_authenticated(False)
+        self.assertContains(unrelated.get("/idp/logout/status/"), "Waiting for")
+
+    def test_recovery_cookie_signature_is_required(self):
+        self.browser.post("/idp/logout/")
+        self.browser.cookies[slo.RECOVERY_COOKIE] = "forged-recovery-token"
+        self.assertContains(self.browser.get("/idp/logout/status/"), "Some Service Providers could not confirm logout")
 
 
 class LogoutReplayConcurrencyTests(TransactionTestCase):

@@ -1,0 +1,22 @@
+{% extends "idp/base.html" %}
+{% block title %}Your profile | Kushal's pygamlastan IdP for teaching{% endblock %}
+{% block content %}
+<main>
+  <h1 class="profile-heading">Your profile</h1>
+  <p>Your account for Kushal's pygamlastan IdP for teaching.</p>
+  {% for message in messages %}<p class="notice" role="status">{{ message }}</p>{% endfor %}
+  <dl class="profile-details">
+    <dt>Username</dt><dd>{{ user.get_username }}</dd>
+    <dt>Name</dt><dd>{{ user.display_name|default:user.get_full_name|default:user.get_username }}</dd>
+    <dt>Email</dt><dd>{{ user.email }}</dd>
+  </dl>
+  <h2>Change your password</h2>
+  <p>Enter your current password and choose a new one. This browser will stay signed in to the IdP; your other IdP sessions will be signed out.</p>
+  <form class="profile-form" method="post" action="{% url 'idp:profile' %}">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">Change password</button>
+  </form>
+  <p><a href="{% url 'idp:index' %}">Identity Provider details</a></p>
+</main>
+{% endblock %}

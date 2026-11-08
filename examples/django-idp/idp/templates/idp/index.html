@@ -1,6 +1,6 @@
 {% extends "idp/base.html" %}
 {% block content %}
-<h1>Identity Provider</h1>
+<h1>Kushal's pygamlastan IdP for teaching</h1>
 
 <div class="card">
   <div><strong>Entity ID:</strong> <code>{{ cfg.entity_id }}</code></div>
@@ -20,5 +20,7 @@ trusted as provided), then from MDQ (signature-verified against the cert).</p>
 
 {% if not user.is_authenticated %}
   <p><a href="{% url 'idp:login' %}">Log in</a></p>
+{% else %}
+  <p><a href="{% url 'idp:profile' %}">Your profile and password</a></p>
 {% endif %}
 {% endblock %}

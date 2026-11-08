@@ -7,7 +7,7 @@ AuthnRequests and returns assertion-signed responses over HTTP POST.
 Implementation of [the account-management plan](IMPLEMENTATION_PLAN.md) is in
 progress. The account model, CLI bootstrap, JSON importer, password policy, and
 case-insensitive username/email login are implemented. Built-in Django admin is
-disabled. The custom `/idp-admin/` UI, password self-service/recovery and SMTP,
+disabled. The custom `/idp-admin/` UI, password recovery and SMTP,
 throttling, persistent NameID registry, and database SP registry are still pending.
 Signed SAML Single Logout is implemented with the sibling Django SP.
 Until those steps land, use the CLI for account management and treat this as a
@@ -116,6 +116,25 @@ need a migrated database but do not read SAML signing keys or certificates.
 Users and sessions persist in the `django-idp/data` bind mount across restarts.
 The session lifetime defaults to one hour.
 
+## Profile and password changes
+
+Sign in at `/idp/login/` to open **Your profile** at `/idp/profile/`. SAML login
+still continues to the requesting SP. You can also open your profile through
+your username in the header or the **Your profile and password** link on the
+IdP home page.
+
+The profile shows your username, name, and email as read-only details. To change
+your password, enter your current password and the new password twice. The same
+15–128 character and common-password rules used by the CLI apply; the browser
+form has no weak-password override. The form requires login and CSRF protection,
+and its responses are not cached.
+
+A successful change rotates and preserves the current browser's IdP session,
+including its SAML logout associations. Other IdP browser sessions are invalidated
+when they next authenticate a request. Existing SP sessions are managed separately
+through Single Logout. Only the current user's password can be changed here;
+operators can still replace another account's password using the commands below.
+
 ## Account commands
 
 Run these inside `django-idp/` for local development, or prefix them with
@@ -223,12 +242,18 @@ GET logout links must be changed to forms. Local sessions end before the browser
 continues through the remote providers, even if a provider later fails.
 
 Each successful SSO records the exact issued NameID (value, format and all
-qualifiers), SessionIndex, browser session key, and expiry in SQLite. An incoming
+qualifiers), SessionIndex, browser session key, and expiry in SQLite. Cleanup
+uses the persisted browser session's expiry, so a later SSO renewal retains
+earlier SP associations. An incoming
 SP request can invalidate only its own matching subject/session associations.
 With SessionIndex, logout targets those sessions; without indexes, it targets
 all sessions matching that SP and full NameID. IdP-initiated logout targets the
 current browser's IdP session and its participating SP sessions. Other independent
 browser sessions are retained unless a matching index-free SP request covers them.
+Propagation skips only the associations covered by the initiating LogoutRequest;
+other associations at that same SP are also contacted. The sibling SP remembers
+superseded associations as already ended, so repeated SSO with new transient
+NameIDs can still complete logout successfully without affecting a newer subject.
 
 Logout requests and responses must be signed with a key in the issuer's trusted
 metadata. Redirect signatures cover the exact encoded query; POST messages carry
@@ -246,6 +271,11 @@ as partial logout. If the browser gets stuck at an unreachable SP, return to
 always records partial logout. After flow expiry, that page reports incomplete
 logout. A provider that never responds may retain its own session. SOAP, Artifact
 logout and encrypted NameIDs are not implemented.
+
+Recovery uses a separate, signed HttpOnly cookie limited to `/idp/logout/`, with
+a five-minute lifetime and SameSite=Lax. It is Secure when the configured public
+IdP URL uses HTTPS. Cookie-less SAML POSTs do not create an anonymous authentication
+session or overwrite the browser's existing IdP authentication cookie.
 
 After upgrading both applications:
 

@@ -32,12 +32,43 @@ def name_id_data(name_id):
 
 
 def record_login(request, result):
-    request.session.save()
-    SamlLogin.objects.filter(expires_at__lt=timezone.now()).delete()
-    SamlLogin.objects.update_or_create(session_key=request.session.session_key, defaults={
+    values = {
         "issuer": result.idp_entity_id, "name_id": name_id_data(result.assertion.subject.name_id),
-        "session_index": result.session_index, "expires_at": request.session.get_expiry_date(),
-    })
+        "session_index": result.session_index,
+    }
+    with transaction.atomic():
+        # Persist the browser identity and its association together, so an old
+        # subject's concurrent logout cannot delete a newly-replaced login.
+        request.session.save()
+        cleanup_logins()
+        key = request.session.session_key
+        expiry = Session.objects.values_list("expire_date", flat=True).get(pk=key)
+        current = SamlLogin.objects.filter(session_key=key, ended=False).first()
+        if current and any(getattr(current, field) != value for field, value in values.items()):
+            # Keep proof that this exact association already ended. Its later
+            # signed logout must not invalidate a newer, different subject.
+            current.ended = True
+            current.save(update_fields=["ended"])
+        SamlLogin.objects.filter(session_key=key).update(expires_at=expiry)
+        SamlLogin.objects.update_or_create(
+            session_key=key, ended=False, defaults={**values, "expires_at": expiry},
+        )
+
+
+def cleanup_logins():
+    now = timezone.now()
+    active_keys = Session.objects.filter(expire_date__gt=now).values("session_key")
+    SamlLogin.objects.filter(ended=False).exclude(session_key__in=active_keys).update(
+        ended=True, expires_at=now + LIFETIME + timedelta(seconds=SKEW),
+    )
+    SamlLogin.objects.filter(expires_at__lt=now).exclude(session_key__in=active_keys).delete()
+
+
+def end_logins(keys):
+    """Retain ended associations for retries and other requests in this flow."""
+    SamlLogin.objects.filter(session_key__in=keys).update(
+        ended=True, expires_at=timezone.now() + LIFETIME + timedelta(seconds=SKEW),
+    )
 
 
 class ReplayCache:
@@ -135,7 +166,7 @@ def cleanup():
     now = timezone.now()
     LogoutReplay.objects.filter(expires_at__lt=now).delete()
     LogoutTransaction.objects.filter(expires_at__lt=now).delete()
-    SamlLogin.objects.filter(expires_at__lt=now).delete()
+    cleanup_logins()
 
 
 def completed(request, partial=False):
@@ -147,12 +178,12 @@ def completed(request, partial=False):
 def local_logout(request):
     cleanup()
     cfg = get_sp_config()
-    login = SamlLogin.objects.filter(session_key=request.session.session_key).first()
+    login = SamlLogin.objects.filter(session_key=request.session.session_key, ended=False).first()
     had_identity = bool(request.session.get("saml_identity"))
     request.session.flush()
     if not login:
         return completed(request, partial=had_identity)
-    login.delete()
+    end_logins([login.session_key])
     try:
         entity = idp_resolver.resolve(login.issuer)
         binding, url = endpoint(entity)
@@ -201,18 +232,19 @@ def service(request):
             clock_skew_seconds=SKEW, max_request_age_seconds=int(LIFETIME.total_seconds()),
         )
         binding, url = endpoint(entity, core.BINDING_HTTP_POST if request.method == "POST" else core.BINDING_HTTP_REDIRECT, response=True)
-        matches = [s for s in SamlLogin.objects.filter(issuer=issuer) if s.name_id == name_id_data(parsed.name_id)
-                   and (not parsed.session_indexes or s.session_index in parsed.session_indexes)]
-        if not matches:
-            message = saml_logout.create_logout_response_error(cfg.entity_id, parsed.id, core.STATUS_REQUESTER, "No matching SAML session.", url)
-        else:
-            keys = [s.session_key for s in matches]
-            with transaction.atomic():
+        with transaction.atomic():
+            matches = [s for s in SamlLogin.objects.filter(issuer=issuer) if s.name_id == name_id_data(parsed.name_id)
+                       and (not parsed.session_indexes or s.session_index in parsed.session_indexes)]
+            known_indexes = {s.session_index for s in matches}
+            if not matches or (parsed.session_indexes and not set(parsed.session_indexes) <= known_indexes):
+                message = saml_logout.create_logout_response_error(cfg.entity_id, parsed.id, core.STATUS_REQUESTER, "No matching SAML session.", url)
+            else:
+                keys = [s.session_key for s in matches if not s.ended]
                 Session.objects.filter(session_key__in=keys).delete()
-                SamlLogin.objects.filter(session_key__in=keys).delete()
+                end_logins(keys)
                 if request.session.session_key in keys:
                     request.session.flush()
-            message = saml_logout.create_logout_response_success(cfg.entity_id, parsed.id, url)
+                message = saml_logout.create_logout_response_success(cfg.entity_id, parsed.id, url)
         return send(message, False, binding, url, decoded.relay_state, cfg)
     except Exception:
         return HttpResponseBadRequest("SAML logout was rejected.")
