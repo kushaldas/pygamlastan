@@ -32,6 +32,8 @@ def idp_metadata_xml(cfg: IdpConfig) -> str:
         f'<ds:KeyInfo xmlns:ds="{_DS_NS}"><ds:X509Data>'
         f"<ds:X509Certificate>{cfg.cert_b64}</ds:X509Certificate>"
         "</ds:X509Data></ds:KeyInfo></md:KeyDescriptor>"
+        f'<md:SingleLogoutService Binding="{core.BINDING_HTTP_REDIRECT}" Location="{cfg.slo_url}"/>'
+        f'<md:SingleLogoutService Binding="{core.BINDING_HTTP_POST}" Location="{cfg.slo_url}"/>'
         f"<md:NameIDFormat>{core.NAMEID_TRANSIENT}</md:NameIDFormat>"
         f"<md:NameIDFormat>{core.NAMEID_PERSISTENT}</md:NameIDFormat>"
         f"<md:NameIDFormat>{core.NAMEID_EMAIL}</md:NameIDFormat>"
@@ -229,7 +231,7 @@ def _user_attributes(user, cfg: IdpConfig) -> list:
     scope is configured.
     """
     fmt = core.ATTRNAME_FORMAT_URI
-    full_name = user.get_full_name() or user.get_username()
+    full_name = user.display_name or user.get_full_name() or user.get_username()
     attrs = [
         core.Attribute(
             "urn:oid:2.16.840.1.113730.3.1.241", values=[full_name],
@@ -261,6 +263,12 @@ def _user_attributes(user, cfg: IdpConfig) -> list:
                 friendly_name="mail", name_format=fmt,
             )
         )
+    groups = list(user.groups.order_by("name").values_list("name", flat=True))
+    if groups:
+        attrs.append(core.Attribute(
+            "urn:oid:1.2.840.113556.1.2.102", values=groups,
+            friendly_name="memberOf", name_format=fmt,
+        ))
     if cfg.scope:
         attrs.append(
             core.Attribute(
@@ -269,10 +277,12 @@ def _user_attributes(user, cfg: IdpConfig) -> list:
                 friendly_name="eduPersonPrincipalName", name_format=fmt,
             )
         )
+    affiliation = user.scoped_affiliation or (f"member@{cfg.scope}" if cfg.scope else "")
+    if affiliation:
         attrs.append(
             core.Attribute(
                 "urn:oid:1.3.6.1.4.1.5923.1.1.1.9",
-                values=[f"member@{cfg.scope}"],
+                values=[affiliation],
                 friendly_name="eduPersonScopedAffiliation", name_format=fmt,
             )
         )

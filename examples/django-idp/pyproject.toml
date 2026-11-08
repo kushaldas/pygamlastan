@@ -1,10 +1,10 @@
 [project]
 name = "django-idp"
-version = "0.1.0"
+version = "0.2.0"
 description = "A minimal, self-contained SAML 2.0 Identity Provider built on Django and pygamlastan"
 requires-python = ">=3.12"
 dependencies = [
-    "django==6.0.7",
+    "django==6.1.3",
     "pygamlastan>=0.4.0",
     "cryptography>=50",
     "gunicorn>=26",
@@ -14,4 +14,4 @@ dependencies = [
 # This project is run, not packaged/installed. uv uses the dependency list above
 # (`uv pip install` / `uv sync`). The example's `just up` recipe builds the local
 # repository wheel into ./wheels before Docker runs; the Dockerfile installs it
-# with `--find-links ./wheels`.
+# directly alongside the dependencies above.

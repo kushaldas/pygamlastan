@@ -1,5 +1,33 @@
 # Django SAML SP (pygamlastan example)
 
+## SAML Single Logout
+
+This SP now supports signed SP-initiated and IdP-initiated browser logout over
+HTTP-Redirect and HTTP-POST at **`/sp/slo/`**, advertised in its metadata. Use the
+**Log out of connected services** button to initiate logout. `/sp/logout/` is a
+CSRF-protected POST action; GET requests no longer log a user out.
+
+Successful SSO saves the verified full NameID, issuer, SessionIndex, browser
+session key and expiry in SQLite. Incoming logout is signature-verified against
+the resolved IdP's metadata, including rollover keys, and must target this SP's
+SLO destination and matching subject/session. The matching server-side sessions
+are removed even if the browser does not send its cookie. Pending responses are
+bound to their issuer, signed request ID and random RelayState. Replay protection
+and pending transactions are persisted across workers and restarts, with bounded
+five-minute exchanges and a 60-second timestamp allowance.
+
+Local logout ends the SP session immediately, before the remote exchange.
+Missing endpoints, errors, and partial responses are shown as incomplete logout;
+other sessions can remain active if a provider cannot complete the exchange.
+SOAP/Artifact logout and encrypted NameIDs are not supported.
+
+Apply migrations (`python manage.py migrate`, or restart the container), refresh
+both parties' metadata with `just link` from `examples/`, and sign in again to
+establish logout associations. Old sessions lack the new tracking records.
+See the [IdP logout documentation](../django-idp/README.md#saml-single-logout)
+for propagation, scope, and recovery from an unreachable SP.
+
+
 A small, **self-contained SAML 2.0 Service Provider** built with
 [Django 6.0](https://www.djangoproject.com/) and [`pygamlastan`](../../). It
 demonstrates the SP side of the Web Browser SSO profile: it builds and sends an

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Prepare the IdP on every start: keys, schema, static files, demo accounts.
+# Prepare keys, schema, and static files. Accounts are created explicitly.
 set -e
 
 # Generate the signing key + self-signed cert if the data volume has none.
@@ -7,7 +7,6 @@ python manage.py idp_keys
 
 python manage.py migrate --noinput
 python manage.py collectstatic --noinput
-python manage.py seed_demo
 
 # If MDQ is configured, its signing cert must be present for verification. When
 # bringing the stack up with plain `docker compose up` (instead of `just up`),

@@ -22,6 +22,10 @@ class IdpConfig:
     support_email: str
     scope: str  # home-org scope for scoped attributes (eppn, scopedAffiliation)
 
+    @property
+    def slo_url(self):
+        return f"{self.base_url}/idp/slo/"
+
 
 def _cert_b64_der(cert_pem: bytes) -> str:
     """The base64 DER body of a PEM certificate, as one line (PEM minus armor)."""

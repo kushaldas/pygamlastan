@@ -1,0 +1,9 @@
+{% extends "idp/base.html" %}
+{% block title %}Signed out{% endblock %}
+{% block content %}
+<h1>Signed out</h1>
+<p>Your Identity Provider session has ended.</p>
+{% if partial %}<p class="err">Some Service Providers could not confirm logout. Their sessions may still be active.</p>
+{% else %}<p>All participating Service Providers confirmed logout.</p>{% endif %}
+<p><a href="{% url 'idp:login' %}">Sign in again</a></p>
+{% endblock %}

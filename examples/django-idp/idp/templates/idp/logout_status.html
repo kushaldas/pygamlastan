@@ -1,0 +1,10 @@
+{% extends "idp/base.html" %}
+{% block content %}
+<h1>Logout progress</h1>
+<p>Your Identity Provider session has ended.</p>
+{% if target %}
+<p>Waiting for <code>{{ target.entity_id }}</code> to confirm logout.</p>
+<p>If this Service Provider is unreachable, you can skip it and continue. Its session may remain active.</p>
+<form method="post">{% csrf_token %}<input type="hidden" name="request_id" value="{{ target.id }}"><button type="submit">Skip this Service Provider</button></form>
+{% else %}<p>No logout requests are pending.</p>{% endif %}
+{% endblock %}

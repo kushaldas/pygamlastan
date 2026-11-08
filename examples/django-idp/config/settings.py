@@ -21,7 +21,6 @@ DEBUG = _env_bool("DJANGO_DEBUG", False)
 ALLOWED_HOSTS = [h for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",") if h]
 
 INSTALLED_APPS = [
-    "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
     "django.contrib.sessions",
@@ -68,11 +67,18 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": str(DATA_DIR / "db.sqlite3"),
+        "OPTIONS": {"timeout": 20, "transaction_mode": "IMMEDIATE"},
     }
 }
 
-# Demo only: no password complexity rules so the seeded credentials are simple.
-AUTH_PASSWORD_VALIDATORS: list = []
+AUTH_USER_MODEL = "idp.User"
+AUTHENTICATION_BACKENDS = ["idp.backends.IdentifierBackend"]
+AUTH_PASSWORD_VALIDATORS = [
+    {"NAME": "idp.passwords.PasswordLengthValidator"},
+    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+]
+SESSION_ENGINE = "django.contrib.sessions.backends.db"
+SESSION_COOKIE_AGE = 3600
 
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "UTC"

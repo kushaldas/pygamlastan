@@ -1,46 +1,41 @@
-"""Create a demo admin and a set of demo users (idempotent). DEMO ONLY."""
-import os
+"""Opt-in lesson accounts; never called at HTTP startup."""
+from django.core.exceptions import ValidationError
+from django.core.management.base import BaseCommand, CommandError
+from django.db import IntegrityError
 
-from django.contrib.auth import get_user_model
-from django.core.management.base import BaseCommand
+from idp.accounts import commit_users, prepare_user
+from idp.models import User
 
-# Demo users with Swedish surnames; all share one demo password and live on the
-# @gamlastan.sverige domain. Usernames are the lowercased first name.
-EMAIL_DOMAIN = "gamlastan.sverige"
 DEMO_USERS = [
-    ("Angela", "Andersson"),
-    ("Pamela", "Pettersson"),
-    ("Sandra", "Svensson"),
-    ("Monica", "Magnusson"),
-    ("Erica", "Eriksson"),
-    ("Rita", "Rosén"),
-    ("Tina", "Törnqvist"),
-    ("Jessica", "Johansson"),
+    ("Angela", "Andersson"), ("Pamela", "Pettersson"), ("Sandra", "Svensson"),
+    ("Monica", "Magnusson"), ("Erica", "Eriksson"), ("Rita", "Rosén"),
+    ("Tina", "Törnqvist"), ("Jessica", "Johansson"),
 ]
 
 
 class Command(BaseCommand):
-    help = "Create a demo superuser and a set of demo end users if they do not exist."
+    help = "Explicitly seed lesson users with individual random passwords (no administrator)."
+
+    def add_arguments(self, parser):
+        parser.add_argument("--password-stdin", action="store_true")
+        parser.add_argument("--allow-weak-password", action="store_true")
 
     def handle(self, *args, **options):
-        User = get_user_model()
+        from .idp_user import password_options
 
-        admin_username = os.environ.get("DJANGO_ADMIN_USERNAME", "admin")
-        admin_password = os.environ.get("DJANGO_ADMIN_PASSWORD", "admin")
-        if not User.objects.filter(username=admin_username).exists():
-            User.objects.create_superuser(
-                admin_username, f"{admin_username}@{EMAIL_DOMAIN}", admin_password
-            )
-            self.stdout.write(self.style.SUCCESS(f"Created superuser {admin_username!r}"))
-
-        password = os.environ.get("DEMO_PASSWORD", "gamlastan")
-        for first, last in DEMO_USERS:
-            username = first.lower()
-            if User.objects.filter(username=username).exists():
-                continue
-            user = User.objects.create_user(
-                username, f"{username}@{EMAIL_DOMAIN}", password
-            )
-            user.first_name, user.last_name = first, last
-            user.save()
-            self.stdout.write(self.style.SUCCESS(f"Created demo user {username!r}"))
+        kwargs = password_options(options)
+        try:
+            prepared = [
+                prepare_user(username=first.lower(), email=f"{first.lower()}@gamlastan.sverige",
+                             first_name=first, last_name=last, **kwargs)
+                for first, last in DEMO_USERS
+                if not User.objects.filter(username=first.lower()).exists()
+            ]
+            commit_users(prepared)
+        except (ValidationError, IntegrityError) as exc:
+            message = "; ".join(exc.messages) if isinstance(exc, ValidationError) else str(exc)
+            raise CommandError(message) from exc
+        for user, password, _ in prepared:
+            self.stdout.write(f"{user.username}: generated password (shown once): {password}"
+                              if password is not None else f"{user.username}: password set from stdin.")
+        self.stdout.write(f"Created {len(prepared)} lesson account(s).")

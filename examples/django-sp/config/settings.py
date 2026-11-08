@@ -56,8 +56,8 @@ TEMPLATES = [
 ]
 
 # --- Data / database -------------------------------------------------------
-# The SP stores nothing about users in a DB; SQLite holds only sessions (the
-# SAML identity is kept in the session after a successful login).
+# SQLite stores browser sessions and the subject/session associations, pending
+# transactions and replay reservations needed for signed SAML Single Logout.
 
 DATA_DIR = Path(os.environ.get("SAML_SP_DATA_DIR", str(BASE_DIR / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -66,6 +66,7 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": str(DATA_DIR / "db.sqlite3"),
+        "OPTIONS": {"timeout": 20, "transaction_mode": "IMMEDIATE"},
     }
 }
 

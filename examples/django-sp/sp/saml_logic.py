@@ -76,9 +76,10 @@ class _InMemoryPersistentIdStore:
 _persistent_id_store = _InMemoryPersistentIdStore()
 
 
-def _hardened_verifier(cert_der: bytes) -> crypto.SamlVerifier:
+def _hardened_verifier(cert_der: bytes | list[bytes]) -> crypto.SamlVerifier:
     """Verifier policy used for inbound SAML Responses from resolved IdP metadata."""
-    verifier = crypto.SamlVerifier.from_cert(cert_der)
+    verifier = (crypto.SamlVerifier.from_certs(cert_der) if isinstance(cert_der, list)
+                else crypto.SamlVerifier.from_cert(cert_der))
     verifier.set_skip_time_checks(False)
     verifier.set_trusted_keys_only(True)
     verifier.set_strict_verification(True)
@@ -156,6 +157,8 @@ def sp_metadata_xml(cfg: SpConfig) -> str:
         "</md:Extensions>"
         f'<md:KeyDescriptor use="signing">{key_info}</md:KeyDescriptor>'
         f'<md:KeyDescriptor use="encryption">{key_info}</md:KeyDescriptor>'
+        f'<md:SingleLogoutService Binding="{core.BINDING_HTTP_REDIRECT}" Location={quoteattr(cfg.slo_url)}/>'
+        f'<md:SingleLogoutService Binding="{core.BINDING_HTTP_POST}" Location={quoteattr(cfg.slo_url)}/>'
         f"<md:NameIDFormat>{core.NAMEID_PERSISTENT}</md:NameIDFormat>"
         f"<md:NameIDFormat>{core.NAMEID_TRANSIENT}</md:NameIDFormat>"
         f'<md:AssertionConsumerService Binding="{core.BINDING_HTTP_POST}" '
@@ -256,17 +259,15 @@ def process_acs(cfg: SpConfig, form, idp, expected_request_id: str | None):
     cryptographically verified IDs into validation - no "trust me, it was signed"
     shortcut. Raises on any decode/verify/validation failure.
     """
-    from . import idp_resolver
-
     decoded = bindings.post_decode(_duplicate_preserving_form_pairs(form))
     # Strict UTF-8, never decoded.saml_text: that projection is lossy (invalid
     # bytes become U+FFFD, display/logging only). Verification must run over
     # exactly the bytes the binding decoded; malformed input is rejected.
     response_xml = decoded.saml_xml.decode("utf-8")
-    signing_cert = idp_resolver.signing_cert_der(idp)
-    if signing_cert is None:
+    signing_certs = idp.signing_certificates("idp")
+    if not signing_certs:
         raise ValueError("the IdP metadata has no signing certificate")
-    verifier = _hardened_verifier(signing_cert)
+    verifier = _hardened_verifier(signing_certs)
     # Persistent-NameID uniqueness (E78) is opt-in and needs a local principal
     # resolved independently of the asserted NameID; see _InMemoryPersistentIdStore
     # for how to wire it. The default SecurityConfig leaves it disabled, so no

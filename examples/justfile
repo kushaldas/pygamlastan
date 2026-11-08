@@ -11,12 +11,12 @@ default:
     @just --list
 
 # Build a pygamlastan wheel from the repo and stage it in both app wheel dirs.
-# Only needed until pygamlastan is published to PyPI. Requires Rust + maturin.
+# Requires uv and Rust; the IdP recipe runs a pinned maturin tool.
 wheel:
-    cd ../ && maturin build --release
-    mkdir -p django-idp/wheels django-sp/wheels
-    cp ../target/wheels/pygamlastan-*.whl django-idp/wheels/
-    cp ../target/wheels/pygamlastan-*.whl django-sp/wheels/
+    just --justfile django-idp/justfile wheel
+    mkdir -p django-sp/wheels
+    rm -f django-sp/wheels/pygamlastan-*.whl
+    cp django-idp/wheels/pygamlastan-*.whl django-sp/wheels/
     @echo "Staged pygamlastan wheel in django-idp/wheels and django-sp/wheels"
 
 # Create locally-trusted TLS certs for both domains with mkcert (for Caddy).
@@ -49,7 +49,7 @@ build:
 # Build/stage pygamlastan, then create certs and start the local federation.
 up: wheel tls swamid-cert
     docker compose up -d --build
-    @echo "IdP:  https://${IDP_DOMAIN:-idp.localhost}/   (login: angela / gamlastan)"
+    @echo "IdP:  https://${IDP_DOMAIN:-idp.localhost}/   (create accounts with manage.py idp_user)"
     @echo "SP:   https://${SP_DOMAIN:-sp.localhost}/      (Log in -> SWAMID QA discovery)"
 
 # Optional local pairing (no SWAMID): exchange IdP<->SP metadata as trusted files.

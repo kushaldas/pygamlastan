@@ -20,7 +20,7 @@
   <header>
     <span><strong>pygamlastan</strong> &middot; SAML 2.0 Identity Provider</span>
     {% if user.is_authenticated %}
-      <span>{{ user.get_username }} &middot; <a href="{% url 'idp:logout' %}">log out</a></span>
+      <span>{{ user.get_username }} <form method="post" action="{% url 'idp:logout' %}" style="display:inline">{% csrf_token %}<button type="submit">Log out of connected services</button></form></span>
     {% endif %}
   </header>
   <hr>

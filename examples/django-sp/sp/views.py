@@ -9,6 +9,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from . import idp_resolver
+from . import slo
 from . import saml_logic as sl
 from .sp_config import get_sp_config
 
@@ -130,10 +131,5 @@ def acs(request):
         "authn_context": result.authn_context_class_ref,
         "attributes": sl.attributes_for_display(result),
     }
-    return redirect("sp:index")
-
-
-def logout_view(request):
-    """Local logout: drop the SP session (no SAML Single Logout in this demo)."""
-    request.session.flush()
+    slo.record_login(request, result)
     return redirect("sp:index")

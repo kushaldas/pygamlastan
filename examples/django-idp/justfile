@@ -1,120 +1,170 @@
-# pygamlastan Django SAML IdP - common tasks.
-# Run `just` to list recipes.
+# Django IdP: local development, accounts, and the versioned container.
+# Run `just` to see all commands. Parameters are passed as shell arguments.
+set dotenv-load
+set positional-arguments
+set shell := ["bash", "-euc"]
 
-# Load .env so recipes see IDP_DOMAIN (same file docker compose reads).
-set dotenv-load := true
+export IDP_IMAGE := env("IDP_IMAGE", "kushaldas/django-idp:0.2.0")
+export IDP_PYTHON := env("IDP_PYTHON", ".venv/bin/python")
+export IDP_ENV_FILE := env("IDP_ENV_FILE", ".env")
 
-# Common Name baked into the self-signed IdP certificate.
-idp_cn := "pygamlastan-django-idp"
-
-# SWAMID metadata signing certificate (PEM). Used to verify every MDQ response.
-# This default is the SWAMID *QA* signer, matching the QA MDQ in .env
-# (https://mds.swamid.se/qa/). For the production federation use the prod signer
-# instead: `just swamid-cert https://mds.swamid.se/md/md-signer2.crt`.
-swamid_cert_url := "https://mds.swamid.se/qa/md/swamid-qa.crt"
-
-# Default: list available recipes.
+# List available commands.
 default:
     @just --list
 
-# Generate the IdP signing key + self-signed certificate in ./data if missing.
-keygen:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    mkdir -p data
-    if [[ -f data/idp_key.pem && -f data/idp_cert.pem ]]; then
-        echo "IdP key/cert already present in ./data"
-    else
-        openssl req -x509 -newkey rsa:2048 -nodes -days 1825 \
-            -keyout data/idp_key.pem -out data/idp_cert.pem \
-            -subj "/CN={{idp_cn}}"
-        echo "Generated ./data/idp_key.pem and ./data/idp_cert.pem"
-    fi
-
-# Create a locally-trusted TLS cert/key for $IDP_DOMAIN with mkcert, for Caddy.
-# Idempotent (delete ./data/caddy to regenerate). `mkcert -install` adds the
-# local CA to your trust store the first time (may prompt for sudo).
-tls:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    domain="${IDP_DOMAIN:-localhost}"
-    mkdir -p data/caddy
-    if [[ -f data/caddy/cert.pem && -f data/caddy/key.pem ]]; then
-        echo "TLS cert already present in ./data/caddy for a domain (delete to regenerate)"
-    else
-        mkcert -install
-        mkcert -cert-file data/caddy/cert.pem -key-file data/caddy/key.pem "$domain"
-        echo "Generated mkcert TLS cert/key for ${domain} in ./data/caddy"
-    fi
-
-# Build a pygamlastan wheel from the repo and stage it in ./wheels.
-# Only needed until pygamlastan is published to PyPI. Requires Rust + maturin.
+# Build the local library wheel (requires uv and the Rust toolchain).
 wheel:
-    cd ../.. && maturin build --release
-    mkdir -p wheels
-    cp ../../target/wheels/pygamlastan-*.whl wheels/
-    @echo "Staged pygamlastan wheel in ./wheels"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    project="$PWD"
+    stage="$(mktemp -d)"
+    trap 'rm -rf "$stage"' EXIT
+    cd ../..
+    uv tool run --from maturin==1.14.1 maturin build --release --out "$stage"
+    mkdir -p "$project/wheels"
+    rm -f "$project"/wheels/pygamlastan-*.whl
+    cp "$stage"/pygamlastan-*.whl "$project/wheels/"
 
-# Build the IdP image.
-build:
-    docker compose build
+# Create/reuse .venv and install application dependencies plus the local wheel.
+setup: wheel
+    uv venv --allow-existing .venv
+    uv pip install --python "$IDP_PYTHON" wheels/pygamlastan-*.whl -r pyproject.toml
 
-# Generate IdP keys, the MDQ signing cert, and mkcert TLS certs, then start.
-up: wheel keygen swamid-cert tls
-    docker compose up -d --build
-    @echo "IdP running at https://${IDP_DOMAIN:-localhost}/"
-    @echo "Demo login: angela (or pamela, sandra, ...) / gamlastan   |   Admin: admin / admin at /admin/"
+# Run any Django management command, e.g. `just manage showmigrations`.
+manage +args:
+    "$IDP_PYTHON" manage.py "$@"
 
-# Stop and remove the containers.
-down:
-    docker compose down
+# Apply migrations without creating any accounts.
+migrate *options:
+    "$IDP_PYTHON" manage.py migrate "$@"
 
-# Follow container logs.
-logs:
-    docker compose logs -f
+# Generate migrations after changing application models.
+makemigrations *options:
+    "$IDP_PYTHON" manage.py makemigrations "$@"
 
-# Restart the IdP service only.
-restart:
-    docker compose restart idp
+# Run Django system checks.
+check:
+    "$IDP_PYTHON" manage.py check
 
-# Fetch the SWAMID metadata signing certificate (mandatory for the MDQ path).
-#
-# SWAMID is the Swedish academic identity federation. SPs are resolved on demand
-# from its MDQ service (SAML_IDP_MDQ_URL in .env); every MDQ response is
-# signature-verified against this certificate before the SP is trusted.
-# Idempotent; override the URL for the QA signer if needed:
-#   just swamid-cert url=https://...
-swamid-cert url=swamid_cert_url:
+# Run the example suite, including SQLite concurrent-writer tests.
+test *options:
+    "$IDP_PYTHON" manage.py test idp.tests --settings=config.test_settings --noinput "$@"
+
+# Exercise signed SSO/SLO with the sibling Django SP over both browser bindings.
+test-integration *options:
+    "$IDP_PYTHON" manage.py test idp.integration_tests --settings=config.integration_test_settings --noinput "$@"
+
+# Run system checks, migration drift check, and the example suite.
+verify: check
+    "$IDP_PYTHON" manage.py makemigrations --check --dry-run
+    just test
+
+# Generate missing SAML signing keys/certificate (pass --force only to replace).
+keygen *options:
+    "$IDP_PYTHON" manage.py idp_keys "$@"
+
+# Collect static files for WhiteNoise.
+collectstatic:
+    "$IDP_PYTHON" manage.py collectstatic --noinput
+
+# Start Django's local HTTP development server.
+run address="127.0.0.1:8000":
+    DJANGO_DEBUG="${DJANGO_DEBUG:-1}" "$IDP_PYTHON" manage.py runserver "$1"
+
+# Open the local Django shell.
+shell:
+    "$IDP_PYTHON" manage.py shell
+
+# Create an account; add --admin or --password-stdin as needed.
+create-user username email *options:
+    "$IDP_PYTHON" manage.py idp_user create "$1" --email "$2" "${@:3}"
+
+# Generate a replacement password, or add --password-stdin to supply one.
+set-password username *options:
+    "$IDP_PYTHON" manage.py idp_user set-password "$@"
+
+# Grant/revoke IdP administration: `just set-admin USERNAME enable|disable`.
+set-admin username action:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "$2" in enable|disable) ;; *) echo 'Action must be enable or disable.' >&2; exit 2 ;; esac
+    "$IDP_PYTHON" manage.py idp_user set-admin "$1" "--$2"
+
+# Import legacy JSON profiles atomically, assigning fresh random passwords.
+import-users file:
+    "$IDP_PYTHON" manage.py idp_import_users "$1"
+
+# Explicitly create lesson accounts; generated passwords are printed once.
+seed-demo *options:
+    "$IDP_PYTHON" manage.py seed_demo "$@"
+
+# Build the Debian trixie image tagged kushaldas/django-idp:0.2.0.
+build: wheel
+    docker build --tag "$IDP_IMAGE" .
+
+# Run a one-off container command with persistent ./data; works before HTTP startup.
+container-manage +args:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p data
-    if [[ -f data/swamid-signing.pem ]]; then
-        echo "SWAMID signing cert already present (data/swamid-signing.pem)"
-    else
-        curl -fsSL "{{url}}" -o data/swamid-signing.pem
-        echo "Fetched SWAMID signing cert -> data/swamid-signing.pem"
-    fi
+    options=(--interactive)
+    if [[ -t 0 && -t 1 ]]; then options+=(--tty); fi
+    if [[ -f "$IDP_ENV_FILE" ]]; then options+=(--env-file "$IDP_ENV_FILE"); fi
+    docker run --rm "${options[@]}" --env SAML_IDP_DATA_DIR=/data \
+        --mount "type=bind,source=$PWD/data,target=/data" \
+        "$IDP_IMAGE" python manage.py "$@"
 
-# Add a local SP by dropping its (self-contained) metadata XML into the metadata
-# dir. No DB, no MDQ - the file is read at startup and trusted as provided.
-add-sp FILE:
+# Run the image on a loopback HTTP port (foreground; Ctrl-C stops it).
+container-run port="8000":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p data
+    options=()
+    if [[ -f "$IDP_ENV_FILE" ]]; then options+=(--env-file "$IDP_ENV_FILE"); fi
+    docker run --rm --name django-idp "${options[@]}" \
+        --publish "127.0.0.1:$1:8000" --env SAML_IDP_DATA_DIR=/data \
+        --mount "type=bind,source=$PWD/data,target=/data" "$IDP_IMAGE"
+
+# Stop the standalone foreground container from a second terminal.
+container-stop:
+    docker stop django-idp
+
+# Add trusted SP XML to the current file resolver; restart the IdP to reload.
+add-sp file:
     mkdir -p data/metadata
-    cp "{{FILE}}" data/metadata/
-    docker compose restart idp
-    @echo "Added {{FILE}} to ./data/metadata; loaded at IdP startup."
+    cp -- "$1" data/metadata/
 
-# Reload local metadata files after changing ./data/metadata.
-reload-metadata:
-    docker compose restart idp
+# Print IdP metadata from a running local server (or supply an HTTPS base URL).
+metadata base_url="http://localhost:8000":
+    curl --fail --silent --show-error "${1%/}/idp/metadata"
 
-# Print the IdP metadata (through Caddy; -k accepts the local CA).
-metadata:
-    curl -sk "https://${IDP_DOMAIN:-localhost}/idp/metadata"
+# Start the shared IdP/SP/Caddy stack; see ../README.md for configuration.
+up:
+    just --justfile ../justfile up
 
-# Open a Django shell inside the running container.
-shell:
-    docker compose exec idp python manage.py shell
+# Stop the shared stack, retaining its data.
+down:
+    just --justfile ../justfile down
 
-# Create another Django superuser interactively.
-createsuperuser:
-    docker compose exec idp python manage.py createsuperuser
+# Follow shared-stack logs (defaults to the IdP).
+logs service="idp":
+    just --justfile ../justfile logs "$1"
+
+# Restart the shared IdP, including cached local metadata.
+restart:
+    just --justfile ../justfile restart idp
+
+# Reload shared-stack local SP metadata by restarting the IdP.
+reload-metadata: restart
+
+# Create TLS certificates for the shared Caddy stack.
+tls:
+    just --justfile ../justfile tls
+
+# Fetch the MDQ signing certificate for the shared stack (optional signer URL).
+swamid-cert *options:
+    just --justfile ../justfile swamid-cert "$@"
+
+# Exchange metadata between the shared IdP and SP.
+link:
+    just --justfile ../justfile link

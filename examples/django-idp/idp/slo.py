@@ -1,0 +1,266 @@
+"""Signed browser Single Logout with durable participants, replay and flow state."""
+import hashlib
+import json
+import secrets
+from datetime import datetime, timedelta
+from types import SimpleNamespace
+from urllib.parse import urlsplit
+from xml.etree import ElementTree as ET
+
+from django.contrib.auth import logout
+from django.contrib.sessions.models import Session
+from django.db import transaction
+from django.http import HttpResponse, HttpResponseBadRequest, HttpResponseRedirect
+from django.shortcuts import render
+from django.utils import timezone
+from django.views.decorators.cache import never_cache
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_http_methods, require_POST
+from pygamlastan import bindings, core, crypto, logout as saml_logout, metadata, xml
+
+from . import saml_logic as sl, sp_resolver
+from .idp_config import get_idp_config
+from .models import LogoutFlow, LogoutReplay, SamlParticipant
+
+LIFETIME = timedelta(minutes=5)
+SKEW = 60
+
+
+def name_id_data(name_id):
+    return {key: getattr(name_id, key) for key in (
+        "value", "format", "name_qualifier", "sp_name_qualifier", "sp_provided_id"
+    )}
+
+
+def record_issued(request, response_xml, entity_id):
+    assertion = xml.parse_response(response_xml).assertions[0]
+    request.session.save()
+    SamlParticipant.objects.filter(expires_at__lt=timezone.now()).delete()
+    SamlParticipant.objects.create(
+        session_key=request.session.session_key, entity_id=entity_id,
+        name_id=name_id_data(assertion.subject.name_id),
+        session_index=assertion.authn_statements[0].session_index,
+        expires_at=request.session.get_expiry_date(),
+    )
+
+
+class ReplayCache:
+    def __init__(self, issuer):
+        self.issuer = issuer
+
+    def check_and_insert(self, identifier, expiry):
+        digest = hashlib.sha256(json.dumps([self.issuer, identifier]).encode()).hexdigest()
+        _, created = LogoutReplay.objects.get_or_create(
+            digest=digest, defaults={"expires_at": max(expiry, timezone.now() + LIFETIME + timedelta(seconds=SKEW))},
+        )
+        return created
+
+    def cleanup(self):
+        LogoutReplay.objects.filter(expires_at__lt=timezone.now()).delete()
+
+
+def decode(request):
+    decoded = sl.decode_authn_request(request.method, request.META.get("QUERY_STRING", ""), request.POST)
+    text = decoded.saml_xml.decode("utf-8")
+    parsed = xml.parse_logout_request(text) if decoded.is_request else xml.parse_logout_response(text)
+    # The native secure parser above rejects DTDs and bounds XML resources.
+    root = ET.fromstring(text)
+    return decoded, text, parsed, root
+
+
+def peer(entity_id):
+    text = sp_resolver.resolve(entity_id)
+    if not text:
+        raise ValueError("Unregistered logout issuer.")
+    entity = metadata.parse_entity(text)
+    if entity.entity_id != entity_id or not entity.is_sp():
+        raise ValueError("Metadata does not identify the requesting SP.")
+    return entity
+
+
+def endpoint(entity, preferred=core.BINDING_HTTP_REDIRECT, response=False):
+    for binding in dict.fromkeys([preferred, core.BINDING_HTTP_REDIRECT, core.BINDING_HTTP_POST]):
+        for ep in entity.single_logout_services("sp"):
+            if ep.binding == binding:
+                url = (ep.response_location if response else None) or ep.location
+                parts = urlsplit(url)
+                if parts.scheme in ("https", "http") and parts.netloc and not parts.fragment:
+                    return binding, url
+    raise ValueError("No supported SingleLogoutService in SP metadata.")
+
+
+def verify(decoded, text, parsed, root, entity, cfg):
+    message = SimpleNamespace(id=parsed.id, has_signature=root.find(f"{{{core.XMLDSIG_NS}}}Signature") is not None)
+    if not sl._verify_authn_request_signature(message, text, decoded, entity):
+        raise ValueError("Logout messages must be signed.")
+    if root.get("Destination") != cfg.slo_url:
+        raise ValueError("Logout Destination does not match this IdP.")
+    issued = datetime.fromisoformat(root.attrib["IssueInstant"].replace("Z", "+00:00"))
+    if issued.tzinfo is None or not -SKEW <= (timezone.now() - issued).total_seconds() <= LIFETIME.total_seconds() + SKEW:
+        raise ValueError("Logout message is stale or issued in the future.")
+
+
+def sign_message(text, identifier, cfg):
+    close = text.index("</saml:Issuer>") + len("</saml:Issuer>")
+    text = text[:close] + sl._signature_template(identifier, cfg.cert_b64) + text[close:]
+    return crypto.SamlSigner.from_pem(cfg.key_pem).sign_enveloped(text)
+
+
+def send(text, identifier, is_request, binding, url, relay_state, cfg):
+    if binding == core.BINDING_HTTP_REDIRECT:
+        return HttpResponseRedirect(bindings.redirect_encode(
+            text.encode(), is_request, url, relay_state=relay_state,
+            signer=crypto.SamlSigner.from_pem(cfg.key_pem),
+            sig_alg="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+        ))
+    signed = sign_message(text, identifier, cfg)
+    return HttpResponse(bindings.post_encode(signed.encode(), is_request, url, relay_state=relay_state))
+
+
+def cleanup():
+    now = timezone.now()
+    LogoutFlow.objects.filter(expires_at__lt=now).delete()
+    SamlParticipant.objects.filter(expires_at__lt=now).delete()
+    LogoutReplay.objects.filter(expires_at__lt=now).delete()
+
+
+def prepare_flow(participants, cfg, origin=None):
+    """Resolve metadata and prepare messages before taking SQLite's write lock."""
+    grouped = {}
+    partial = False
+    for participant in participants:
+        if origin and participant.entity_id == origin["entity_id"]:
+            continue
+        key = (participant.entity_id, json.dumps(participant.name_id, sort_keys=True))
+        grouped.setdefault(key, []).append(participant.session_index)
+    queue = []
+    for (entity_id, subject), indexes in grouped.items():
+        try:
+            binding, url = endpoint(peer(entity_id))
+            message = saml_logout.create_sp_logout_request(saml_logout.SpLogoutRequestOptions(
+                cfg.entity_id, core.NameId(**json.loads(subject)), session_indexes=indexes,
+                destination=url, not_on_or_after=timezone.now() + LIFETIME,
+            ))
+            queue.append({"entity_id": entity_id, "binding": binding, "url": url,
+                          "id": message.id, "xml": message.to_xml()})
+        except Exception:
+            partial = True
+    return LogoutFlow(token=secrets.token_urlsafe(32), origin=origin, queue=queue,
+                      partial=partial, expires_at=timezone.now() + LIFETIME)
+
+
+def drive(request, flow, cfg):
+    if flow.queue:
+        target = flow.queue[0]
+        return send(target["xml"], target["id"], True, target["binding"], target["url"], flow.token, cfg)
+    # Completion is consumed once. Keep failure status visible to local users.
+    with transaction.atomic():
+        if not LogoutFlow.objects.filter(pk=flow.pk).delete()[0]:
+            raise ValueError("Logout flow has already completed.")
+    if flow.origin:
+        origin = flow.origin
+        message = (saml_logout.create_logout_response_partial if flow.partial else
+                   saml_logout.create_logout_response_success)(cfg.entity_id, origin["id"], origin["url"])
+        return send(message.to_xml(), message.id, False, origin["binding"], origin["url"], origin["relay"], cfg)
+    return render(request, "idp/logged_out.html", {"partial": flow.partial})
+
+
+def invalidate(request, session_keys):
+    Session.objects.filter(session_key__in=session_keys).delete()
+    SamlParticipant.objects.filter(session_key__in=session_keys).delete()
+    if request.session.session_key in session_keys:
+        logout(request)
+
+
+@never_cache
+@require_POST
+def local_logout(request):
+    cleanup()
+    cfg = get_idp_config()
+    key = request.session.session_key
+    participants = list(SamlParticipant.objects.filter(session_key=key)) if key else []
+    flow = prepare_flow(participants, cfg)
+    with transaction.atomic():
+        flow.save()
+        invalidate(request, [key] if key else [])
+    if not key:
+        logout(request)
+    if flow.queue:
+        request.session["saml_logout_flow"] = flow.token
+    return drive(request, flow, cfg)
+
+
+@never_cache
+@csrf_exempt  # Only signed SAML protocol messages; local logout remains CSRF protected.
+@require_http_methods(["GET", "POST"])
+def service(request):
+    try:
+        cleanup()
+        cfg = get_idp_config()
+        decoded, text, parsed, root = decode(request)
+        issuer = parsed.issuer.value if parsed.issuer else None
+        entity = peer(issuer)
+        verify(decoded, text, parsed, root, entity, cfg)
+        if not decoded.is_request:
+            # Cookie-independent correlation is required for cross-site POST.
+            # The random RelayState and signed request ID must BOTH match.
+            with transaction.atomic():
+                flow = LogoutFlow.objects.get(pk=decoded.relay_state, expires_at__gt=timezone.now())
+                if not flow.queue or flow.queue[0]["entity_id"] != issuer or flow.queue[0]["id"] != parsed.in_response_to:
+                    raise ValueError("Unsolicited or mismatched LogoutResponse.")
+                flow.queue = flow.queue[1:]
+                flow.partial |= not parsed.is_success() or parsed.status.status_code.sub_status is not None
+                flow.save()
+            return drive(request, flow, cfg)
+
+        if parsed.not_on_or_after and parsed.not_on_or_after > timezone.now() + LIFETIME + timedelta(seconds=SKEW):
+            raise ValueError("Logout validity window is too long.")
+        saml_logout.validate_logout_request_with_replay(
+            parsed, issuer, True, timezone.now(), ReplayCache(issuer),
+            clock_skew_seconds=SKEW, max_request_age_seconds=int(LIFETIME.total_seconds()),
+        )
+        incoming_binding = core.BINDING_HTTP_POST if request.method == "POST" else core.BINDING_HTTP_REDIRECT
+        binding, url = endpoint(entity, incoming_binding, response=True)
+        matches = [p for p in SamlParticipant.objects.filter(entity_id=issuer)
+                   if p.name_id == name_id_data(parsed.name_id)]
+        if parsed.session_indexes:
+            matches = [p for p in matches if p.session_index in parsed.session_indexes]
+        if not matches:
+            message = saml_logout.create_logout_response_error(
+                cfg.entity_id, parsed.id, core.STATUS_REQUESTER, "No matching SAML session.", url,
+            )
+            return send(message.to_xml(), message.id, False, binding, url, decoded.relay_state, cfg)
+        session_keys = {p.session_key for p in matches}
+        participants = list(SamlParticipant.objects.filter(session_key__in=session_keys))
+        origin = {"entity_id": issuer, "id": parsed.id, "binding": binding, "url": url, "relay": decoded.relay_state}
+        flow = prepare_flow(participants, cfg, origin)
+        with transaction.atomic():
+            flow.save()
+            invalidate(request, session_keys)
+        if flow.queue:
+            request.session["saml_logout_flow"] = flow.token
+        return drive(request, flow, cfg)
+    except Exception:
+        # No redirects or session destruction are permitted on invalid messages.
+        return HttpResponseBadRequest("SAML logout was rejected.")
+
+
+@never_cache
+@require_http_methods(["GET", "POST"])
+def status(request):
+    """Let a browser skip an unreachable SP without claiming complete logout."""
+    flow = LogoutFlow.objects.filter(pk=request.session.get("saml_logout_flow")).first()
+    if flow is None or flow.expires_at <= timezone.now():
+        return render(request, "idp/logged_out.html", {"partial": True})
+    if request.method == "POST":
+        with transaction.atomic():
+            current = LogoutFlow.objects.get(pk=flow.pk)
+            # A stale tab must not skip a different participant.
+            if current.queue and current.queue[0]["id"] == request.POST.get("request_id"):
+                current.queue = current.queue[1:]
+                current.partial = True
+                current.save()
+            else:
+                return HttpResponseBadRequest("The logout flow has already advanced.")
+        return drive(request, current, get_idp_config())
+    return render(request, "idp/logout_status.html", {"target": flow.queue[0] if flow.queue else None})

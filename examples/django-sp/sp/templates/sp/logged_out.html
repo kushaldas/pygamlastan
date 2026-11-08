@@ -1,0 +1,8 @@
+{% extends "sp/base.html" %}
+{% block content %}
+<h1>Signed out</h1>
+<p>Your local Service Provider session has ended.</p>
+{% if partial %}<p class="err">The Identity Provider or another Service Provider could not confirm logout. Other sessions may still be active.</p>
+{% else %}<p>The logout exchange completed.</p>{% endif %}
+<p><a href="{% url 'sp:index' %}">Return to the Service Provider</a></p>
+{% endblock %}

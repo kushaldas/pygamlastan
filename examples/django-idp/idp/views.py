@@ -1,5 +1,5 @@
 """IdP HTTP endpoints: home, metadata, SSO (Redirect + POST), login, logout, error."""
-from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth import authenticate, login
 from django.http import HttpResponse
 from django.shortcuts import redirect, render
 from django.urls import reverse
@@ -10,6 +10,7 @@ from django.conf import settings
 
 from . import saml_logic as sl
 from . import sp_resolver
+from . import slo
 from .idp_config import get_idp_config
 
 # Session key holding the in-flight AuthnRequest while the user logs in.
@@ -132,6 +133,7 @@ def _issue(request):
         authn_instant=request.user.last_login,
     )
     html = sl.encode_post_response(signed, pending["acs_url"], pending["relay_state"])
+    slo.record_issued(request, signed, pending["sp_entity_id"])
     return HttpResponse(html)
 
 
@@ -156,8 +158,3 @@ def login_view(request):
             status=401,
         )
     return render(request, "idp/login.html", {"pending": pending})
-
-
-def logout_view(request):
-    logout(request)
-    return redirect("idp:index")
