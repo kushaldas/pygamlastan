@@ -1,4 +1,7 @@
 """Explicitly allowlisted fields for IdP account administration."""
+import csv
+import io
+
 from django import forms
 from django.contrib.auth.models import Group
 
@@ -10,8 +13,10 @@ class AccountForm(forms.ModelForm):
     required_css_class = "required"
 
     group_names = forms.CharField(
-        required=False, label="Groups",
-        help_text="Comma-separated group names. New groups are created automatically.",
+        required=False, label="Groups", strip=False,
+        widget=forms.Textarea(attrs={"rows": 3}),
+        help_text='CSV group names, for example: Students, "cn=staff,ou=groups". '
+                  'Quote names containing commas, quotes, or newlines. New groups are created automatically.',
     )
 
     class Meta:
@@ -25,13 +30,23 @@ class AccountForm(forms.ModelForm):
         """Initialize account fields and populate the current group memberships."""
         super().__init__(*args, **kwargs)
         if self.instance.pk:
-            self.fields["group_names"].initial = ", ".join(
+            value = io.StringIO(newline="")
+            # Quote every existing name so leading/trailing spaces, commas,
+            # quotes, and embedded newlines survive an unchanged form submission.
+            csv.writer(value, quoting=csv.QUOTE_ALL, lineterminator="").writerow(
                 self.instance.groups.order_by("name").values_list("name", flat=True))
+            self.fields["group_names"].initial = value.getvalue()
 
     def clean_group_names(self):
-        """Trim and deduplicate group names before any database writes."""
-        names = list(dict.fromkeys(
-            name.strip() for name in self.cleaned_data["group_names"].split(",") if name.strip()))
+        """Parse one CSV record losslessly and validate names before any writes."""
+        try:
+            rows = list(csv.reader(io.StringIO(self.cleaned_data["group_names"], newline=""),
+                                   skipinitialspace=True, strict=True))
+        except csv.Error as exc:
+            raise forms.ValidationError("Enter valid CSV group names with properly closed quotes.") from exc
+        if len(rows) > 1:
+            raise forms.ValidationError("Enter a single CSV row; quote group names containing newlines.")
+        names = list(dict.fromkeys(name for name in (rows[0] if rows else []) if name.strip()))
         if any(len(name) > 150 for name in names):
             raise forms.ValidationError("Group names must be at most 150 characters.")
         return names

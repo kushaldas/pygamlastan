@@ -171,6 +171,9 @@ The built-in Django `/admin/` remains disabled.
 The interface provides searchable, paginated accounts, creation and editing,
 comma-separated group membership, activation and administrator status, password
 replacement, and confirmed deletion. Groups never grant administrative access.
+Group membership uses a single CSV row; quote names containing commas, quotes,
+or newlines (for example, `Students, "cn=staff,ou=groups"`). Existing names are
+serialized with quoting so unrelated profile edits preserve them unchanged.
 The final active administrator cannot be disabled, demoted, or deleted.
 
 Creation and password replacement display a random 24-character password only

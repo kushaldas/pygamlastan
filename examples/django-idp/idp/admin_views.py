@@ -12,7 +12,7 @@ from django.views.decorators.cache import never_cache
 from django.views.decorators.debug import sensitive_post_parameters
 from django.views.decorators.http import require_http_methods
 
-from .accounts import prepare_user, replace_password
+from .accounts import prepare_password, prepare_user
 from .admin_forms import AccountForm, BlockedRecoveryEmailsForm
 from .models import BlockedRecoveryEmail, User, normalize_identifier
 
@@ -92,27 +92,30 @@ def blocked_email_remove(request, pk):
 def user_edit(request, pk=None):
     """Create or update an account and show generated credentials only after commit."""
     account = get_object_or_404(User, pk=pk) if pk is not None else None
+    form = AccountForm(request.POST if request.method == "POST" else None, instance=account)
     if request.method == "POST":
         try:
-            with transaction.atomic():
-                check_administrator(request)
-                # Reload rather than overwrite account changes from a stale read.
-                account = get_object_or_404(User, pk=pk) if pk is not None else None
-                form = AccountForm(request.POST, instance=account)
-                if form.is_valid():
-                    if account is None:
-                        data = form.cleaned_data
-                        user, password, _ = prepare_user(
-                            username=data["username"], email=data["email"], admin=data["is_staff"],
-                            **{key: data[key] for key in ("first_name", "last_name", "display_name",
-                                                        "scoped_affiliation", "is_active")})
+            user, password = None, None
+            if form.is_valid():
+                if pk is None:
+                    data = form.cleaned_data
+                    # Password hashing must finish before SQLite takes its
+                    # IMMEDIATE write lock for authorization and persistence.
+                    user, password, _ = prepare_user(
+                        username=data["username"], email=data["email"], admin=data["is_staff"],
+                        **{key: data[key] for key in ("first_name", "last_name", "display_name",
+                                                    "scoped_affiliation", "is_active")})
+                with transaction.atomic():
+                    check_administrator(request)
+                    if pk is None:
+                        # User.save revalidates uniqueness and model invariants.
                         user.save()
                     else:
-                        user = form.save()
-                        password = None
-                    form.save_groups(user)
-                else:
-                    user = None
+                        account = get_object_or_404(User, pk=pk)
+                        form = AccountForm(request.POST, instance=account)
+                        user = form.save() if form.is_valid() else None
+                    if user is not None:
+                        form.save_groups(user)
             if user is not None:
                 if password is not None:
                     return render(request, "idp/admin_password.html", {"account": user, "password": password})
@@ -120,8 +123,6 @@ def user_edit(request, pk=None):
                 return redirect("idp_admin:users")
         except (ValidationError, IntegrityError) as exc:
             form.add_error(None, validation_message(exc))
-    else:
-        form = AccountForm(instance=account)
     return render(request, "idp/admin_user_form.html", {"form": form, "account": account})
 
 
@@ -134,13 +135,20 @@ def user_action(request, pk, action):
     error = None
     if request.method == "POST":
         try:
+            prepared = account
+            if action == "reset":
+                password = prepare_password(prepared)
             with transaction.atomic():
                 check_administrator(request)
                 account = get_object_or_404(User, pk=pk)
                 if action == "delete":
                     account.delete()
                 else:
-                    account, password = replace_password(account.username)
+                    account.password = prepared.password
+                    # Preserve Django's password_changed callbacks without hashing
+                    # again or overwriting profile changes made during hashing.
+                    account._password = prepared._password
+                    account.save(update_fields=["password"])
             if action == "reset":
                 return render(request, "idp/admin_password.html", {"account": account, "password": password})
             messages.success(request, "Account deleted.")
