@@ -169,11 +169,15 @@ also have an **IdP admin** link in the header. Ordinary accounts receive a 403.
 The built-in Django `/admin/` remains disabled.
 
 The interface provides searchable, paginated accounts, creation and editing,
-comma-separated group membership, activation and administrator status, password
+group membership, activation and administrator status, password
 replacement, and confirmed deletion. Groups never grant administrative access.
-Group membership uses a single CSV row; quote names containing commas, quotes,
-or newlines (for example, `Students, "cn=staff,ou=groups"`). Existing names are
-serialized with quoting so unrelated profile edits preserve them unchanged.
+Existing memberships are displayed as a JSON array, for example,
+`["Students", "cn=staff,ou=groups", "multi\nline"]`. Embedded line breaks are
+escaped, so browser textarea normalization cannot change a group's name during
+an unrelated profile edit. Input also accepts a single CSV row such as
+`Students, "cn=staff,ou=groups"`; quote CSV names beginning with `[` to distinguish
+them from a JSON array. JSON input must be an array of strings; malformed input
+is rejected before any memberships change.
 The final active administrator cannot be disabled, demoted, or deleted.
 
 Creation and password replacement display a random 24-character password only

@@ -1,4 +1,5 @@
 """Account administration authorization, validation, and Unicode search regressions."""
+import json
 from unittest.mock import patch
 
 from django.contrib.auth.models import Group
@@ -124,6 +125,45 @@ class AdminTests(TestCase):
             response = self.client.post(self.url("edit"), self.payload(group_names=value))
             self.assertIn("group_names", response.context["form"].errors)
         self.assertFalse(self.account.groups.exists())
+
+    def test_browser_normalized_group_submission_preserves_embedded_line_breaks(self):
+        """Keep exact memberships when a browser converts textarea line breaks to CRLF."""
+        names = ["multi\nline", "windows\r\nline", "bare\rreturn", "literal\\n", "[staff]",
+                 'cn=staff,ou=groups', 'He said "hello"', ' padded ']
+        self.account.groups.set([Group.objects.create(name=name) for name in names])
+        original_ids = set(self.account.groups.values_list("pk", flat=True))
+        initial = self.client.get(self.url("edit")).context["form"]["group_names"].value()
+        self.assertCountEqual(json.loads(initial), names)
+        self.assertNotIn("\n", initial)
+        self.assertNotIn("\r", initial)
+        # Also model an administrator formatting the array across multiple lines.
+        # Browser normalization must change only JSON whitespace, not group data.
+        pretty = json.dumps(json.loads(initial), indent=2)
+        for value in [initial, pretty]:
+            with self.subTest(formatted=value == pretty):
+                submitted = value.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n")
+                response = self.client.post(self.url("edit"), self.payload(
+                    display_name="Unrelated profile edit", group_names=submitted))
+                self.assertRedirects(response, self.home)
+                self.assertCountEqual(self.account.groups.values_list("name", flat=True), names)
+                self.assertEqual(set(self.account.groups.values_list("pk", flat=True)), original_ids)
+                self.assertEqual(Group.objects.count(), len(names))
+
+    def test_group_json_validates_types_deduplicates_and_rejects_invalid_input(self):
+        """Reject malformed or non-string JSON memberships without partial group changes."""
+        form = AccountForm(self.payload(group_names='["Students", "Students", "cn=staff,ou=groups"]'),
+                           instance=self.account)
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.cleaned_data["group_names"], ["Students", "cn=staff,ou=groups"])
+        for value in ['["unclosed', '[42]', '[null]', '[{}]', json.dumps(["x" * 151])]:
+            with self.subTest(value=value):
+                response = self.client.post(self.url("edit"), self.payload(group_names=value))
+                self.assertIn("group_names", response.context["form"].errors)
+                self.assertFalse(Group.objects.exists())
+        # A CSV name beginning with '[' remains available by quoting that name.
+        form = AccountForm(self.payload(group_names='"[staff]"'), instance=self.account)
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.cleaned_data["group_names"], ["[staff]"])
 
     def test_duplicates_and_invalid_groups_do_not_partially_write(self):
         """Reject all account and group changes when any submitted field is invalid."""
