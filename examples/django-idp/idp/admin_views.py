@@ -14,13 +14,15 @@ from django.views.decorators.http import require_http_methods
 
 from .accounts import prepare_user, replace_password
 from .admin_forms import AccountForm, BlockedRecoveryEmailsForm
-from .models import BlockedRecoveryEmail, User
+from .models import BlockedRecoveryEmail, User, normalize_identifier
 
 
 def administrator_required(view):
+    """Require an active administrator and prevent caching of administrative responses."""
     @wraps(view)
     @never_cache
     def wrapped(request, *args, **kwargs):
+        """Redirect anonymous users and reject authenticated non-administrators."""
         if not request.user.is_authenticated:
             return redirect_to_login(request.get_full_path())
         if not request.user.is_active or not request.user.is_staff:
@@ -30,22 +32,26 @@ def administrator_required(view):
 
 
 def check_administrator(request):
+    """Recheck current privileges inside the transaction that changes account data."""
     # Recheck privileges inside the write transaction, including on SQLite.
     if not User.objects.filter(pk=request.user.pk, is_active=True, is_staff=True).exists():
         raise PermissionDenied
 
 
 def validation_message(exc):
+    """Expose validation errors while keeping database conflict details private."""
     return " ".join(exc.messages) if isinstance(exc, ValidationError) else "Account conflicts with an existing account."
 
 
 @administrator_required
 @require_http_methods(["GET"])
 def user_list(request):
+    """Search normalized identifiers and original display names, then paginate accounts."""
     query = request.GET.get("q", "").strip()
     users = User.objects.order_by("username")
     if query:
-        users = users.filter(Q(username__icontains=query) | Q(email__icontains=query)
+        identifier = normalize_identifier(query)
+        users = users.filter(Q(username__icontains=identifier) | Q(email__icontains=identifier)
                              | Q(display_name__icontains=query))
     page = Paginator(users, 50).get_page(request.GET.get("page"))
     return render(request, "idp/admin_users.html", {"page": page, "query": query})
@@ -54,6 +60,7 @@ def user_list(request):
 @administrator_required
 @require_http_methods(["GET", "POST"])
 def blocked_emails(request):
+    """List blocked addresses and atomically add a fully validated address batch."""
     form = BlockedRecoveryEmailsForm(request.POST if request.method == "POST" else None)
     if request.method == "POST" and form.is_valid():
         with transaction.atomic():
@@ -71,6 +78,7 @@ def blocked_emails(request):
 @administrator_required
 @require_http_methods(["POST"])
 def blocked_email_remove(request, pk):
+    """Remove one blocked address through an administrator-authorized POST."""
     with transaction.atomic():
         check_administrator(request)
         get_object_or_404(BlockedRecoveryEmail, pk=pk).delete()
@@ -82,6 +90,7 @@ def blocked_email_remove(request, pk):
 @sensitive_post_parameters()
 @require_http_methods(["GET", "POST"])
 def user_edit(request, pk=None):
+    """Create or update an account and show generated credentials only after commit."""
     account = get_object_or_404(User, pk=pk) if pk is not None else None
     if request.method == "POST":
         try:
@@ -120,6 +129,7 @@ def user_edit(request, pk=None):
 @sensitive_post_parameters()
 @require_http_methods(["GET", "POST"])
 def user_action(request, pk, action):
+    """Confirm deletion or password replacement while retaining model safeguards."""
     account = get_object_or_404(User, pk=pk)
     error = None
     if request.method == "POST":

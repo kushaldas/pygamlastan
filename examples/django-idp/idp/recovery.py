@@ -18,10 +18,11 @@ from django.utils.decorators import method_decorator
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_http_methods
 
-from .models import BlockedRecoveryEmail, RecoveryRateLimit, User, normalize_identifier
+from .models import BlockedRecoveryEmail, RecoveryRateLimit, RecoveryRequest, User, normalize_identifier
 
 
 def recovery_blocked(email):
+    """Check the blocklist using the same normalization as account email."""
     return BlockedRecoveryEmail.objects.filter(email=normalize_identifier(email)).exists()
 
 
@@ -64,22 +65,30 @@ def consume_limits(quotas):
 
 
 def too_many_requests(seconds):
+    """Return a throttled response with the remaining quota-window delay."""
     response = HttpResponse("Too many password reset attempts. Please try again later.", status=429)
     response["Retry-After"] = str(seconds)
     return response
 
 
 class RecoveryForm(PasswordResetForm):
+    """Reuse Django reset tokens with current eligibility and delivery-time blocking."""
+    requested_at = None
+
     def clean_email(self):
+        """Normalize an already validated email address for quotas and lookup."""
         return normalize_identifier(self.cleaned_data["email"])
 
     def get_users(self, email):
+        """Select currently eligible accounts that existed when the request was queued."""
         if recovery_blocked(email):
             return ()
-        return super().get_users(email)
+        return (user for user in super().get_users(email)
+                if self.requested_at is None or user.date_joined <= self.requested_at)
 
     def send_mail(self, subject_template_name, email_template_name, context, from_email,
                   to_email, html_email_template_name=None):
+        """Recheck recipient blocking immediately before SMTP or console delivery."""
         # Recheck at delivery time, including when using the console mailer.
         if recovery_blocked(to_email):
             return
@@ -87,14 +96,48 @@ class RecoveryForm(PasswordResetForm):
                                  from_email, to_email, html_email_template_name)
 
 
+def process_recovery_request():
+    """Claim one queued request, send outside the write lock, and remove its address."""
+    now = timezone.now()
+    with transaction.atomic():
+        # Discard requests older than a reset link's lifetime, including crashed claims.
+        RecoveryRequest.objects.filter(created_at__lt=now - timedelta(hours=1)).delete()
+        job = (RecoveryRequest.objects.select_for_update()
+               .filter(available_at__lte=now).order_by("pk").first())
+        if job is None:
+            return False
+        # A worker crash leaves a bounded lease; another worker can reclaim it.
+        timeout = settings.MAILERS["default"].get("OPTIONS", {}).get("timeout") or 15
+        job.available_at = now + timedelta(seconds=max(300, timeout + 60))
+        job.save(update_fields=["available_at"])
+
+    try:
+        form = RecoveryForm({"email": job.email})
+        form.requested_at = job.created_at
+        if form.is_valid():
+            form.save(
+                domain_override="IdP", from_email=settings.DEFAULT_FROM_EMAIL,
+                email_template_name="idp/password_reset_email.txt",
+                subject_template_name="idp/password_reset_subject.txt",
+                extra_email_context={"reset_base_url": settings.SAML_IDP_BASE_URL},
+            )
+    finally:
+        # Django logs SMTP failures without raising. Do not retry them or fall back
+        # to console delivery; the owner can request another link under the quotas.
+        RecoveryRequest.objects.filter(pk=job.pk).delete()
+    return True
+
+
 @method_decorator(never_cache, name="dispatch")
 @method_decorator(require_http_methods(["GET", "POST"]), name="dispatch")
 class RecoveryView(PasswordResetView):
+    """Apply quotas and queue addresses without disclosing account eligibility."""
     form_class = RecoveryForm
     template_name = "idp/password_reset_form.html"
     success_url = reverse_lazy("idp:password_reset_done")
 
     def post(self, request, *args, **kwargs):
+        """Charge shared request quotas before validating or queueing the supplied address."""
         # Charge even unknown addresses and malformed submissions identically.
         self.blocked = consume_limits([
             ("request-ip", client_ip(request), settings.SAML_IDP_RESET_IP_LIMIT, 900),
@@ -106,25 +149,23 @@ class RecoveryView(PasswordResetView):
         return super().post(request, *args, **kwargs)
 
     def form_valid(self, form):
+        """Queue permitted addresses without checking eligibility or sending mail."""
         if "request-email" not in self.blocked:
-            # Never derive reset URLs from the incoming Host header.
-            form.save(
-                domain_override="IdP", token_generator=self.token_generator,
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                email_template_name="idp/password_reset_email.txt",
-                subject_template_name="idp/password_reset_subject.txt",
-                extra_email_context={"reset_base_url": settings.SAML_IDP_BASE_URL},
-            )
+            # No user/blocklist lookup or mail delivery may occur on this path:
+            # every permitted address receives exactly the same queue operation.
+            RecoveryRequest.objects.create(email=form.cleaned_data["email"])
         return redirect(self.success_url)
 
 
 @method_decorator(never_cache, name="dispatch")
 @method_decorator(require_http_methods(["GET", "POST"]), name="dispatch")
 class RecoveryConfirmView(PasswordResetConfirmView):
+    """Accept a valid reset token once, with transactional policy revalidation."""
     template_name = "idp/password_reset_confirm.html"
     success_url = reverse_lazy("idp:password_reset_complete")
 
     def dispatch(self, request, *args, **kwargs):
+        """Throttle completion attempts before token and password processing."""
         if request.method == "POST":
             blocked = consume_limits([
                 ("confirm-ip", client_ip(request), settings.SAML_IDP_RESET_CONFIRM_LIMIT, 900),
@@ -134,11 +175,13 @@ class RecoveryConfirmView(PasswordResetConfirmView):
         return super().dispatch(request, *args, **kwargs)
 
     def get_user(self, uidb64):
+        """Reject disabled, unusable-password, or blocked accounts before displaying a reset form."""
         user = super().get_user(uidb64)
         return user if (user and user.is_active and user.has_usable_password()
                         and not recovery_blocked(user.email)) else None
 
     def form_valid(self, form):
+        """Revalidate the token under the write lock before committing the password."""
         # Hash outside the write lock. Recheck the token and active status while
         # holding it so concurrent resets/replacements cannot reuse a token.
         prepared = form.save(commit=False)

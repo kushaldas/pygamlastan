@@ -17,4 +17,9 @@ if [ -n "$SAML_IDP_MDQ_URL" ] && [ -n "$SAML_IDP_METADATA_CERT" ] && [ ! -f "$SA
     echo "         On the host run:  just swamid-cert   (writes ./data/swamid-signing.pem)"
 fi
 
+# The normal HTTP service also needs a consumer for queued password recovery.
+# One-off management commands keep their existing foreground-only behavior.
+if [ "$1" = "gunicorn" ]; then
+    exec python -m config.serve "$@"
+fi
 exec "$@"

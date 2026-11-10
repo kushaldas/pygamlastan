@@ -6,6 +6,7 @@ from .models import User, normalize_identifier
 
 
 class AccountForm(forms.ModelForm):
+    """Allow only administrator-editable profile, role, and membership fields."""
     required_css_class = "required"
 
     group_names = forms.CharField(
@@ -21,12 +22,14 @@ class AccountForm(forms.ModelForm):
         help_texts = {"is_staff": "Can manage all IdP accounts."}
 
     def __init__(self, *args, **kwargs):
+        """Initialize account fields and populate the current group memberships."""
         super().__init__(*args, **kwargs)
         if self.instance.pk:
             self.fields["group_names"].initial = ", ".join(
                 self.instance.groups.order_by("name").values_list("name", flat=True))
 
     def clean_group_names(self):
+        """Trim and deduplicate group names before any database writes."""
         names = list(dict.fromkeys(
             name.strip() for name in self.cleaned_data["group_names"].split(",") if name.strip()))
         if any(len(name) > 150 for name in names):
@@ -34,11 +37,13 @@ class AccountForm(forms.ModelForm):
         return names
 
     def save_groups(self, user):
+        """Create missing groups and replace the account membership set."""
         user.groups.set([Group.objects.get_or_create(name=name)[0]
                          for name in self.cleaned_data["group_names"]])
 
 
 class BlockedRecoveryEmailsForm(forms.Form):
+    """Validate a complete batch of addresses before changing the recovery blocklist."""
     required_css_class = "required"
     emails = forms.CharField(
         label="Email addresses", max_length=50000,
@@ -47,6 +52,7 @@ class BlockedRecoveryEmailsForm(forms.Form):
     )
 
     def clean_emails(self):
+        """Validate the complete normalized address batch before saving any entries."""
         addresses = []
         validator = forms.EmailField(max_length=254)
         for value in self.cleaned_data["emails"].replace(",", "\n").splitlines():

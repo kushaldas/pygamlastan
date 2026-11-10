@@ -44,6 +44,7 @@
     confirmation.setAttribute('aria-describedby',
       [confirmation.getAttribute('aria-describedby'), status.id].filter(Boolean).join(' '));
 
+    /** Update the match icon and accessible status without exposing passwords. */
     function updateMatch() {
       const hasValues = password.value.length > 0 && confirmation.value.length > 0;
       const matches = hasValues && password.value === confirmation.value;

@@ -13,7 +13,11 @@
     input, textarea { padding: .45rem; width: 100%; box-sizing: border-box; }
     button { padding: .55rem 1.1rem; margin-top: 1rem; cursor: pointer; }
     .err { color: #b91c1c; }
-    header { display: flex; flex-wrap: wrap; gap: .5rem 1rem; justify-content: space-between; align-items: baseline; }
+    header { display: flex; flex-wrap: wrap; gap: .75rem 1rem; justify-content: space-between; align-items: center; }
+    .site-brand { display: flex; align-items: center; gap: .75rem; }
+    .retro-home { display: inline-flex; flex-shrink: 0; padding: 3px; border: 2px outset #d4d4d8; background: #f4f4f5; }
+    .retro-home:active { border-style: inset; }
+    .retro-home img { display: block; width: 70px; height: 30px; }
     footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #e4e4e7; }
     .profile-heading { font-family: Georgia, serif; font-size: 2.4rem; font-weight: 400; margin-bottom: .5rem; }
     .profile-details { display: grid; grid-template-columns: minmax(6rem, 1fr) minmax(0, 3fr); gap: .6rem 1rem; padding: 1rem 0; border-block: 1px solid #e4e4e7; }
@@ -41,7 +45,10 @@
 </head>
 <body>
   <header>
-    <span><strong>Kushal's pygamlastan IdP for teaching</strong></span>
+    <span class="site-brand">
+      <a class="retro-home" href="{% url 'idp:index' %}"><img src="https://blob.gifcities.org/gifcities/WFK6P4IAS6OXPXZX3TFLYNIAFMGWVF6G.gif" width="70" height="30" alt="Home"></a>
+      <strong>Kushal's pygamlastan IdP for teaching</strong>
+    </span>
     {% if user.is_authenticated %}
       {% if user.is_staff %}<a href="{% url 'idp_admin:users' %}">IdP admin</a>{% endif %}
       <span><a href="{% url 'idp:profile' %}">{{ user.get_username }}</a> <form method="post" action="{% url 'idp:logout' %}" style="display:inline">{% csrf_token %}<button type="submit">Log out of connected services</button></form></span>

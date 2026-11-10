@@ -7,6 +7,7 @@ from django.core.exceptions import ValidationError
 from django.db import models, router, transaction
 from django.db.models import Q
 from django.db.models.functions import Lower
+from django.utils import timezone
 
 
 def normalize_identifier(value):
@@ -107,9 +108,17 @@ class BlockedRecoveryEmail(models.Model):
         ordering = ["email"]
 
     def save(self, *args, **kwargs):
+        """Validate and normalize blocked addresses before enforcing uniqueness."""
         self.email = normalize_identifier(self.email)
         self.full_clean()
         return super().save(*args, **kwargs)
+
+
+class RecoveryRequest(models.Model):
+    """Queued addresses only; eligibility and token creation happen in the worker."""
+    email = models.EmailField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    available_at = models.DateTimeField(default=timezone.now, db_index=True)
 
 
 class LogoutFlow(models.Model):

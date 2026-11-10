@@ -9,7 +9,8 @@ progress. The account model, CLI bootstrap, JSON importer, password policy, and
 case-insensitive username/email login are implemented. Built-in Django admin is
 disabled. The custom `/idp-admin/` account-management UI is implemented, and
 SMTP settings are available through environment variables. Rate-limited password
-recovery is implemented. Login throttling, the persistent NameID registry, and
+recovery uses a shared SQLite queue and a background delivery worker. Login
+throttling, the persistent NameID registry, and
 database SP registry are still pending.
 Signed SAML Single Logout is implemented with the sibling Django SP.
 Until those steps land, treat this as a local teaching example.
@@ -158,6 +159,9 @@ retrying; the password is not changed and the ended login is not restored.
 
 ## IdP administration
 
+The navigation's retro Home button loads directly from
+[GIFCities](https://blob.gifcities.org/gifcities/WFK6P4IAS6OXPXZX3TFLYNIAFMGWVF6G.gif).
+
 Open `/idp-admin/` on your IdP hostname (for example,
 `http://localhost:8000/idp-admin/` for the standalone container). Sign in with an
 active account whose administrator flag is enabled. Signed-in administrators
@@ -188,6 +192,23 @@ unknown, disabled, blocked, and email-limited accounts. Reset links use `SAML_ID
 never the request Host header, and expire after one hour. Opening a link does
 not change the password. Successful completion invalidates the link and all
 previous IdP sessions on their next request, and requires signing in again.
+
+Permitted requests enqueue only the normalized address; account eligibility,
+blocklist checks, token creation, and SMTP/console delivery run in a background
+worker. HTTP responses never wait on SMTP, including for unknown or blocked
+addresses. The worker releases SQLite's write lock before delivery and rechecks
+the blocklist immediately before sending. Accounts created after a request was
+queued do not receive a reset from that earlier request.
+
+The normal container entrypoint supervises Gunicorn and the delivery worker
+together, forwarding shutdown and stopping the service if either process exits.
+For local development, run `just recovery-worker` in a second terminal alongside
+`just run`. Use `just recovery-worker --once` to drain currently available jobs
+and exit. Equivalently, use `python manage.py idp_recovery_worker [--once]`.
+Queued addresses are deleted after processing, and jobs older than one hour are
+discarded. A crashed worker's claim becomes available again after its lease
+(at least five minutes, extended for longer configured SMTP timeouts). SMTP
+failures are logged without automatic retries or console fallback.
 
 Administrators can manage a persistent address blocklist at
 `/idp-admin/blocked-emails/`, linked from the account list. Add addresses one per
