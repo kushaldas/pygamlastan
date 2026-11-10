@@ -1,0 +1,21 @@
+{% extends "idp/base.html" %}
+{% block title %}{% if account %}Edit account{% else %}Create account{% endif %} | IdP admin{% endblock %}
+{% block content %}
+<main>
+  <p><a href="{% url 'idp_admin:users' %}">All accounts</a></p>
+  <h1 class="profile-heading">{% if account %}Edit {{ account.username }}{% else %}Create account{% endif %}</h1>
+  {% if not account %}<p>A random password will be generated and shown once after you create the account.</p>{% endif %}
+  <form method="post" class="profile-form">
+    {% csrf_token %}
+    <p>Fields marked with an asterisk (*) are required.</p>
+    {{ form.as_p }}
+    <button type="submit">{% if account %}Save account{% else %}Create account{% endif %}</button>
+  </form>
+  {% if account %}
+  <nav class="admin-actions" aria-label="Account actions">
+    <a href="{% url 'idp_admin:user_reset' account.pk %}">Replace password</a>
+    <a class="err" href="{% url 'idp_admin:user_delete' account.pk %}">Delete account</a>
+  </nav>
+  {% endif %}
+</main>
+{% endblock %}

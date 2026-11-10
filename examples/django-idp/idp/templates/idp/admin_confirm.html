@@ -1,0 +1,18 @@
+{% extends "idp/base.html" %}
+{% block title %}Confirm account action | IdP admin{% endblock %}
+{% block content %}
+<main>
+  <h1 class="profile-heading">{% if action == "delete" %}Delete account{% else %}Replace password{% endif %}</h1>
+  {% if error %}<p class="err" role="alert">{{ error }}</p>{% endif %}
+  {% if action == "delete" %}
+  <p>Delete <strong>{{ account.username }}</strong> ({{ account.email }})? This permanently removes the account. A new account will have a different identity.</p>
+  {% else %}
+  <p>Generate a new password for <strong>{{ account.username }}</strong>? Their current password will stop working and previous sessions must sign in again.</p>
+  {% endif %}
+  <form method="post">
+    {% csrf_token %}
+    <button type="submit">{% if action == "delete" %}Delete account permanently{% else %}Generate replacement password{% endif %}</button>
+  </form>
+  <p><a href="{% url 'idp_admin:user_edit' account.pk %}">Cancel</a></p>
+</main>
+{% endblock %}

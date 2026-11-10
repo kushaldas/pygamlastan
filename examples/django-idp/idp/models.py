@@ -91,6 +91,27 @@ class LogoutReplay(models.Model):
     expires_at = models.DateTimeField(db_index=True)
 
 
+class RecoveryRateLimit(models.Model):
+    """Shared recovery quotas; keys are HMACs rather than email/IP addresses."""
+    key = models.CharField(max_length=64, primary_key=True)
+    count = models.PositiveIntegerField(default=0)
+    expires_at = models.DateTimeField(db_index=True)
+
+
+class BlockedRecoveryEmail(models.Model):
+    """Addresses that must not receive password recovery messages."""
+    email = models.EmailField(unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["email"]
+
+    def save(self, *args, **kwargs):
+        self.email = normalize_identifier(self.email)
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
 class LogoutFlow(models.Model):
     token = models.CharField(max_length=64, primary_key=True)
     origin = models.JSONField(null=True)

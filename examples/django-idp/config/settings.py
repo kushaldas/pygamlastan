@@ -85,6 +85,40 @@ TIME_ZONE = "UTC"
 USE_I18N = True
 USE_TZ = True
 
+# --- Outgoing email --------------------------------------------------------
+
+_email_host = os.environ.get("EMAIL_HOST") or "smtp.gmail.com"
+_email_port = int(os.environ.get("EMAIL_PORT", "587"))
+_email_use_tls = _env_bool("EMAIL_USE_TLS", True)
+_email_use_ssl = _env_bool("EMAIL_USE_SSL", False)
+_email_host_user = os.environ.get("EMAIL_HOST_USER", "")
+_email_host_password = os.environ.get("EMAIL_HOST_PASSWORD", "")
+DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL") or _email_host_user or "idp@localhost"
+_email_timeout = int(os.environ.get("EMAIL_TIMEOUT", "15"))
+# An explicit host also supports SMTP relays without username/password auth.
+_smtp_configured = bool(os.environ.get("EMAIL_HOST") or _email_host_user or _email_host_password)
+_email_backend = os.environ.get("EMAIL_BACKEND") or (
+    "django.core.mail.backends.smtp.EmailBackend" if _smtp_configured
+    else "django.core.mail.backends.console.EmailBackend"
+)
+MAILERS = {"default": {"BACKEND": _email_backend}}
+if _email_backend == "django.core.mail.backends.smtp.EmailBackend":
+    MAILERS["default"]["OPTIONS"] = {
+        "host": _email_host, "port": _email_port, "username": _email_host_user,
+        "password": _email_host_password, "use_tls": _email_use_tls,
+        "use_ssl": _email_use_ssl, "timeout": _email_timeout,
+    }
+
+PASSWORD_RESET_TIMEOUT = 3600
+SAML_IDP_RESET_IP_LIMIT = int(os.environ.get("SAML_IDP_RESET_IP_LIMIT", "10"))
+SAML_IDP_RESET_EMAIL_LIMIT = int(os.environ.get("SAML_IDP_RESET_EMAIL_LIMIT", "5"))
+SAML_IDP_RESET_CONFIRM_LIMIT = int(os.environ.get("SAML_IDP_RESET_CONFIRM_LIMIT", "20"))
+# Only trust forwarding headers from explicitly configured proxy IPs/subnets.
+SAML_IDP_TRUSTED_PROXIES = [
+    value.strip() for value in os.environ.get("SAML_IDP_TRUSTED_PROXIES", "").split(",")
+    if value.strip()
+]
+
 # --- Static files (served by WhiteNoise) -----------------------------------
 
 STATIC_URL = "static/"
