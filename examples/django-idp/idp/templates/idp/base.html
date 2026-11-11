@@ -5,36 +5,71 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Kushal's pygamlastan IdP for teaching{% endblock %}</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 46rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; color: #18181b; }
+    body { font-family: system-ui, sans-serif; max-width: 72rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; color: #18181b; }
+    .page-content { max-width: 46rem; margin: 0 auto; }
     code, pre { background: #f4f4f5; padding: .1rem .3rem; border-radius: .2rem; word-break: break-all; }
     .card { border: 1px solid #e4e4e7; border-radius: .5rem; padding: 1rem; margin: 1rem 0; }
     a { color: #2563eb; }
     label { display: block; margin: .6rem 0 .2rem; font-weight: 600; }
-    input { padding: .45rem; width: 100%; box-sizing: border-box; }
+    input, textarea { padding: .45rem; width: 100%; box-sizing: border-box; }
     button { padding: .55rem 1.1rem; margin-top: 1rem; cursor: pointer; }
     .err { color: #b91c1c; }
-    header { display: flex; flex-wrap: wrap; gap: .5rem 1rem; justify-content: space-between; align-items: baseline; }
-    footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #e4e4e7; }
+    .site-header { display: flex; flex-wrap: wrap; gap: 1rem 1.5rem; align-items: center; padding-bottom: 1rem; margin-bottom: 2rem; border-bottom: 1px solid #a1a1aa; }
+    .site-brand { display: flex; flex: 1 1 26rem; min-width: 0; align-items: center; gap: .75rem; }
+    .account-nav { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem 1rem; margin-left: auto; }
+    .account-nav a { overflow-wrap: anywhere; }
+    .account-nav form { margin: 0; }
+    .account-nav button { margin: 0; }
+    @media (max-width: 48rem) {
+      .site-brand { flex-basis: 100%; }
+      .account-nav { width: 100%; margin-left: 0; }
+    }
+    .retro-home { display: inline-flex; flex-shrink: 0; padding: 3px; border: 2px outset #d4d4d8; background: #f4f4f5; }
+    .retro-home:active { border-style: inset; }
+    .retro-home img { display: block; width: 70px; height: 30px; }
+    .login-heading img { display: block; max-width: 100%; height: auto; }
+    footer { max-width: 46rem; margin: 2rem auto 0; padding-top: 1rem; border-top: 1px solid #e4e4e7; }
     .profile-heading { font-family: Georgia, serif; font-size: 2.4rem; font-weight: 400; margin-bottom: .5rem; }
     .profile-details { display: grid; grid-template-columns: minmax(6rem, 1fr) minmax(0, 3fr); gap: .6rem 1rem; padding: 1rem 0; border-block: 1px solid #e4e4e7; }
     .profile-details dt { color: #52525b; }
     .profile-details dd { margin: 0; overflow-wrap: anywhere; }
     .profile-form { max-width: 34rem; }
+    .admin-table { width: 100%; border-collapse: collapse; margin: 1.5rem 0; }
+    .admin-table th, .admin-table td { text-align: left; padding: .7rem .5rem; border-bottom: 1px solid #e4e4e7; overflow-wrap: anywhere; }
+    .table-scroll { overflow-x: auto; }
+    .profile-form input[type="checkbox"] { width: auto; }
+    .admin-actions { display: flex; flex-wrap: wrap; gap: 1rem; margin: 1rem 0; }
+    .generated-password { display: block; padding: 1rem; user-select: all; font-size: 1.1rem; }
     .profile-form .helptext { display: block; margin-top: .4rem; color: #52525b; font-size: .9rem; }
     .profile-form .errorlist { color: #b91c1c; }
+    .profile-form .required > label::after { content: " *"; color: #b91c1c; }
+    .password-confirmation { display: block; position: relative; }
+    .password-confirmation input { padding-right: 2.5rem; }
+    .password-match-indicator { position: absolute; right: .75rem; top: 50%; transform: translateY(-50%); font-size: 1.2rem; font-weight: 700; pointer-events: none; }
+    .password-confirmation.is-match .password-match-indicator { color: #166534; }
+    .password-confirmation.is-mismatch .password-match-indicator { color: #b91c1c; }
+    .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
     .notice { padding: .8rem 1rem; border-left: 3px solid #166534; background: #f0fdf4; }
-    input:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid #2563eb; outline-offset: 3px; }
+    input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid #2563eb; outline-offset: 3px; }
   </style>
 </head>
 <body>
-  <header>
-    <span><strong>Kushal's pygamlastan IdP for teaching</strong></span>
+  <header class="site-header">
+    <span class="site-brand">
+      <a class="retro-home" href="{% url 'idp:index' %}"><img src="https://blob.gifcities.org/gifcities/WFK6P4IAS6OXPXZX3TFLYNIAFMGWVF6G.gif" width="70" height="30" alt="Home"></a>
+      <strong>Kushal's pygamlastan IdP for teaching</strong>
+    </span>
     {% if user.is_authenticated %}
-      <span><a href="{% url 'idp:profile' %}">{{ user.get_username }}</a> <form method="post" action="{% url 'idp:logout' %}" style="display:inline">{% csrf_token %}<button type="submit">Log out of connected services</button></form></span>
+      <nav class="account-nav" aria-label="Account">
+        {% if user.is_staff %}<a href="{% url 'idp_admin:users' %}">IdP admin</a>{% endif %}
+        <a href="{% url 'idp:profile' %}">{{ user.get_username }}</a>
+        <form method="post" action="{% url 'idp:logout' %}">
+          {% csrf_token %}<button type="submit">Log out of connected services</button>
+        </form>
+      </nav>
     {% endif %}
   </header>
-  <hr>
-  {% block content %}{% endblock %}
+  <div class="page-content">{% block content %}{% endblock %}</div>
   <footer><a href="https://kushaldas.in">kushaldas.in</a></footer>
 </body>
 </html>

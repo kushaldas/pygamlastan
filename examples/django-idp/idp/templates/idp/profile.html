@@ -19,4 +19,47 @@
   </form>
   <p><a href="{% url 'idp:index' %}">Identity Provider details</a></p>
 </main>
+<script>
+  (() => {
+    const form = document.querySelector('.profile-form');
+    const password = form.elements.namedItem('new_password1');
+    const confirmation = form.elements.namedItem('new_password2');
+    if (!password || !confirmation) return;
+
+    const wrapper = document.createElement('span');
+    wrapper.className = 'password-confirmation';
+    confirmation.before(wrapper);
+    wrapper.append(confirmation);
+
+    const indicator = document.createElement('span');
+    indicator.className = 'password-match-indicator';
+    indicator.setAttribute('aria-hidden', 'true');
+    wrapper.append(indicator);
+
+    const status = document.createElement('span');
+    status.id = 'password-match-status';
+    status.className = 'visually-hidden';
+    status.setAttribute('role', 'status');
+    wrapper.after(status);
+    confirmation.setAttribute('aria-describedby',
+      [confirmation.getAttribute('aria-describedby'), status.id].filter(Boolean).join(' '));
+
+    /** Update the match icon and accessible status without exposing passwords. */
+    function updateMatch() {
+      const hasValues = password.value.length > 0 && confirmation.value.length > 0;
+      const matches = hasValues && password.value === confirmation.value;
+      wrapper.classList.toggle('is-match', matches);
+      wrapper.classList.toggle('is-mismatch', hasValues && !matches);
+      indicator.textContent = hasValues ? (matches ? '✓' : '×') : '';
+      const message = hasValues ? (matches ? 'Passwords match.' : 'Passwords do not match.') : '';
+      if (status.textContent !== message) status.textContent = message;
+    }
+
+    form.addEventListener('input', updateMatch);
+    form.addEventListener('change', updateMatch);
+    form.addEventListener('reset', () => setTimeout(updateMatch, 0));
+    window.addEventListener('pageshow', updateMatch);
+    updateMatch();
+  })();
+</script>
 {% endblock %}

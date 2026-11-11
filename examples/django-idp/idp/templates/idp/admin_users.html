@@ -1,0 +1,41 @@
+{% extends "idp/base.html" %}
+{% block title %}Accounts | IdP admin{% endblock %}
+{% block content %}
+<main>
+  <h1 class="profile-heading">IdP administration</h1>
+  <p>Manage accounts and access to this Identity Provider.</p>
+  {% for message in messages %}<p class="notice" role="status">{{ message }}</p>{% endfor %}
+  <nav class="admin-actions" aria-label="Administration">
+    <a href="{% url 'idp_admin:user_create' %}">Create account</a>
+    <a href="{% url 'idp_admin:blocked_emails' %}">Blocked recovery emails</a>
+  </nav>
+  <form method="get" role="search" class="profile-form">
+    <label for="account-search">Search accounts</label>
+    <input type="search" name="q" id="account-search" value="{{ query }}" placeholder="Username, email, or display name">
+    <button type="submit">Search</button>
+  </form>
+  <div class="table-scroll">
+    <table class="admin-table">
+      <caption>{{ page.paginator.count }} account{{ page.paginator.count|pluralize }}</caption>
+      <thead><tr><th scope="col">Username</th><th scope="col">Email</th><th scope="col">Status</th><th scope="col">Role</th></tr></thead>
+      <tbody>
+      {% for account in page %}
+        <tr>
+          <td><a href="{% url 'idp_admin:user_edit' account.pk %}">{{ account.username }}</a></td>
+          <td>{{ account.email }}</td>
+          <td>{{ account.is_active|yesno:"Active,Disabled" }}</td>
+          <td>{{ account.is_staff|yesno:"Administrator,User" }}</td>
+        </tr>
+      {% empty %}<tr><td colspan="4">No accounts found.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if page.has_other_pages %}
+  <nav class="admin-actions" aria-label="Account pages">
+    {% if page.has_previous %}<a href="?q={{ query|urlencode }}&amp;page={{ page.previous_page_number }}">Previous</a>{% endif %}
+    <span>Page {{ page.number }} of {{ page.paginator.num_pages }}</span>
+    {% if page.has_next %}<a href="?q={{ query|urlencode }}&amp;page={{ page.next_page_number }}">Next</a>{% endif %}
+  </nav>
+  {% endif %}
+</main>
+{% endblock %}

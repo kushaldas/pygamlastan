@@ -7,6 +7,7 @@ from django.core.exceptions import ValidationError
 from django.db import models, router, transaction
 from django.db.models import Q
 from django.db.models.functions import Lower
+from django.utils import timezone
 
 
 def normalize_identifier(value):
@@ -89,6 +90,35 @@ class SamlParticipant(models.Model):
 class LogoutReplay(models.Model):
     digest = models.CharField(max_length=64, primary_key=True)
     expires_at = models.DateTimeField(db_index=True)
+
+
+class RecoveryRateLimit(models.Model):
+    """Shared recovery quotas; keys are HMACs rather than email/IP addresses."""
+    key = models.CharField(max_length=64, primary_key=True)
+    count = models.PositiveIntegerField(default=0)
+    expires_at = models.DateTimeField(db_index=True)
+
+
+class BlockedRecoveryEmail(models.Model):
+    """Addresses that must not receive password recovery messages."""
+    email = models.EmailField(unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["email"]
+
+    def save(self, *args, **kwargs):
+        """Validate and normalize blocked addresses before enforcing uniqueness."""
+        self.email = normalize_identifier(self.email)
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class RecoveryRequest(models.Model):
+    """Queued addresses only; eligibility and token creation happen in the worker."""
+    email = models.EmailField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    available_at = models.DateTimeField(default=timezone.now, db_index=True)
 
 
 class LogoutFlow(models.Model):

@@ -71,6 +71,10 @@ collectstatic:
 run address="127.0.0.1:8000":
     DJANGO_DEBUG="${DJANGO_DEBUG:-1}" "$IDP_PYTHON" manage.py runserver "$1"
 
+# Deliver queued recovery emails alongside the local development server.
+recovery-worker *options:
+    "$IDP_PYTHON" manage.py idp_recovery_worker "$@"
+
 # Open the local Django shell.
 shell:
     "$IDP_PYTHON" manage.py shell

@@ -7,11 +7,13 @@ AuthnRequests and returns assertion-signed responses over HTTP POST.
 Implementation of [the account-management plan](IMPLEMENTATION_PLAN.md) is in
 progress. The account model, CLI bootstrap, JSON importer, password policy, and
 case-insensitive username/email login are implemented. Built-in Django admin is
-disabled. The custom `/idp-admin/` UI, password recovery and SMTP,
-throttling, persistent NameID registry, and database SP registry are still pending.
+disabled. The custom `/idp-admin/` account-management UI is implemented, and
+SMTP settings are available through environment variables. Rate-limited password
+recovery uses a shared SQLite queue and a background delivery worker. Login
+throttling, the persistent NameID registry, and
+database SP registry are still pending.
 Signed SAML Single Logout is implemented with the sibling Django SP.
-Until those steps land, use the CLI for account management and treat this as a
-local teaching example.
+Until those steps land, treat this as a local teaching example.
 
 ## Project commands and container build
 
@@ -61,6 +63,23 @@ different port or a reverse proxy; `just container-run 8080` exposes loopback
 port 8080. Override `IDP_ENV_FILE` to select another environment file and
 `IDP_IMAGE` to select another image tag. Shared Compose settings remain in
 `examples/.env` and `examples/docker-compose.yml`.
+
+For outgoing email, set `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, and
+`DEFAULT_FROM_EMAIL` in the standalone container's `.env`. SMTP defaults to
+`smtp.gmail.com`, port `587`, and STARTTLS; override these with `EMAIL_HOST`,
+`EMAIL_PORT`, and `EMAIL_USE_TLS`. For Gmail, use an app password without spaces.
+For implicit TLS, use port `465`, `EMAIL_USE_TLS=false`, and `EMAIL_USE_SSL=true`.
+The SMTP connection timeout is 15 seconds, configurable with `EMAIL_TIMEOUT`.
+Keep credentials out of Git, and
+rebuild and recreate the container after changing settings code; recreate it
+after changing environment variables. For the shared Compose stack, put these
+variables in `examples/.env`; Compose forwards them to the IdP container.
+
+Without an explicit SMTP host or credentials, Django's console mailer prints
+reset emails and their links to stdout/container logs. Set
+`EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend` to explicitly
+select this mode for testing. Configured SMTP failures are logged and never
+fall back to printing reset links.
 
 For local Python development:
 
@@ -137,6 +156,103 @@ operators can still replace another account's password using the commands below.
 If logout invalidates the session, or the session expires while the new password
 is being hashed, the change is rejected with HTTP 409. Sign in again before
 retrying; the password is not changed and the ended login is not restored.
+
+## IdP administration
+
+The navigation's retro Home button loads directly from
+[GIFCities](https://blob.gifcities.org/gifcities/WFK6P4IAS6OXPXZX3TFLYNIAFMGWVF6G.gif).
+
+Open `/idp-admin/` on your IdP hostname (for example,
+`http://localhost:8000/idp-admin/` for the standalone container). Sign in with an
+active account whose administrator flag is enabled. Signed-in administrators
+also have an **IdP admin** link in the header. Ordinary accounts receive a 403.
+The built-in Django `/admin/` remains disabled.
+
+The interface provides searchable, paginated accounts, creation and editing,
+group membership, activation and administrator status, password
+replacement, and confirmed deletion. Groups never grant administrative access.
+Existing memberships are displayed as a JSON array, for example,
+`["Students", "cn=staff,ou=groups", "multi\nline"]`. Embedded line breaks are
+escaped, so browser textarea normalization cannot change a group's name during
+an unrelated profile edit. Input also accepts a single CSV row such as
+`Students, "cn=staff,ou=groups"`; quote CSV names beginning with `[` to distinguish
+them from a JSON array. JSON input must be an array of strings; malformed input
+is rejected before any memberships change.
+The final active administrator cannot be disabled, demoted, or deleted.
+
+Creation and password replacement display a random 24-character password only
+in the result response; copy it before leaving. Plaintext passwords are never
+stored in sessions or messages. Password replacement invalidates previous IdP
+sessions on their next request. Deleting an account permanently removes its
+identity; recreating the username creates a new identity. Administrator email
+setup/resend actions and database-backed SP administration remain pending.
+
+Bootstrap or promote an administrator using the commands below, then rebuild
+and recreate the container to serve updated application code.
+
+## Forgot password
+
+The login page links to `/idp/password-reset/`. Enter the account email address;
+active accounts with a usable password receive a reset link by email (or in
+logs when SMTP is not configured). The confirmation is identical for eligible,
+unknown, disabled, blocked, and email-limited accounts. Reset links use `SAML_IDP_BASE_URL`,
+never the request Host header, and expire after one hour. Opening a link does
+not change the password. Successful completion invalidates the link and all
+previous IdP sessions on their next request, and requires signing in again.
+
+Permitted requests enqueue only the normalized address; account eligibility,
+blocklist checks, token creation, and SMTP/console delivery run in a background
+worker. HTTP responses never wait on SMTP, including for unknown or blocked
+addresses. The worker releases SQLite's write lock before delivery and rechecks
+the blocklist immediately before sending. Accounts created after a request was
+queued do not receive a reset from that earlier request.
+
+The normal container entrypoint supervises Gunicorn and the delivery worker
+together, forwarding shutdown and stopping the service if either process exits.
+For local development, run `just recovery-worker` in a second terminal alongside
+`just run`. Use `just recovery-worker --once` to drain currently available jobs
+and exit. Equivalently, use `python manage.py idp_recovery_worker [--once]`.
+Queued addresses are deleted after processing, and jobs older than one hour are
+discarded. A crashed worker's claim becomes available again after its lease
+(at least five minutes, extended for longer configured SMTP timeouts). SMTP
+failures are logged without automatic retries or console fallback.
+
+Administrators can manage a persistent address blocklist at
+`/idp-admin/blocked-emails/`, linked from the account list. Add addresses one per
+line or separated by commas; matching uses the same case-insensitive Unicode
+normalization as account email addresses, and duplicates are ignored. The entire
+submission is validated before any addresses are added. Addresses can be blocked
+before an account exists, and remain blocked after account deletion or recreation.
+
+Blocked addresses receive no reset emails or console reset links. Existing reset
+links also cannot be used while the address is blocked. Unblocking allows future
+recovery requests again; it does not send an email. Normal login, current-password
+changes, and manual administrative password replacement still work. Account
+creation continues to display a generated password without sending email.
+
+Recovery quotas are stored in SQLite and shared across workers and restarts:
+
+| Setting | Default quota |
+| --- | --- |
+| `SAML_IDP_RESET_IP_LIMIT` | 10 reset requests per source IP per 15 minutes |
+| `SAML_IDP_RESET_EMAIL_LIMIT` | 5 reset requests per normalized email address per hour |
+| `SAML_IDP_RESET_CONFIRM_LIMIT` | 20 reset completion attempts per source IP per 15 minutes |
+
+Email-limited requests still show the generic confirmation; IP-limited requests
+return HTTP 429 with `Retry-After`. Counts include unknown addresses and invalid
+submissions. Expired quotas are removed on subsequent recovery requests. Only
+HMAC keys, counts, and expiry times are stored in the quota table.
+
+By default, source IP means the direct connection's `REMOTE_ADDR`. Behind Caddy,
+set `SAML_IDP_TRUSTED_PROXIES` to the proxy's actual IP or dedicated subnet
+(comma separated) to use its `X-Forwarded-For` client addresses. Without this,
+clients behind the proxy share an IP quota. Forwarding headers from untrusted
+peers are ignored; do not trust arbitrary networks.
+
+Rebuild and recreate the container to apply this feature. The entrypoint runs
+the new quota-table migration automatically. For local development, run
+`just migrate` before starting the server. For console delivery, view links with
+`just logs idp` (Compose) or `docker logs django-idp` (standalone).
 
 ## Account commands
 
@@ -225,7 +341,8 @@ account explicitly with `idp_user set-admin USERNAME --enable`.
 All records are validated before writing. Any invalid record, duplicate,
 ambiguous identifier, or existing-account conflict rejects the whole import,
 without partial accounts or groups. Re-importing existing users is an error,
-not an update. Setup-link email delivery will be added with the recovery flow.
+not an update. Imported users can request a reset link from the login page;
+automatic setup-link email delivery remains pending.
 
 `python manage.py seed_demo` remains an optional lesson command. It creates eight
 sample users with individual random passwords, prints new credentials once,
@@ -358,6 +475,6 @@ With no SP metadata source, system checks emit a configuration warning; this
 does not prevent account bootstrap.
 
 Runtime configuration remains in `config/settings.py` and the shared Compose
-file. Known development secrets, pending login/recovery throttles, and the
+file. Known development secrets, pending login throttling, and the
 remaining session/SAML hardening in the plan must be addressed before using
 this example with real accounts outside a local teaching environment.

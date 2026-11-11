@@ -1,7 +1,8 @@
 {% extends "idp/base.html" %}
+{% load static %}
 {% block title %}Log in &middot; pygamlastan SAML IdP{% endblock %}
 {% block content %}
-<h1>Log in</h1>
+<h1 class="login-heading"><img src="{% get_static_prefix %}idp/login1.gif" width="269" height="154" alt="Log in"></h1>
 {% if pending %}
   <p>A Service Provider is requesting authentication. Sign in to continue.</p>
 {% endif %}
@@ -14,4 +15,5 @@
   <input id="id_password" name="password" type="password" autocomplete="current-password">
   <button type="submit">Sign in</button>
 </form>
+<p><a href="{% url 'idp:password_reset' %}">Forgot password?</a></p>
 {% endblock %}

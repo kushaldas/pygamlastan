@@ -1,0 +1,42 @@
+{% extends "idp/base.html" %}
+{% block title %}Blocked recovery emails | IdP admin{% endblock %}
+{% block content %}
+<main>
+  <p><a href="{% url 'idp_admin:users' %}">All accounts</a></p>
+  <h1 class="profile-heading">Blocked recovery emails</h1>
+  <p>Prevent password recovery for these addresses. No reset email or console reset link will be generated, and existing reset links cannot be used while an address is blocked.</p>
+  <p>You can block an address before an account exists. Account creation and sign-in still work, and administrators can replace passwords manually.</p>
+  {% for message in messages %}<p class="notice" role="status">{{ message }}</p>{% endfor %}
+  <form method="post" class="profile-form">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">Add blocked addresses</button>
+  </form>
+  <div class="table-scroll">
+    <table class="admin-table">
+      <caption>{{ page.paginator.count }} blocked address{{ page.paginator.count|pluralize:"es" }}</caption>
+      <thead><tr><th scope="col">Email address</th><th scope="col">Action</th></tr></thead>
+      <tbody>
+      {% for entry in page %}
+        <tr>
+          <td>{{ entry.email }}</td>
+          <td>
+            <form method="post" action="{% url 'idp_admin:blocked_email_remove' entry.pk %}">
+              {% csrf_token %}
+              <button type="submit" aria-label="Unblock {{ entry.email }}">Unblock</button>
+            </form>
+          </td>
+        </tr>
+      {% empty %}<tr><td colspan="2">No email addresses are blocked.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if page.has_other_pages %}
+  <nav class="admin-actions" aria-label="Blocked email pages">
+    {% if page.has_previous %}<a href="?page={{ page.previous_page_number }}">Previous</a>{% endif %}
+    <span>Page {{ page.number }} of {{ page.paginator.num_pages }}</span>
+    {% if page.has_next %}<a href="?page={{ page.next_page_number }}">Next</a>{% endif %}
+  </nav>
+  {% endif %}
+</main>
+{% endblock %}
